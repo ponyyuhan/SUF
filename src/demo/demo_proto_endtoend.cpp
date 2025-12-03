@@ -65,7 +65,7 @@ void demo_reluars() {
     ko.r_in_share = src.r_in_share;
     ko.r_hi_share = src.r_hi_share;
     ko.r_out_share = src.r_out_share;
-    ko.wrap_sign = src.wrap_sign;
+    ko.wrap_sign_share = src.wrap_sign_share;
     ko.dcf_hat_lt_r = src.dcf_hat_lt_r;
     ko.dcf_hat_lt_r_plus_2p63 = src.dcf_hat_lt_r_plus_2p63;
     ko.dcf_low_lt_r_low = src.dcf_low_lt_r_low;
@@ -119,7 +119,7 @@ void demo_gelu() {
     ko.d = src.params.d;
     ko.r_in_share = src.r_in_share;
     ko.r_out_share = src.r_out_share;
-    ko.wrap_sign = src.wrap_sign;
+    ko.wrap_sign_share = src.wrap_sign_share;
     ko.dcf_hat_lt_r = src.dcf_hat_lt_r;
     ko.dcf_hat_lt_r_plus_2p63 = src.dcf_hat_lt_r_plus_2p63;
     ko.base_coeff = src.base_coeff;

@@ -181,6 +181,19 @@ demo_proto_endtoend/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_endtoend.dir/build.make CMakeFiles/demo_proto_endtoend.dir/build
 .PHONY : demo_proto_endtoend/fast
 
+#=============================================================================
+# Target rules for targets named sim_harness
+
+# Build rule for target.
+sim_harness: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 sim_harness
+.PHONY : sim_harness
+
+# fast build rule for target.
+sim_harness/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sim_harness.dir/build.make CMakeFiles/sim_harness.dir/build
+.PHONY : sim_harness/fast
+
 src/demo/demo_gelu.o: src/demo/demo_gelu.cpp.o
 .PHONY : src/demo/demo_gelu.o
 
@@ -301,6 +314,30 @@ src/demo/demo_relu.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_relu.dir/build.make CMakeFiles/demo_relu.dir/src/demo/demo_relu.cpp.s
 .PHONY : src/demo/demo_relu.cpp.s
 
+src/demo/sim_harness.o: src/demo/sim_harness.cpp.o
+.PHONY : src/demo/sim_harness.o
+
+# target to build an object file
+src/demo/sim_harness.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sim_harness.dir/build.make CMakeFiles/sim_harness.dir/src/demo/sim_harness.cpp.o
+.PHONY : src/demo/sim_harness.cpp.o
+
+src/demo/sim_harness.i: src/demo/sim_harness.cpp.i
+.PHONY : src/demo/sim_harness.i
+
+# target to preprocess a source file
+src/demo/sim_harness.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sim_harness.dir/build.make CMakeFiles/sim_harness.dir/src/demo/sim_harness.cpp.i
+.PHONY : src/demo/sim_harness.cpp.i
+
+src/demo/sim_harness.s: src/demo/sim_harness.cpp.s
+.PHONY : src/demo/sim_harness.s
+
+# target to generate assembly for a file
+src/demo/sim_harness.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sim_harness.dir/build.make CMakeFiles/sim_harness.dir/src/demo/sim_harness.cpp.s
+.PHONY : src/demo/sim_harness.cpp.s
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -314,6 +351,7 @@ help:
 	@echo "... demo_proto_gelu"
 	@echo "... demo_proto_reluars"
 	@echo "... demo_relu"
+	@echo "... sim_harness"
 	@echo "... src/demo/demo_gelu.o"
 	@echo "... src/demo/demo_gelu.i"
 	@echo "... src/demo/demo_gelu.s"
@@ -329,6 +367,9 @@ help:
 	@echo "... src/demo/demo_relu.o"
 	@echo "... src/demo/demo_relu.i"
 	@echo "... src/demo/demo_relu.s"
+	@echo "... src/demo/sim_harness.o"
+	@echo "... src/demo/sim_harness.i"
+	@echo "... src/demo/sim_harness.s"
 .PHONY : help
 
 

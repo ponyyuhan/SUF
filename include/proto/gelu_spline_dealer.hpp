@@ -4,6 +4,7 @@
 #include "proto/pfss_backend.hpp"
 #include <algorithm>
 #include <vector>
+#include <span>
 
 namespace proto {
 
@@ -34,7 +35,7 @@ struct GeluSplinePartyKey {
   u64 r_in_share = 0;
   u64 r_out_share = 0;
 
-  bool wrap_sign = false;
+  u64 wrap_sign_share = 0; // additive share of wrap bit
   FssKey dcf_hat_lt_r;
   FssKey dcf_hat_lt_r_plus_2p63;
 
@@ -51,6 +52,25 @@ struct GeluSplineDealerOut {
   GeluSplinePartyKey k0;
   GeluSplinePartyKey k1;
 };
+
+// Write one instance to tape (step-DCF variant) in deterministic order:
+// [wrap_flag][r_in_share][r_out_share][k_hat_lt_r][k_hat_lt_r2][base_coeff vec][num_cuts cut_keys+delta][triples...]
+template<typename TapeW>
+inline void gelu_stepdcf_write_tape(const GeluSplinePartyKey& k, TapeW& tw) {
+  tw.write_u64(k.wrap_sign_share);
+  tw.write_u64(k.r_in_share);
+  tw.write_u64(k.r_out_share);
+  tw.write_bytes(k.dcf_hat_lt_r.bytes);
+  tw.write_bytes(k.dcf_hat_lt_r_plus_2p63.bytes);
+  tw.write_u64_vec(k.base_coeff);
+  tw.write_u64(static_cast<uint64_t>(k.cuts.size()));
+  for (const auto& c : k.cuts) {
+    tw.write_bytes(c.party0.dcf_key.bytes.empty() ? c.party1.dcf_key.bytes : c.party0.dcf_key.bytes);
+    tw.write_u64_vec(c.delta);
+  }
+  tw.template write_triple64_vec<BeaverTriple64Share>(
+      std::span<const BeaverTriple64Share>(k.triples64.data(), k.triples64.size()));
+}
 
 namespace gelu_internal {
 
@@ -129,8 +149,9 @@ public:
     u64 thr1 = r_in;
     u64 thr2 = r_in + TWO63;
     bool wrap = (thr2 < thr1);
-    out.k0.wrap_sign = wrap;
-    out.k1.wrap_sign = wrap;
+    auto [wrap0, wrap1] = dealer.split_add(wrap ? 1ull : 0ull);
+    out.k0.wrap_sign_share = wrap0;
+    out.k1.wrap_sign_share = wrap1;
     auto one_byte = std::vector<u8>{1u};
     auto thr1_bits = fss.u64_to_bits_msb(thr1, 64);
     auto thr2_bits = fss.u64_to_bits_msb(thr2, 64);

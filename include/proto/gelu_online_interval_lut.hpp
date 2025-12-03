@@ -16,7 +16,7 @@ struct GeluIntervalLutPartyKey {
   u64 r_in_share = 0;
   u64 r_out_share = 0;
 
-  bool wrap_sign = false;
+  u64 wrap_sign_share = 0; // additive share of wrap bit
   FssKey dcf_hat_lt_r;
   FssKey dcf_hat_lt_r_plus_2p63;
 
@@ -40,7 +40,8 @@ inline GeluOut eval_gelu_interval_lut_one(int party,
   u64 b = eval_u64_share_from_dcf(fss, 64, K.dcf_hat_lt_r_plus_2p63, hatx_public);
   u64 na = B.NOT(a);
   u64 u = B.AND(b, na);
-  u64 w = K.wrap_sign ? B.OR(na, b) : u;
+  u64 wrap_or = B.OR(na, b);
+  u64 w = B.SEL(K.wrap_sign_share, wrap_or, u);
 
   const u64 TWO63 = (1ull << 63);
   u64 hatx_bias = add_mod(hatx_public, TWO63);

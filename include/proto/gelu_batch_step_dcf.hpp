@@ -15,7 +15,7 @@ struct GeluStepDCFKeysPacked {
   size_t key_bytes_sign = 0;
   const uint8_t* k_hat_lt_r = nullptr;   // [N][key_bytes_sign]
   const uint8_t* k_hat_lt_r2 = nullptr;  // [N][key_bytes_sign]
-  const uint8_t* wrap_sign = nullptr;    // [N] bytes
+  const u64* wrap_sign_share = nullptr;    // [N] additive shares of wrap bit
 
   const u64* r_in_share = nullptr;       // [N]
   const u64* r_out_share = nullptr;      // [N]
@@ -67,8 +67,8 @@ inline void gelu_eval_batch_step_dcf(
   for (size_t i = 0; i < N; i++) na[i] = sub_mod((party == 0) ? 1ULL : 0ULL, a[i]);
   mul.mul_batch(b, na, u);
   for (size_t i = 0; i < N; i++) {
-    bool wrap = (K.wrap_sign[i] != 0);
-    w[i] = wrap ? sub_mod(add_mod(na[i], b[i]), u[i]) : u[i];
+    u64 wrap_or = sub_mod(add_mod(na[i], b[i]), u[i]); // OR form
+    w[i] = B.SEL(K.wrap_sign_share[i], wrap_or, u[i]);
   }
 
   std::vector<u64> coeff(N * (K.d + 1), 0);

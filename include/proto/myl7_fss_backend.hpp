@@ -4,6 +4,7 @@
 #include "proto/common.hpp"
 #include <unordered_map>
 #include <stdexcept>
+#include <array>
 
 namespace proto {
 
@@ -33,12 +34,15 @@ public:
     Program p;
     p.in_bits = in_bits;
     p.alpha_bits = alpha_bits;
-    p.payload = payload_bytes;
+    p.payload[0] = payload_bytes;
+    p.payload[1] = std::vector<u8>(payload_bytes.size(), 0u);
     u64 id = next_id_++;
     programs_[id] = std::move(p);
     DcfKeyPair kp;
-    kp.k0.bytes = pack_u64_le(id);
-    kp.k1.bytes = pack_u64_le(id);
+    u64 kid0 = (id << 1);
+    u64 kid1 = (id << 1) | 1ull;
+    kp.k0.bytes = pack_u64_le(kid0);
+    kp.k1.bytes = pack_u64_le(kid1);
     return kp;
   }
 
@@ -48,8 +52,7 @@ public:
     if (x_bits.size() != static_cast<size_t>(in_bits)) {
       throw std::runtime_error("eval_dcf: x_bits size mismatch");
     }
-    if (kb.bytes.size() < 8) throw std::runtime_error("eval_dcf: key truncated");
-    u64 id = unpack_u64_le(kb.bytes.data());
+    auto [id, party] = decode_key(kb);
     auto it = programs_.find(id);
     if (it == programs_.end()) throw std::runtime_error("eval_dcf: unknown key id");
     const auto& p = it->second;
@@ -62,9 +65,8 @@ public:
       if (xb < ab) { lt = true; break; }
       if (xb > ab) { lt = false; break; }
     }
-    // payload if x<alpha else 0
-    if (lt) return p.payload;
-    return std::vector<u8>(p.payload.size(), 0u);
+    if (lt) return p.payload[static_cast<size_t>(party)];
+    return std::vector<u8>(p.payload[static_cast<size_t>(party)].size(), 0u);
   }
 
 private:
@@ -73,11 +75,19 @@ private:
   struct Program {
     int in_bits;
     std::vector<u8> alpha_bits;
-    std::vector<u8> payload;
+    std::array<std::vector<u8>, 2> payload;
   };
 
   mutable std::unordered_map<u64, Program> programs_;
   u64 next_id_ = 1;
+
+  std::pair<u64, int> decode_key(const FssKey& kb) const {
+    if (kb.bytes.size() < 8) throw std::runtime_error("eval_dcf: key truncated");
+    u64 kid = unpack_u64_le(kb.bytes.data());
+    u64 id = kid >> 1;
+    int party = static_cast<int>(kid & 1ull);
+    return {id, party};
+  }
 };
 
 }  // namespace proto

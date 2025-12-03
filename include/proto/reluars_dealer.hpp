@@ -2,6 +2,7 @@
 
 #include "proto/beaver.hpp"
 #include "proto/pfss_backend.hpp"
+#include <span>
 
 namespace proto {
 
@@ -16,7 +17,7 @@ struct ReluARSPartyKey {
   u64 r_hi_share = 0;    // (r_in >> f) share
   u64 r_out_share = 0;
 
-  bool wrap_sign = false;
+  u64 wrap_sign_share = 0; // additive share of wrap bit
   bool wrap_half = false;
 
   FssKey dcf_hat_lt_r;
@@ -34,6 +35,8 @@ struct ReluARSDealerOut {
   ReluARSPartyKey k0;
   ReluARSPartyKey k1;
 };
+
+inline constexpr size_t reluars_triples64_needed() { return 12; }
 
 class ReluARSDealer {
 public:
@@ -64,8 +67,9 @@ public:
     u64 thr1 = r_in;           // r
     u64 thr2 = r_in + TWO63;   // r + 2^63 (wraps automatically)
     bool wrap = (thr2 < thr1);
-    out.k0.wrap_sign = wrap;
-    out.k1.wrap_sign = wrap;
+    auto [wrap0, wrap1] = dealer.split_add(wrap ? 1ull : 0ull);
+    out.k0.wrap_sign_share = wrap0;
+    out.k1.wrap_sign_share = wrap1;
 
     auto one_byte = std::vector<u8>{1u};
 
@@ -95,7 +99,7 @@ public:
     out.k1.dcf_low_lt_r_low_plus1 = kpd.k1;
 
     // 3) Beaver triples (conservative counts)
-    const int need_triples64 = 16;
+    const int need_triples64 = static_cast<int>(reluars_triples64_needed());
     const int need_triplesBit = 32;
 
     out.k0.triples64.reserve(need_triples64);
@@ -117,5 +121,21 @@ public:
     return out;
   }
 };
+
+// Tape order (per instance, per party):
+// [wrap_flag][r_in][r_hi][r_out][k_hat_lt_r][k_hat_lt_r2][k_low_lt_r_low][k_low_lt_r_low+1][triples64 vec]
+template<typename TapeW>
+inline void reluars_write_tape(const ReluARSPartyKey& k, TapeW& tw) {
+  tw.write_u64(k.wrap_sign_share);
+  tw.write_u64(k.r_in_share);
+  tw.write_u64(k.r_hi_share);
+  tw.write_u64(k.r_out_share);
+  tw.write_bytes(k.dcf_hat_lt_r.bytes);
+  tw.write_bytes(k.dcf_hat_lt_r_plus_2p63.bytes);
+  tw.write_bytes(k.dcf_low_lt_r_low.bytes);
+  tw.write_bytes(k.dcf_low_lt_r_low_plus1.bytes);
+  tw.template write_triple64_vec<BeaverTriple64Share>(
+      std::span<const BeaverTriple64Share>(k.triples64.data(), k.triples64.size()));
+}
 
 }  // namespace proto

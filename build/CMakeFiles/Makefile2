@@ -68,6 +68,7 @@ all: CMakeFiles/demo_gelu.dir/all
 all: CMakeFiles/demo_proto_reluars.dir/all
 all: CMakeFiles/demo_proto_gelu.dir/all
 all: CMakeFiles/demo_proto_endtoend.dir/all
+all: CMakeFiles/sim_harness.dir/all
 .PHONY : all
 
 # The main recursive "preinstall" target.
@@ -80,6 +81,7 @@ clean: CMakeFiles/demo_gelu.dir/clean
 clean: CMakeFiles/demo_proto_reluars.dir/clean
 clean: CMakeFiles/demo_proto_gelu.dir/clean
 clean: CMakeFiles/demo_proto_endtoend.dir/clean
+clean: CMakeFiles/sim_harness.dir/clean
 .PHONY : clean
 
 #=============================================================================
@@ -211,6 +213,32 @@ demo_proto_endtoend: CMakeFiles/demo_proto_endtoend.dir/rule
 CMakeFiles/demo_proto_endtoend.dir/clean:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_endtoend.dir/build.make CMakeFiles/demo_proto_endtoend.dir/clean
 .PHONY : CMakeFiles/demo_proto_endtoend.dir/clean
+
+#=============================================================================
+# Target rules for target CMakeFiles/sim_harness.dir
+
+# All Build rule for target.
+CMakeFiles/sim_harness.dir/all:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sim_harness.dir/build.make CMakeFiles/sim_harness.dir/depend
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sim_harness.dir/build.make CMakeFiles/sim_harness.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/SUF/SUF/build/CMakeFiles --progress-num=11,12 "Built target sim_harness"
+.PHONY : CMakeFiles/sim_harness.dir/all
+
+# Build rule for subdir invocation for target.
+CMakeFiles/sim_harness.dir/rule: cmake_check_build_system
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/yuhan/SUF/SUF/build/CMakeFiles 2
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/sim_harness.dir/all
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/yuhan/SUF/SUF/build/CMakeFiles 0
+.PHONY : CMakeFiles/sim_harness.dir/rule
+
+# Convenience name for target.
+sim_harness: CMakeFiles/sim_harness.dir/rule
+.PHONY : sim_harness
+
+# clean rule for target.
+CMakeFiles/sim_harness.dir/clean:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/sim_harness.dir/build.make CMakeFiles/sim_harness.dir/clean
+.PHONY : CMakeFiles/sim_harness.dir/clean
 
 #=============================================================================
 # Special targets to cleanup operation of make.
