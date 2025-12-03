@@ -43,4 +43,5 @@ set(CMAKE_DEPEND_INFO_FILES
   "CMakeFiles/demo_gelu.dir/DependInfo.cmake"
   "CMakeFiles/demo_proto_reluars.dir/DependInfo.cmake"
   "CMakeFiles/demo_proto_gelu.dir/DependInfo.cmake"
+  "CMakeFiles/demo_proto_endtoend.dir/DependInfo.cmake"
   )

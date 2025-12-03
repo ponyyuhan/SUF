@@ -34,6 +34,11 @@ struct GeluSplinePartyKey {
   u64 r_in_share = 0;
   u64 r_out_share = 0;
 
+  bool wrap_sign = false;
+  FssKey dcf_hat_lt_r;
+  FssKey dcf_hat_lt_r_plus_2p63;
+
+  std::vector<u64> base_coeff;  // length d+1
   std::vector<StepCut> cuts;
 
   std::vector<BeaverTriple64Share> triples64;
@@ -119,6 +124,23 @@ public:
     out.k0.r_out_share = r_out0;
     out.k1.r_out_share = r_out1;
 
+    // sign comparisons for x^+
+    const u64 TWO63 = (u64(1) << 63);
+    u64 thr1 = r_in;
+    u64 thr2 = r_in + TWO63;
+    bool wrap = (thr2 < thr1);
+    out.k0.wrap_sign = wrap;
+    out.k1.wrap_sign = wrap;
+    auto one_byte = std::vector<u8>{1u};
+    auto thr1_bits = fss.u64_to_bits_msb(thr1, 64);
+    auto thr2_bits = fss.u64_to_bits_msb(thr2, 64);
+    auto kp1 = fss.gen_dcf(64, thr1_bits, one_byte);
+    auto kp2 = fss.gen_dcf(64, thr2_bits, one_byte);
+    out.k0.dcf_hat_lt_r = kp1.k0;
+    out.k1.dcf_hat_lt_r = kp1.k1;
+    out.k0.dcf_hat_lt_r_plus_2p63 = kp2.k0;
+    out.k1.dcf_hat_lt_r_plus_2p63 = kp2.k1;
+
     // 2) Build piecewise δ(x) coefficient vectors in biased domain.
     std::vector<u64> boundaries;
     boundaries.reserve(p.a.size() + 2);
@@ -141,8 +163,10 @@ public:
       throw std::runtime_error("expected segment starting at 0 after rotate/split");
     }
 
-    // base v0 = segs[0].v, used implicitly by party0
+    // base v0 = segs[0].v
     const std::vector<u64> v0 = segs[0].v;
+    out.k0.base_coeff = v0;
+    out.k1.base_coeff = v0;
 
     out.k0.cuts.clear();
     out.k1.cuts.clear();

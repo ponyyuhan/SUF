@@ -13,6 +13,7 @@ struct ReluARSParams {
 // DCF program handles and mask shares for one party.
 struct ReluARSPartyKey {
   u64 r_in_share = 0;
+  u64 r_hi_share = 0;    // (r_in >> f) share
   u64 r_out_share = 0;
 
   bool wrap_sign = false;
@@ -47,12 +48,16 @@ public:
     u64 r_out = dealer.rng.rand_u64();
 
     auto [r_in0, r_in1] = dealer.split_add(r_in);
+    u64 r_hi = (p.f >= 64) ? 0 : (r_in >> p.f);
+    auto [r_hi0, r_hi1] = dealer.split_add(r_hi);
     auto [r_out0, r_out1] = dealer.split_add(r_out);
 
     out.k0.r_in_share = r_in0;
     out.k1.r_in_share = r_in1;
     out.k0.r_out_share = r_out0;
     out.k1.r_out_share = r_out1;
+    out.k0.r_hi_share = r_hi0;
+    out.k1.r_hi_share = r_hi1;
 
     // 2) Program DCFs for helper bits on public hatx.
     const u64 TWO63 = (u64(1) << 63);

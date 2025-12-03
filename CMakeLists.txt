@@ -19,3 +19,10 @@ target_include_directories(demo_proto_reluars PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 
 add_executable(demo_proto_gelu src/demo/demo_proto_gelu.cpp)
 target_include_directories(demo_proto_gelu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+add_executable(demo_proto_endtoend src/demo/demo_proto_endtoend.cpp)
+target_include_directories(demo_proto_endtoend PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+add_executable(sim_harness src/demo/sim_harness.cpp)
+target_include_directories(sim_harness PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+set_property(TARGET sim_harness PROPERTY CXX_STANDARD 20)

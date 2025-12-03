@@ -2,5 +2,6 @@
 /home/yuhan/SUF/SUF/build/CMakeFiles/demo_gelu.dir
 /home/yuhan/SUF/SUF/build/CMakeFiles/demo_proto_reluars.dir
 /home/yuhan/SUF/SUF/build/CMakeFiles/demo_proto_gelu.dir
+/home/yuhan/SUF/SUF/build/CMakeFiles/demo_proto_endtoend.dir
 /home/yuhan/SUF/SUF/build/CMakeFiles/edit_cache.dir
 /home/yuhan/SUF/SUF/build/CMakeFiles/rebuild_cache.dir

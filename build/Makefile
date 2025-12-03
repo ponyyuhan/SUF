@@ -168,6 +168,19 @@ demo_proto_gelu/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_gelu.dir/build.make CMakeFiles/demo_proto_gelu.dir/build
 .PHONY : demo_proto_gelu/fast
 
+#=============================================================================
+# Target rules for targets named demo_proto_endtoend
+
+# Build rule for target.
+demo_proto_endtoend: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 demo_proto_endtoend
+.PHONY : demo_proto_endtoend
+
+# fast build rule for target.
+demo_proto_endtoend/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_endtoend.dir/build.make CMakeFiles/demo_proto_endtoend.dir/build
+.PHONY : demo_proto_endtoend/fast
+
 src/demo/demo_gelu.o: src/demo/demo_gelu.cpp.o
 .PHONY : src/demo/demo_gelu.o
 
@@ -191,6 +204,30 @@ src/demo/demo_gelu.s: src/demo/demo_gelu.cpp.s
 src/demo/demo_gelu.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_gelu.dir/build.make CMakeFiles/demo_gelu.dir/src/demo/demo_gelu.cpp.s
 .PHONY : src/demo/demo_gelu.cpp.s
+
+src/demo/demo_proto_endtoend.o: src/demo/demo_proto_endtoend.cpp.o
+.PHONY : src/demo/demo_proto_endtoend.o
+
+# target to build an object file
+src/demo/demo_proto_endtoend.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_endtoend.dir/build.make CMakeFiles/demo_proto_endtoend.dir/src/demo/demo_proto_endtoend.cpp.o
+.PHONY : src/demo/demo_proto_endtoend.cpp.o
+
+src/demo/demo_proto_endtoend.i: src/demo/demo_proto_endtoend.cpp.i
+.PHONY : src/demo/demo_proto_endtoend.i
+
+# target to preprocess a source file
+src/demo/demo_proto_endtoend.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_endtoend.dir/build.make CMakeFiles/demo_proto_endtoend.dir/src/demo/demo_proto_endtoend.cpp.i
+.PHONY : src/demo/demo_proto_endtoend.cpp.i
+
+src/demo/demo_proto_endtoend.s: src/demo/demo_proto_endtoend.cpp.s
+.PHONY : src/demo/demo_proto_endtoend.s
+
+# target to generate assembly for a file
+src/demo/demo_proto_endtoend.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_endtoend.dir/build.make CMakeFiles/demo_proto_endtoend.dir/src/demo/demo_proto_endtoend.cpp.s
+.PHONY : src/demo/demo_proto_endtoend.cpp.s
 
 src/demo/demo_proto_gelu.o: src/demo/demo_proto_gelu.cpp.o
 .PHONY : src/demo/demo_proto_gelu.o
@@ -273,12 +310,16 @@ help:
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
 	@echo "... demo_gelu"
+	@echo "... demo_proto_endtoend"
 	@echo "... demo_proto_gelu"
 	@echo "... demo_proto_reluars"
 	@echo "... demo_relu"
 	@echo "... src/demo/demo_gelu.o"
 	@echo "... src/demo/demo_gelu.i"
 	@echo "... src/demo/demo_gelu.s"
+	@echo "... src/demo/demo_proto_endtoend.o"
+	@echo "... src/demo/demo_proto_endtoend.i"
+	@echo "... src/demo/demo_proto_endtoend.s"
 	@echo "... src/demo/demo_proto_gelu.o"
 	@echo "... src/demo/demo_proto_gelu.i"
 	@echo "... src/demo/demo_proto_gelu.s"
