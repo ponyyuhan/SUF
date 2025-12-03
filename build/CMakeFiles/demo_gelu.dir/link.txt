@@ -1,0 +1,1 @@
+/usr/bin/c++ CMakeFiles/demo_gelu.dir/src/demo/demo_gelu.cpp.o -o demo_gelu 

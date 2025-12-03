@@ -1,0 +1,4 @@
+/home/yuhan/SUF/SUF/build/CMakeFiles/demo_relu.dir
+/home/yuhan/SUF/SUF/build/CMakeFiles/demo_gelu.dir
+/home/yuhan/SUF/SUF/build/CMakeFiles/edit_cache.dir
+/home/yuhan/SUF/SUF/build/CMakeFiles/rebuild_cache.dir
