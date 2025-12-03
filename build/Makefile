@@ -85,6 +85,51 @@ rebuild_cache:
 rebuild_cache/fast: rebuild_cache
 .PHONY : rebuild_cache/fast
 
+# Special rule for the target list_install_components
+list_install_components:
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --cyan "Available install components are: \"gmock\" \"gtest\""
+.PHONY : list_install_components
+
+# Special rule for the target list_install_components
+list_install_components/fast: list_install_components
+.PHONY : list_install_components/fast
+
+# Special rule for the target install
+install: preinstall
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --cyan "Install the project..."
+	/usr/bin/cmake -P cmake_install.cmake
+.PHONY : install
+
+# Special rule for the target install
+install/fast: preinstall/fast
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --cyan "Install the project..."
+	/usr/bin/cmake -P cmake_install.cmake
+.PHONY : install/fast
+
+# Special rule for the target install/local
+install/local: preinstall
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --cyan "Installing only the local directory..."
+	/usr/bin/cmake -DCMAKE_INSTALL_LOCAL_ONLY=1 -P cmake_install.cmake
+.PHONY : install/local
+
+# Special rule for the target install/local
+install/local/fast: preinstall/fast
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --cyan "Installing only the local directory..."
+	/usr/bin/cmake -DCMAKE_INSTALL_LOCAL_ONLY=1 -P cmake_install.cmake
+.PHONY : install/local/fast
+
+# Special rule for the target install/strip
+install/strip: preinstall
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --cyan "Installing the project stripped..."
+	/usr/bin/cmake -DCMAKE_INSTALL_DO_STRIP=1 -P cmake_install.cmake
+.PHONY : install/strip
+
+# Special rule for the target install/strip
+install/strip/fast: preinstall/fast
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --cyan "Installing the project stripped..."
+	/usr/bin/cmake -DCMAKE_INSTALL_DO_STRIP=1 -P cmake_install.cmake
+.PHONY : install/strip/fast
+
 # The main all target
 all: cmake_check_build_system
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/yuhan/SUF/SUF/build/CMakeFiles /home/yuhan/SUF/SUF/build//CMakeFiles/progress.marks
@@ -115,71 +160,6 @@ preinstall/fast:
 depend:
 	$(CMAKE_COMMAND) -S$(CMAKE_SOURCE_DIR) -B$(CMAKE_BINARY_DIR) --check-build-system CMakeFiles/Makefile.cmake 1
 .PHONY : depend
-
-#=============================================================================
-# Target rules for targets named demo_relu
-
-# Build rule for target.
-demo_relu: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 demo_relu
-.PHONY : demo_relu
-
-# fast build rule for target.
-demo_relu/fast:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_relu.dir/build.make CMakeFiles/demo_relu.dir/build
-.PHONY : demo_relu/fast
-
-#=============================================================================
-# Target rules for targets named demo_gelu
-
-# Build rule for target.
-demo_gelu: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 demo_gelu
-.PHONY : demo_gelu
-
-# fast build rule for target.
-demo_gelu/fast:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_gelu.dir/build.make CMakeFiles/demo_gelu.dir/build
-.PHONY : demo_gelu/fast
-
-#=============================================================================
-# Target rules for targets named demo_proto_reluars
-
-# Build rule for target.
-demo_proto_reluars: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 demo_proto_reluars
-.PHONY : demo_proto_reluars
-
-# fast build rule for target.
-demo_proto_reluars/fast:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_reluars.dir/build.make CMakeFiles/demo_proto_reluars.dir/build
-.PHONY : demo_proto_reluars/fast
-
-#=============================================================================
-# Target rules for targets named demo_proto_gelu
-
-# Build rule for target.
-demo_proto_gelu: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 demo_proto_gelu
-.PHONY : demo_proto_gelu
-
-# fast build rule for target.
-demo_proto_gelu/fast:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_gelu.dir/build.make CMakeFiles/demo_proto_gelu.dir/build
-.PHONY : demo_proto_gelu/fast
-
-#=============================================================================
-# Target rules for targets named demo_proto_endtoend
-
-# Build rule for target.
-demo_proto_endtoend: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 demo_proto_endtoend
-.PHONY : demo_proto_endtoend
-
-# fast build rule for target.
-demo_proto_endtoend/fast:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_endtoend.dir/build.make CMakeFiles/demo_proto_endtoend.dir/build
-.PHONY : demo_proto_endtoend/fast
 
 #=============================================================================
 # Target rules for targets named sim_harness
@@ -220,125 +200,263 @@ test_mask_rewrite/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_mask_rewrite.dir/build.make CMakeFiles/test_mask_rewrite.dir/build
 .PHONY : test_mask_rewrite/fast
 
-src/demo/demo_gelu.o: src/demo/demo_gelu.cpp.o
-.PHONY : src/demo/demo_gelu.o
+#=============================================================================
+# Target rules for targets named test_compile_pfss
+
+# Build rule for target.
+test_compile_pfss: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_compile_pfss
+.PHONY : test_compile_pfss
+
+# fast build rule for target.
+test_compile_pfss/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_compile_pfss.dir/build.make CMakeFiles/test_compile_pfss.dir/build
+.PHONY : test_compile_pfss/fast
+
+#=============================================================================
+# Target rules for targets named dpf
+
+# Build rule for target.
+dpf: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 dpf
+.PHONY : dpf
+
+# fast build rule for target.
+dpf/fast:
+	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/dpf.dir/build.make _deps/myl7_fss-build/CMakeFiles/dpf.dir/build
+.PHONY : dpf/fast
+
+#=============================================================================
+# Target rules for targets named dcf
+
+# Build rule for target.
+dcf: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 dcf
+.PHONY : dcf
+
+# fast build rule for target.
+dcf/fast:
+	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/dcf.dir/build.make _deps/myl7_fss-build/CMakeFiles/dcf.dir/build
+.PHONY : dcf/fast
+
+#=============================================================================
+# Target rules for targets named cw_mac_bytes
+
+# Build rule for target.
+cw_mac_bytes: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 cw_mac_bytes
+.PHONY : cw_mac_bytes
+
+# fast build rule for target.
+cw_mac_bytes/fast:
+	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/cw_mac_bytes.dir/build.make _deps/myl7_fss-build/CMakeFiles/cw_mac_bytes.dir/build
+.PHONY : cw_mac_bytes/fast
+
+#=============================================================================
+# Target rules for targets named dpf_u128_le_test
+
+# Build rule for target.
+dpf_u128_le_test: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 dpf_u128_le_test
+.PHONY : dpf_u128_le_test
+
+# fast build rule for target.
+dpf_u128_le_test/fast:
+	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/dpf_u128_le_test.dir/build.make _deps/myl7_fss-build/CMakeFiles/dpf_u128_le_test.dir/build
+.PHONY : dpf_u128_le_test/fast
+
+#=============================================================================
+# Target rules for targets named dpf_bytes_test
+
+# Build rule for target.
+dpf_bytes_test: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 dpf_bytes_test
+.PHONY : dpf_bytes_test
+
+# fast build rule for target.
+dpf_bytes_test/fast:
+	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/dpf_bytes_test.dir/build.make _deps/myl7_fss-build/CMakeFiles/dpf_bytes_test.dir/build
+.PHONY : dpf_bytes_test/fast
+
+#=============================================================================
+# Target rules for targets named dcf_u128_le_test
+
+# Build rule for target.
+dcf_u128_le_test: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 dcf_u128_le_test
+.PHONY : dcf_u128_le_test
+
+# fast build rule for target.
+dcf_u128_le_test/fast:
+	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/dcf_u128_le_test.dir/build.make _deps/myl7_fss-build/CMakeFiles/dcf_u128_le_test.dir/build
+.PHONY : dcf_u128_le_test/fast
+
+#=============================================================================
+# Target rules for targets named dcf_bytes_test
+
+# Build rule for target.
+dcf_bytes_test: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 dcf_bytes_test
+.PHONY : dcf_bytes_test
+
+# fast build rule for target.
+dcf_bytes_test/fast:
+	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/dcf_bytes_test.dir/build.make _deps/myl7_fss-build/CMakeFiles/dcf_bytes_test.dir/build
+.PHONY : dcf_bytes_test/fast
+
+#=============================================================================
+# Target rules for targets named cw_mac_bytes_test
+
+# Build rule for target.
+cw_mac_bytes_test: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 cw_mac_bytes_test
+.PHONY : cw_mac_bytes_test
+
+# fast build rule for target.
+cw_mac_bytes_test/fast:
+	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/cw_mac_bytes_test.dir/build.make _deps/myl7_fss-build/CMakeFiles/cw_mac_bytes_test.dir/build
+.PHONY : cw_mac_bytes_test/fast
+
+#=============================================================================
+# Target rules for targets named dpf_cuda
+
+# Build rule for target.
+dpf_cuda: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 dpf_cuda
+.PHONY : dpf_cuda
+
+# fast build rule for target.
+dpf_cuda/fast:
+	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/dpf_cuda.dir/build.make _deps/myl7_fss-build/CMakeFiles/dpf_cuda.dir/build
+.PHONY : dpf_cuda/fast
+
+#=============================================================================
+# Target rules for targets named sample_dpf_u128_le_aes_mmo
+
+# Build rule for target.
+sample_dpf_u128_le_aes_mmo: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 sample_dpf_u128_le_aes_mmo
+.PHONY : sample_dpf_u128_le_aes_mmo
+
+# fast build rule for target.
+sample_dpf_u128_le_aes_mmo/fast:
+	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/sample_dpf_u128_le_aes_mmo.dir/build.make _deps/myl7_fss-build/CMakeFiles/sample_dpf_u128_le_aes_mmo.dir/build
+.PHONY : sample_dpf_u128_le_aes_mmo/fast
+
+#=============================================================================
+# Target rules for targets named sample_dpf_u128_le_aes_mmo_ni
+
+# Build rule for target.
+sample_dpf_u128_le_aes_mmo_ni: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 sample_dpf_u128_le_aes_mmo_ni
+.PHONY : sample_dpf_u128_le_aes_mmo_ni
+
+# fast build rule for target.
+sample_dpf_u128_le_aes_mmo_ni/fast:
+	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/sample_dpf_u128_le_aes_mmo_ni.dir/build.make _deps/myl7_fss-build/CMakeFiles/sample_dpf_u128_le_aes_mmo_ni.dir/build
+.PHONY : sample_dpf_u128_le_aes_mmo_ni/fast
+
+#=============================================================================
+# Target rules for targets named sample_dpf_full_domain_u128_le_aes_mmo_ni
+
+# Build rule for target.
+sample_dpf_full_domain_u128_le_aes_mmo_ni: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 sample_dpf_full_domain_u128_le_aes_mmo_ni
+.PHONY : sample_dpf_full_domain_u128_le_aes_mmo_ni
+
+# fast build rule for target.
+sample_dpf_full_domain_u128_le_aes_mmo_ni/fast:
+	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/sample_dpf_full_domain_u128_le_aes_mmo_ni.dir/build.make _deps/myl7_fss-build/CMakeFiles/sample_dpf_full_domain_u128_le_aes_mmo_ni.dir/build
+.PHONY : sample_dpf_full_domain_u128_le_aes_mmo_ni/fast
+
+#=============================================================================
+# Target rules for targets named sample_dpf_cuda_u128_le_salsa20
+
+# Build rule for target.
+sample_dpf_cuda_u128_le_salsa20: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 sample_dpf_cuda_u128_le_salsa20
+.PHONY : sample_dpf_cuda_u128_le_salsa20
+
+# fast build rule for target.
+sample_dpf_cuda_u128_le_salsa20/fast:
+	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/sample_dpf_cuda_u128_le_salsa20.dir/build.make _deps/myl7_fss-build/CMakeFiles/sample_dpf_cuda_u128_le_salsa20.dir/build
+.PHONY : sample_dpf_cuda_u128_le_salsa20/fast
+
+#=============================================================================
+# Target rules for targets named gmock
+
+# Build rule for target.
+gmock: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 gmock
+.PHONY : gmock
+
+# fast build rule for target.
+gmock/fast:
+	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/third_party/googletest/googlemock/CMakeFiles/gmock.dir/build.make _deps/myl7_fss-build/third_party/googletest/googlemock/CMakeFiles/gmock.dir/build
+.PHONY : gmock/fast
+
+#=============================================================================
+# Target rules for targets named gmock_main
+
+# Build rule for target.
+gmock_main: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 gmock_main
+.PHONY : gmock_main
+
+# fast build rule for target.
+gmock_main/fast:
+	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/third_party/googletest/googlemock/CMakeFiles/gmock_main.dir/build.make _deps/myl7_fss-build/third_party/googletest/googlemock/CMakeFiles/gmock_main.dir/build
+.PHONY : gmock_main/fast
+
+#=============================================================================
+# Target rules for targets named gtest
+
+# Build rule for target.
+gtest: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 gtest
+.PHONY : gtest
+
+# fast build rule for target.
+gtest/fast:
+	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/third_party/googletest/googletest/CMakeFiles/gtest.dir/build.make _deps/myl7_fss-build/third_party/googletest/googletest/CMakeFiles/gtest.dir/build
+.PHONY : gtest/fast
+
+#=============================================================================
+# Target rules for targets named gtest_main
+
+# Build rule for target.
+gtest_main: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 gtest_main
+.PHONY : gtest_main
+
+# fast build rule for target.
+gtest_main/fast:
+	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/third_party/googletest/googletest/CMakeFiles/gtest_main.dir/build.make _deps/myl7_fss-build/third_party/googletest/googletest/CMakeFiles/gtest_main.dir/build
+.PHONY : gtest_main/fast
+
+src/compiler/suf_to_pfss.o: src/compiler/suf_to_pfss.cpp.o
+.PHONY : src/compiler/suf_to_pfss.o
 
 # target to build an object file
-src/demo/demo_gelu.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_gelu.dir/build.make CMakeFiles/demo_gelu.dir/src/demo/demo_gelu.cpp.o
-.PHONY : src/demo/demo_gelu.cpp.o
+src/compiler/suf_to_pfss.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_compile_pfss.dir/build.make CMakeFiles/test_compile_pfss.dir/src/compiler/suf_to_pfss.cpp.o
+.PHONY : src/compiler/suf_to_pfss.cpp.o
 
-src/demo/demo_gelu.i: src/demo/demo_gelu.cpp.i
-.PHONY : src/demo/demo_gelu.i
-
-# target to preprocess a source file
-src/demo/demo_gelu.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_gelu.dir/build.make CMakeFiles/demo_gelu.dir/src/demo/demo_gelu.cpp.i
-.PHONY : src/demo/demo_gelu.cpp.i
-
-src/demo/demo_gelu.s: src/demo/demo_gelu.cpp.s
-.PHONY : src/demo/demo_gelu.s
-
-# target to generate assembly for a file
-src/demo/demo_gelu.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_gelu.dir/build.make CMakeFiles/demo_gelu.dir/src/demo/demo_gelu.cpp.s
-.PHONY : src/demo/demo_gelu.cpp.s
-
-src/demo/demo_proto_endtoend.o: src/demo/demo_proto_endtoend.cpp.o
-.PHONY : src/demo/demo_proto_endtoend.o
-
-# target to build an object file
-src/demo/demo_proto_endtoend.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_endtoend.dir/build.make CMakeFiles/demo_proto_endtoend.dir/src/demo/demo_proto_endtoend.cpp.o
-.PHONY : src/demo/demo_proto_endtoend.cpp.o
-
-src/demo/demo_proto_endtoend.i: src/demo/demo_proto_endtoend.cpp.i
-.PHONY : src/demo/demo_proto_endtoend.i
+src/compiler/suf_to_pfss.i: src/compiler/suf_to_pfss.cpp.i
+.PHONY : src/compiler/suf_to_pfss.i
 
 # target to preprocess a source file
-src/demo/demo_proto_endtoend.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_endtoend.dir/build.make CMakeFiles/demo_proto_endtoend.dir/src/demo/demo_proto_endtoend.cpp.i
-.PHONY : src/demo/demo_proto_endtoend.cpp.i
+src/compiler/suf_to_pfss.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_compile_pfss.dir/build.make CMakeFiles/test_compile_pfss.dir/src/compiler/suf_to_pfss.cpp.i
+.PHONY : src/compiler/suf_to_pfss.cpp.i
 
-src/demo/demo_proto_endtoend.s: src/demo/demo_proto_endtoend.cpp.s
-.PHONY : src/demo/demo_proto_endtoend.s
-
-# target to generate assembly for a file
-src/demo/demo_proto_endtoend.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_endtoend.dir/build.make CMakeFiles/demo_proto_endtoend.dir/src/demo/demo_proto_endtoend.cpp.s
-.PHONY : src/demo/demo_proto_endtoend.cpp.s
-
-src/demo/demo_proto_gelu.o: src/demo/demo_proto_gelu.cpp.o
-.PHONY : src/demo/demo_proto_gelu.o
-
-# target to build an object file
-src/demo/demo_proto_gelu.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_gelu.dir/build.make CMakeFiles/demo_proto_gelu.dir/src/demo/demo_proto_gelu.cpp.o
-.PHONY : src/demo/demo_proto_gelu.cpp.o
-
-src/demo/demo_proto_gelu.i: src/demo/demo_proto_gelu.cpp.i
-.PHONY : src/demo/demo_proto_gelu.i
-
-# target to preprocess a source file
-src/demo/demo_proto_gelu.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_gelu.dir/build.make CMakeFiles/demo_proto_gelu.dir/src/demo/demo_proto_gelu.cpp.i
-.PHONY : src/demo/demo_proto_gelu.cpp.i
-
-src/demo/demo_proto_gelu.s: src/demo/demo_proto_gelu.cpp.s
-.PHONY : src/demo/demo_proto_gelu.s
+src/compiler/suf_to_pfss.s: src/compiler/suf_to_pfss.cpp.s
+.PHONY : src/compiler/suf_to_pfss.s
 
 # target to generate assembly for a file
-src/demo/demo_proto_gelu.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_gelu.dir/build.make CMakeFiles/demo_proto_gelu.dir/src/demo/demo_proto_gelu.cpp.s
-.PHONY : src/demo/demo_proto_gelu.cpp.s
-
-src/demo/demo_proto_reluars.o: src/demo/demo_proto_reluars.cpp.o
-.PHONY : src/demo/demo_proto_reluars.o
-
-# target to build an object file
-src/demo/demo_proto_reluars.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_reluars.dir/build.make CMakeFiles/demo_proto_reluars.dir/src/demo/demo_proto_reluars.cpp.o
-.PHONY : src/demo/demo_proto_reluars.cpp.o
-
-src/demo/demo_proto_reluars.i: src/demo/demo_proto_reluars.cpp.i
-.PHONY : src/demo/demo_proto_reluars.i
-
-# target to preprocess a source file
-src/demo/demo_proto_reluars.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_reluars.dir/build.make CMakeFiles/demo_proto_reluars.dir/src/demo/demo_proto_reluars.cpp.i
-.PHONY : src/demo/demo_proto_reluars.cpp.i
-
-src/demo/demo_proto_reluars.s: src/demo/demo_proto_reluars.cpp.s
-.PHONY : src/demo/demo_proto_reluars.s
-
-# target to generate assembly for a file
-src/demo/demo_proto_reluars.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_reluars.dir/build.make CMakeFiles/demo_proto_reluars.dir/src/demo/demo_proto_reluars.cpp.s
-.PHONY : src/demo/demo_proto_reluars.cpp.s
-
-src/demo/demo_relu.o: src/demo/demo_relu.cpp.o
-.PHONY : src/demo/demo_relu.o
-
-# target to build an object file
-src/demo/demo_relu.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_relu.dir/build.make CMakeFiles/demo_relu.dir/src/demo/demo_relu.cpp.o
-.PHONY : src/demo/demo_relu.cpp.o
-
-src/demo/demo_relu.i: src/demo/demo_relu.cpp.i
-.PHONY : src/demo/demo_relu.i
-
-# target to preprocess a source file
-src/demo/demo_relu.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_relu.dir/build.make CMakeFiles/demo_relu.dir/src/demo/demo_relu.cpp.i
-.PHONY : src/demo/demo_relu.cpp.i
-
-src/demo/demo_relu.s: src/demo/demo_relu.cpp.s
-.PHONY : src/demo/demo_relu.s
-
-# target to generate assembly for a file
-src/demo/demo_relu.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_relu.dir/build.make CMakeFiles/demo_relu.dir/src/demo/demo_relu.cpp.s
-.PHONY : src/demo/demo_relu.cpp.s
+src/compiler/suf_to_pfss.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_compile_pfss.dir/build.make CMakeFiles/test_compile_pfss.dir/src/compiler/suf_to_pfss.cpp.s
+.PHONY : src/compiler/suf_to_pfss.cpp.s
 
 src/demo/sim_harness.o: src/demo/sim_harness.cpp.o
 .PHONY : src/demo/sim_harness.o
@@ -363,6 +481,30 @@ src/demo/sim_harness.s: src/demo/sim_harness.cpp.s
 src/demo/sim_harness.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/sim_harness.dir/build.make CMakeFiles/sim_harness.dir/src/demo/sim_harness.cpp.s
 .PHONY : src/demo/sim_harness.cpp.s
+
+src/demo/test_compile_pfss.o: src/demo/test_compile_pfss.cpp.o
+.PHONY : src/demo/test_compile_pfss.o
+
+# target to build an object file
+src/demo/test_compile_pfss.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_compile_pfss.dir/build.make CMakeFiles/test_compile_pfss.dir/src/demo/test_compile_pfss.cpp.o
+.PHONY : src/demo/test_compile_pfss.cpp.o
+
+src/demo/test_compile_pfss.i: src/demo/test_compile_pfss.cpp.i
+.PHONY : src/demo/test_compile_pfss.i
+
+# target to preprocess a source file
+src/demo/test_compile_pfss.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_compile_pfss.dir/build.make CMakeFiles/test_compile_pfss.dir/src/demo/test_compile_pfss.cpp.i
+.PHONY : src/demo/test_compile_pfss.cpp.i
+
+src/demo/test_compile_pfss.s: src/demo/test_compile_pfss.cpp.s
+.PHONY : src/demo/test_compile_pfss.s
+
+# target to generate assembly for a file
+src/demo/test_compile_pfss.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_compile_pfss.dir/build.make CMakeFiles/test_compile_pfss.dir/src/demo/test_compile_pfss.cpp.s
+.PHONY : src/demo/test_compile_pfss.cpp.s
 
 src/demo/test_mask_rewrite.o: src/demo/test_mask_rewrite.cpp.o
 .PHONY : src/demo/test_mask_rewrite.o
@@ -419,33 +561,41 @@ help:
 	@echo "... clean"
 	@echo "... depend"
 	@echo "... edit_cache"
+	@echo "... install"
+	@echo "... install/local"
+	@echo "... install/strip"
+	@echo "... list_install_components"
 	@echo "... rebuild_cache"
-	@echo "... demo_gelu"
-	@echo "... demo_proto_endtoend"
-	@echo "... demo_proto_gelu"
-	@echo "... demo_proto_reluars"
-	@echo "... demo_relu"
+	@echo "... cw_mac_bytes"
+	@echo "... cw_mac_bytes_test"
+	@echo "... dcf"
+	@echo "... dcf_bytes_test"
+	@echo "... dcf_u128_le_test"
+	@echo "... dpf"
+	@echo "... dpf_bytes_test"
+	@echo "... dpf_cuda"
+	@echo "... dpf_u128_le_test"
+	@echo "... gmock"
+	@echo "... gmock_main"
+	@echo "... gtest"
+	@echo "... gtest_main"
+	@echo "... sample_dpf_cuda_u128_le_salsa20"
+	@echo "... sample_dpf_full_domain_u128_le_aes_mmo_ni"
+	@echo "... sample_dpf_u128_le_aes_mmo"
+	@echo "... sample_dpf_u128_le_aes_mmo_ni"
 	@echo "... sim_harness"
+	@echo "... test_compile_pfss"
 	@echo "... test_mask_rewrite"
 	@echo "... test_suf_ref_eval"
-	@echo "... src/demo/demo_gelu.o"
-	@echo "... src/demo/demo_gelu.i"
-	@echo "... src/demo/demo_gelu.s"
-	@echo "... src/demo/demo_proto_endtoend.o"
-	@echo "... src/demo/demo_proto_endtoend.i"
-	@echo "... src/demo/demo_proto_endtoend.s"
-	@echo "... src/demo/demo_proto_gelu.o"
-	@echo "... src/demo/demo_proto_gelu.i"
-	@echo "... src/demo/demo_proto_gelu.s"
-	@echo "... src/demo/demo_proto_reluars.o"
-	@echo "... src/demo/demo_proto_reluars.i"
-	@echo "... src/demo/demo_proto_reluars.s"
-	@echo "... src/demo/demo_relu.o"
-	@echo "... src/demo/demo_relu.i"
-	@echo "... src/demo/demo_relu.s"
+	@echo "... src/compiler/suf_to_pfss.o"
+	@echo "... src/compiler/suf_to_pfss.i"
+	@echo "... src/compiler/suf_to_pfss.s"
 	@echo "... src/demo/sim_harness.o"
 	@echo "... src/demo/sim_harness.i"
 	@echo "... src/demo/sim_harness.s"
+	@echo "... src/demo/test_compile_pfss.o"
+	@echo "... src/demo/test_compile_pfss.i"
+	@echo "... src/demo/test_compile_pfss.s"
 	@echo "... src/demo/test_mask_rewrite.o"
 	@echo "... src/demo/test_mask_rewrite.i"
 	@echo "... src/demo/test_mask_rewrite.s"

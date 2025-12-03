@@ -32,8 +32,14 @@ public:
 
   // Packed multi-threshold compare (CDPF-style)
   PackedLtKeyPair gen_packed_lt(int in_bits, const std::vector<u64>& thresholds) {
-    (void)in_bits; (void)thresholds;
-    throw std::runtime_error("SigmaFastBackend::gen_packed_lt not implemented");
+    if (in_bits != 64) throw std::runtime_error("SigmaFastBackend stub supports only 64-bit");
+    // Stub: deterministic IDs; party0 holds packed bits, party1 zeros.
+    u64 id = next_id_++;
+    packed_[id] = thresholds;
+    PackedLtKeyPair kp;
+    kp.k0.bytes = proto::pack_u64_le(id << 1);
+    kp.k1.bytes = proto::pack_u64_le((id << 1) | 1ull);
+    return kp;
   }
 
   // Evaluate packed compare bundle for many inputs: outs_bitmask is [N][out_words] u64
@@ -43,14 +49,40 @@ public:
                            int in_bits,
                            int out_words,
                            u64* outs_bitmask) const {
-    (void)key_bytes; (void)keys_flat; (void)xs_u64; (void)in_bits; (void)out_words; (void)outs_bitmask;
-    throw std::runtime_error("SigmaFastBackend::eval_packed_lt_many not implemented");
+    if (in_bits != 64) throw std::runtime_error("SigmaFastBackend stub supports only 64-bit");
+    if (key_bytes < 8) throw std::runtime_error("SigmaFastBackend: key size too small");
+    for (size_t i = 0; i < xs_u64.size(); i++) {
+      u64 kid = proto::unpack_u64_le(keys_flat + i * key_bytes);
+      u64 id = kid >> 1;
+      int party = static_cast<int>(kid & 1ull);
+      auto it = packed_.find(id);
+      if (it == packed_.end()) throw std::runtime_error("SigmaFastBackend: unknown key");
+      const auto& thr = it->second;
+      // out_words must cover thresholds bits; pack into u64 words (xor-share)
+      std::vector<u64> words(static_cast<size_t>(out_words), 0);
+      for (size_t t = 0; t < thr.size(); t++) {
+        bool bit = xs_u64[i] < thr[t];
+        size_t word_idx = t / 64;
+        size_t bit_idx = t % 64;
+        if (word_idx >= words.size()) break;
+        if (party == 0) {
+          if (bit) words[word_idx] |= (uint64_t(1) << bit_idx);
+        }
+      }
+      for (int w = 0; w < out_words; w++) {
+        outs_bitmask[i * out_words + w] = words[static_cast<size_t>(w)];
+      }
+    }
   }
 
   // Interval LUT (vector payload) API
   IntervalLutKeyPair gen_interval_lut(const IntervalLutDesc& desc) override {
-    (void)desc;
-    throw std::runtime_error("SigmaFastBackend::gen_interval_lut not implemented");
+    u64 id = next_id_++;
+    intervals_[id] = desc;
+    IntervalLutKeyPair kp;
+    kp.k0.bytes = proto::pack_u64_le(id << 1);
+    kp.k1.bytes = proto::pack_u64_le((id << 1) | 1ull);
+    return kp;
   }
 
   void eval_interval_lut_many_u64(size_t key_bytes,
@@ -58,12 +90,31 @@ public:
                                   const std::vector<u64>& xs_u64,
                                   int out_words,
                                   u64* outs_flat) const override {
-    (void)key_bytes; (void)keys_flat; (void)xs_u64; (void)out_words; (void)outs_flat;
-    throw std::runtime_error("SigmaFastBackend::eval_interval_lut_many_u64 not implemented");
+    if (key_bytes < 8) throw std::runtime_error("SigmaFastBackend: key size too small");
+    for (size_t i = 0; i < xs_u64.size(); i++) {
+      u64 kid = proto::unpack_u64_le(keys_flat + i * key_bytes);
+      u64 id = kid >> 1;
+      int party = static_cast<int>(kid & 1ull);
+      auto it = intervals_.find(id);
+      if (it == intervals_.end()) throw std::runtime_error("SigmaFastBackend: unknown interval key");
+      const auto& d = it->second;
+      std::vector<u64> out(static_cast<size_t>(out_words), 0);
+      if (party == 0) {
+        size_t idx = d.cutpoints.size() - 1;
+        for (size_t j = 0; j + 1 < d.cutpoints.size(); j++) {
+          if (xs_u64[i] >= d.cutpoints[j] && xs_u64[i] < d.cutpoints[j + 1]) { idx = j; break; }
+        }
+        for (int j = 0; j < out_words; j++) out[static_cast<size_t>(j)] = d.payload_flat[idx * d.out_words + j];
+      }
+      for (int j = 0; j < out_words; j++) outs_flat[i * out_words + j] = out[static_cast<size_t>(j)];
+    }
   }
 
 private:
   Params params_;
+  mutable u64 next_id_ = 1;
+  mutable std::unordered_map<u64, std::vector<u64>> packed_;
+  mutable std::unordered_map<u64, IntervalLutDesc> intervals_;
 };
 
 }  // namespace proto

@@ -233,16 +233,9 @@ CMakeFiles/demo_relu.dir/src/demo/demo_relu.cpp.o: \
  /usr/include/c++/11/pstl/glue_numeric_defs.h \
  /usr/include/c++/11/pstl/execution_defs.h /usr/include/c++/11/thread \
  /home/yuhan/SUF/SUF/include/compiler/suf_to_pfss.hpp \
- /home/yuhan/SUF/SUF/include/compiler/suf_collect.hpp \
- /usr/include/c++/11/variant \
- /usr/include/c++/11/bits/enable_special_members.h \
- /home/yuhan/SUF/SUF/include/core/ring.hpp \
- /home/yuhan/SUF/SUF/include/compiler/mask_rewrite.hpp \
- /home/yuhan/SUF/SUF/include/pfss/program_desc.hpp \
- /home/yuhan/SUF/SUF/include/core/serialization.hpp \
- /usr/include/c++/11/cstring /usr/include/string.h /usr/include/strings.h \
  /home/yuhan/SUF/SUF/include/suf/suf_ir.hpp \
  /home/yuhan/SUF/SUF/include/suf/polynomial.hpp \
+ /home/yuhan/SUF/SUF/include/core/ring.hpp \
  /home/yuhan/SUF/SUF/include/mpc/shares.hpp \
  /home/yuhan/SUF/SUF/include/mpc/arithmetic_mpc.hpp \
  /home/yuhan/SUF/SUF/include/mpc/beaver.hpp \
@@ -256,19 +249,27 @@ CMakeFiles/demo_relu.dir/src/demo/demo_relu.cpp.o: \
  /usr/include/c++/11/bits/ranges_algobase.h /usr/include/c++/11/iterator \
  /usr/include/c++/11/bits/stream_iterator.h \
  /usr/include/c++/11/bits/uses_allocator_args.h \
- /usr/include/c++/11/pstl/glue_memory_defs.h \
+ /usr/include/c++/11/pstl/glue_memory_defs.h /usr/include/c++/11/variant \
+ /usr/include/c++/11/bits/enable_special_members.h \
  /home/yuhan/SUF/SUF/include/suf/predicates.hpp \
- /home/yuhan/SUF/SUF/include/pfss/pfss.hpp \
+ /home/yuhan/SUF/SUF/include/compiler/compiled_suf_gate.hpp \
+ /home/yuhan/SUF/SUF/include/compiler/pfss_program_desc.hpp \
  /home/yuhan/SUF/SUF/include/gates/gate_api.hpp \
  /home/yuhan/SUF/SUF/include/mpc/masked_wire.hpp \
  /home/yuhan/SUF/SUF/include/gates/relu_gate.hpp \
  /home/yuhan/SUF/SUF/include/gates/reluars_gate.hpp \
+ /home/yuhan/SUF/SUF/include/compiler/suf_collect.hpp \
+ /home/yuhan/SUF/SUF/include/compiler/mask_rewrite.hpp \
+ /home/yuhan/SUF/SUF/include/pfss/program_desc.hpp \
+ /home/yuhan/SUF/SUF/include/core/serialization.hpp \
+ /usr/include/c++/11/cstring /usr/include/string.h /usr/include/strings.h \
  /home/yuhan/SUF/SUF/include/pfss/backend_cleartext.hpp \
  /usr/include/c++/11/unordered_map /usr/include/c++/11/bits/hashtable.h \
  /usr/include/c++/11/bits/hashtable_policy.h \
  /usr/include/c++/11/bits/node_handle.h \
  /usr/include/c++/11/bits/unordered_map.h \
  /usr/include/c++/11/bits/erase_if.h \
+ /home/yuhan/SUF/SUF/include/pfss/pfss.hpp \
  /home/yuhan/SUF/SUF/include/gates/gelu_spline_gate.hpp \
  /usr/include/c++/11/algorithm /usr/include/c++/11/bits/ranges_algo.h \
  /usr/include/c++/11/bits/ranges_util.h \

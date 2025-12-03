@@ -73,7 +73,7 @@ public:
     out.k0.wrap_sign_share = wrap0;
     out.k1.wrap_sign_share = wrap1;
 
-    auto one_byte = std::vector<u8>{1u};
+    auto one_byte = pack_u64_le(1ull);
 
     auto thr1_bits = fss.u64_to_bits_msb(thr1, 64);
     auto thr2_bits = fss.u64_to_bits_msb(thr2, 64);
