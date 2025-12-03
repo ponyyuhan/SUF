@@ -45,4 +45,6 @@ set(CMAKE_DEPEND_INFO_FILES
   "CMakeFiles/demo_proto_gelu.dir/DependInfo.cmake"
   "CMakeFiles/demo_proto_endtoend.dir/DependInfo.cmake"
   "CMakeFiles/sim_harness.dir/DependInfo.cmake"
+  "CMakeFiles/test_suf_ref_eval.dir/DependInfo.cmake"
+  "CMakeFiles/test_mask_rewrite.dir/DependInfo.cmake"
   )

@@ -67,7 +67,9 @@ public:
     u64 thr1 = r_in;           // r
     u64 thr2 = r_in + TWO63;   // r + 2^63 (wraps automatically)
     bool wrap = (thr2 < thr1);
-    auto [wrap0, wrap1] = dealer.split_add(wrap ? 1ull : 0ull);
+    u64 wrap0 = dealer.rng.rand_bit();
+    if (!wrap) wrap0 = 0;
+    u64 wrap1 = wrap ? (1ull - wrap0) : 0ull;
     out.k0.wrap_sign_share = wrap0;
     out.k1.wrap_sign_share = wrap1;
 

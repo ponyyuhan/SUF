@@ -194,6 +194,32 @@ sim_harness/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/sim_harness.dir/build.make CMakeFiles/sim_harness.dir/build
 .PHONY : sim_harness/fast
 
+#=============================================================================
+# Target rules for targets named test_suf_ref_eval
+
+# Build rule for target.
+test_suf_ref_eval: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_suf_ref_eval
+.PHONY : test_suf_ref_eval
+
+# fast build rule for target.
+test_suf_ref_eval/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_suf_ref_eval.dir/build.make CMakeFiles/test_suf_ref_eval.dir/build
+.PHONY : test_suf_ref_eval/fast
+
+#=============================================================================
+# Target rules for targets named test_mask_rewrite
+
+# Build rule for target.
+test_mask_rewrite: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_mask_rewrite
+.PHONY : test_mask_rewrite
+
+# fast build rule for target.
+test_mask_rewrite/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_mask_rewrite.dir/build.make CMakeFiles/test_mask_rewrite.dir/build
+.PHONY : test_mask_rewrite/fast
+
 src/demo/demo_gelu.o: src/demo/demo_gelu.cpp.o
 .PHONY : src/demo/demo_gelu.o
 
@@ -338,6 +364,54 @@ src/demo/sim_harness.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/sim_harness.dir/build.make CMakeFiles/sim_harness.dir/src/demo/sim_harness.cpp.s
 .PHONY : src/demo/sim_harness.cpp.s
 
+src/demo/test_mask_rewrite.o: src/demo/test_mask_rewrite.cpp.o
+.PHONY : src/demo/test_mask_rewrite.o
+
+# target to build an object file
+src/demo/test_mask_rewrite.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_mask_rewrite.dir/build.make CMakeFiles/test_mask_rewrite.dir/src/demo/test_mask_rewrite.cpp.o
+.PHONY : src/demo/test_mask_rewrite.cpp.o
+
+src/demo/test_mask_rewrite.i: src/demo/test_mask_rewrite.cpp.i
+.PHONY : src/demo/test_mask_rewrite.i
+
+# target to preprocess a source file
+src/demo/test_mask_rewrite.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_mask_rewrite.dir/build.make CMakeFiles/test_mask_rewrite.dir/src/demo/test_mask_rewrite.cpp.i
+.PHONY : src/demo/test_mask_rewrite.cpp.i
+
+src/demo/test_mask_rewrite.s: src/demo/test_mask_rewrite.cpp.s
+.PHONY : src/demo/test_mask_rewrite.s
+
+# target to generate assembly for a file
+src/demo/test_mask_rewrite.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_mask_rewrite.dir/build.make CMakeFiles/test_mask_rewrite.dir/src/demo/test_mask_rewrite.cpp.s
+.PHONY : src/demo/test_mask_rewrite.cpp.s
+
+src/demo/test_suf_ref_eval.o: src/demo/test_suf_ref_eval.cpp.o
+.PHONY : src/demo/test_suf_ref_eval.o
+
+# target to build an object file
+src/demo/test_suf_ref_eval.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_suf_ref_eval.dir/build.make CMakeFiles/test_suf_ref_eval.dir/src/demo/test_suf_ref_eval.cpp.o
+.PHONY : src/demo/test_suf_ref_eval.cpp.o
+
+src/demo/test_suf_ref_eval.i: src/demo/test_suf_ref_eval.cpp.i
+.PHONY : src/demo/test_suf_ref_eval.i
+
+# target to preprocess a source file
+src/demo/test_suf_ref_eval.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_suf_ref_eval.dir/build.make CMakeFiles/test_suf_ref_eval.dir/src/demo/test_suf_ref_eval.cpp.i
+.PHONY : src/demo/test_suf_ref_eval.cpp.i
+
+src/demo/test_suf_ref_eval.s: src/demo/test_suf_ref_eval.cpp.s
+.PHONY : src/demo/test_suf_ref_eval.s
+
+# target to generate assembly for a file
+src/demo/test_suf_ref_eval.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_suf_ref_eval.dir/build.make CMakeFiles/test_suf_ref_eval.dir/src/demo/test_suf_ref_eval.cpp.s
+.PHONY : src/demo/test_suf_ref_eval.cpp.s
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -352,6 +426,8 @@ help:
 	@echo "... demo_proto_reluars"
 	@echo "... demo_relu"
 	@echo "... sim_harness"
+	@echo "... test_mask_rewrite"
+	@echo "... test_suf_ref_eval"
 	@echo "... src/demo/demo_gelu.o"
 	@echo "... src/demo/demo_gelu.i"
 	@echo "... src/demo/demo_gelu.s"
@@ -370,6 +446,12 @@ help:
 	@echo "... src/demo/sim_harness.o"
 	@echo "... src/demo/sim_harness.i"
 	@echo "... src/demo/sim_harness.s"
+	@echo "... src/demo/test_mask_rewrite.o"
+	@echo "... src/demo/test_mask_rewrite.i"
+	@echo "... src/demo/test_mask_rewrite.s"
+	@echo "... src/demo/test_suf_ref_eval.o"
+	@echo "... src/demo/test_suf_ref_eval.i"
+	@echo "... src/demo/test_suf_ref_eval.s"
 .PHONY : help
 
 

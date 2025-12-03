@@ -26,3 +26,9 @@ target_include_directories(demo_proto_endtoend PRIVATE ${CMAKE_CURRENT_SOURCE_DI
 add_executable(sim_harness src/demo/sim_harness.cpp)
 target_include_directories(sim_harness PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set_property(TARGET sim_harness PROPERTY CXX_STANDARD 20)
+
+add_executable(test_suf_ref_eval src/demo/test_suf_ref_eval.cpp)
+target_include_directories(test_suf_ref_eval PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+add_executable(test_mask_rewrite src/demo/test_mask_rewrite.cpp)
+target_include_directories(test_mask_rewrite PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

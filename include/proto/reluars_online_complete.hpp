@@ -88,7 +88,7 @@ inline ReluARSOut eval_reluars_one(int party,
   u64 na = B.NOT(a);
   u64 u = B.AND(b, na);
   u64 wrap_or = B.OR(na, b);
-  u64 w = B.SEL(K.wrap_sign_share, wrap_or, u);
+  u64 w = B.SEL(K.wrap_sign_share, u, wrap_or); // wrap ? wrap_or : u
 
   u64 hatz = hatx_public + off;
   u64 hatz_low = (f == 64) ? hatz : (hatz & ((1ull << f) - 1));

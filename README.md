@@ -69,6 +69,7 @@ expand*.md, initial.md, paper.md       # 需求与设计文档
 - 后端选择：`ClearBackend`（确定性 additive share，用于测试）、`Myl7FssBackend`（stub，待接真实 myl7/fss）、`SigmaFastBackend`（packed/interval LUT stub）。
 - 打包/批处理：`pack_keys_flat`/`pack_cut_keys_by_cut` 生成 SoA 缓冲区；`eval_dcf_many_u64` 默认循环，可替换为高性能实现；BeaverMul64Batch 一轮完成批乘。
 - Tape 使用：`TapeWriter`/`TapeReader` 统一标签+长度格式；Vec/File 源/汇可替换，不影响在线逻辑。
+- wrap 处理：`wrap_sign` 等包装 bit 均为加法 share（不公开），在在线端通过 MPC `SEL` 合成，Tape 存 `u64` share。
 
 ### 测试/演示
 - `sim_harness.cpp`：自包含两方模拟，使用 `ClearBackend` + 在线评估器（ReluARS/GeLU），内存通道+线程，带断言计数，演示 key 打包。
@@ -76,11 +77,16 @@ expand*.md, initial.md, paper.md       # 需求与设计文档
   - ReluARS/GeLU 参考：ReluARS 使用截断+delta 的明文公式；GeLU 使用同一样条系数/切点（含 mask 旋转）明文计算。默认各 2000 轮随机输入，可通过 `RELU_ITERS`/`GELU_ITERS` 环境变量调整（如 10000）。
   - 可直接 `cmake --build build && ./build/sim_harness` 或 `g++ -O2 -std=c++20 src/demo/sim_harness.cpp -pthread -Iinclude -o sim_harness && ./sim_harness`。
 - 其他 demo（`demo_proto_*`、`demo_proto_endtoend`）展示 proto 层接口。
+- 新增单元测试：
+  - `test_suf_ref_eval`：SUF IR 校验 + 参考求值（n=8 全枚举，n=64 随机）；
+  - `test_mask_rewrite`：lt/ltlow/msb 的掩码重写配方与参考判定。
 
 ## 状态与待办
 - Milestone 1（runtime 基础/批处理）✅：单一 pack/unpack 实现、批量 Beaver 默认一轮、bit/LUT ops、pack_flat+eval_many 与逐点一致性测试。
 - Milestone 2（Tape/顺序对齐）✅：Vec/File tape、明确标签格式、ReluARS/GeLU 写/读顺序固定、from-tape evaluator、harness 真实明文参考 2000+ 随机用例。
-- 未完成/待接入（Milestone 3/4 尚未启动）：SUF IR 强化、mask-rewrite 引擎 (§3.3)、真实 Delta/LUT 数据、`Myl7FssBackend` 真实库对接、`SigmaFastBackend` packed compare/interval LUT。
+- Milestone 3（SUF IR 稳定/语义）✅：`validate.hpp` 检查 alpha/度数/谓词/布尔索引；`ref_eval.hpp` 定义谓词/BoolExpr/poly/interval 的参考语义；`test_suf_ref_eval` 全枚举 + 随机验证。
+- Milestone 4（mask-rewrite 引擎）✅：`mask_rewrite.hpp` 生成旋转比较/低位比较/MSB 配方，`mask_rewrite_eval.hpp` 参考判定，`test_mask_rewrite` 随机性质测试；wrap bit 全面改为秘密共享并在在线端 MPC 选择。
+- 未完成/待接入（后续）：SUF→PFSS 编译层集成 mask-rewrite、真实 Delta/LUT 数据、`Myl7FssBackend` 真实库对接、`SigmaFastBackend` packed compare/interval LUT。
   - 其他待办：精确的 Delta 表、真实 spline 系数/区间（当前为 toy/占位）。
 
 ## 构建与运行

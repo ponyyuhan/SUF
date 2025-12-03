@@ -41,7 +41,7 @@ inline GeluOut eval_gelu_interval_lut_one(int party,
   u64 na = B.NOT(a);
   u64 u = B.AND(b, na);
   u64 wrap_or = B.OR(na, b);
-  u64 w = B.SEL(K.wrap_sign_share, wrap_or, u);
+  u64 w = B.SEL(K.wrap_sign_share, u, wrap_or); // wrap ? wrap_or : u
 
   const u64 TWO63 = (1ull << 63);
   u64 hatx_bias = add_mod(hatx_public, TWO63);

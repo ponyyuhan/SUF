@@ -69,6 +69,8 @@ all: CMakeFiles/demo_proto_reluars.dir/all
 all: CMakeFiles/demo_proto_gelu.dir/all
 all: CMakeFiles/demo_proto_endtoend.dir/all
 all: CMakeFiles/sim_harness.dir/all
+all: CMakeFiles/test_suf_ref_eval.dir/all
+all: CMakeFiles/test_mask_rewrite.dir/all
 .PHONY : all
 
 # The main recursive "preinstall" target.
@@ -82,6 +84,8 @@ clean: CMakeFiles/demo_proto_reluars.dir/clean
 clean: CMakeFiles/demo_proto_gelu.dir/clean
 clean: CMakeFiles/demo_proto_endtoend.dir/clean
 clean: CMakeFiles/sim_harness.dir/clean
+clean: CMakeFiles/test_suf_ref_eval.dir/clean
+clean: CMakeFiles/test_mask_rewrite.dir/clean
 .PHONY : clean
 
 #=============================================================================
@@ -239,6 +243,58 @@ sim_harness: CMakeFiles/sim_harness.dir/rule
 CMakeFiles/sim_harness.dir/clean:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/sim_harness.dir/build.make CMakeFiles/sim_harness.dir/clean
 .PHONY : CMakeFiles/sim_harness.dir/clean
+
+#=============================================================================
+# Target rules for target CMakeFiles/test_suf_ref_eval.dir
+
+# All Build rule for target.
+CMakeFiles/test_suf_ref_eval.dir/all:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_suf_ref_eval.dir/build.make CMakeFiles/test_suf_ref_eval.dir/depend
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_suf_ref_eval.dir/build.make CMakeFiles/test_suf_ref_eval.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/SUF/SUF/build/CMakeFiles --progress-num=15,16 "Built target test_suf_ref_eval"
+.PHONY : CMakeFiles/test_suf_ref_eval.dir/all
+
+# Build rule for subdir invocation for target.
+CMakeFiles/test_suf_ref_eval.dir/rule: cmake_check_build_system
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/yuhan/SUF/SUF/build/CMakeFiles 2
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/test_suf_ref_eval.dir/all
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/yuhan/SUF/SUF/build/CMakeFiles 0
+.PHONY : CMakeFiles/test_suf_ref_eval.dir/rule
+
+# Convenience name for target.
+test_suf_ref_eval: CMakeFiles/test_suf_ref_eval.dir/rule
+.PHONY : test_suf_ref_eval
+
+# clean rule for target.
+CMakeFiles/test_suf_ref_eval.dir/clean:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_suf_ref_eval.dir/build.make CMakeFiles/test_suf_ref_eval.dir/clean
+.PHONY : CMakeFiles/test_suf_ref_eval.dir/clean
+
+#=============================================================================
+# Target rules for target CMakeFiles/test_mask_rewrite.dir
+
+# All Build rule for target.
+CMakeFiles/test_mask_rewrite.dir/all:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_mask_rewrite.dir/build.make CMakeFiles/test_mask_rewrite.dir/depend
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_mask_rewrite.dir/build.make CMakeFiles/test_mask_rewrite.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/SUF/SUF/build/CMakeFiles --progress-num=13,14 "Built target test_mask_rewrite"
+.PHONY : CMakeFiles/test_mask_rewrite.dir/all
+
+# Build rule for subdir invocation for target.
+CMakeFiles/test_mask_rewrite.dir/rule: cmake_check_build_system
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/yuhan/SUF/SUF/build/CMakeFiles 2
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/test_mask_rewrite.dir/all
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/yuhan/SUF/SUF/build/CMakeFiles 0
+.PHONY : CMakeFiles/test_mask_rewrite.dir/rule
+
+# Convenience name for target.
+test_mask_rewrite: CMakeFiles/test_mask_rewrite.dir/rule
+.PHONY : test_mask_rewrite
+
+# clean rule for target.
+CMakeFiles/test_mask_rewrite.dir/clean:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_mask_rewrite.dir/build.make CMakeFiles/test_mask_rewrite.dir/clean
+.PHONY : CMakeFiles/test_mask_rewrite.dir/clean
 
 #=============================================================================
 # Special targets to cleanup operation of make.

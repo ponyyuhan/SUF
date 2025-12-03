@@ -68,7 +68,7 @@ inline void gelu_eval_batch_step_dcf(
   mul.mul_batch(b, na, u);
   for (size_t i = 0; i < N; i++) {
     u64 wrap_or = sub_mod(add_mod(na[i], b[i]), u[i]); // OR form
-    w[i] = B.SEL(K.wrap_sign_share[i], wrap_or, u[i]);
+    w[i] = B.SEL(K.wrap_sign_share[i], u[i], wrap_or); // wrap ? wrap_or : u
   }
 
   std::vector<u64> coeff(N * (K.d + 1), 0);

@@ -108,6 +108,28 @@ static bool beaver_batch_selftest() {
   return true;
 }
 
+static bool beaver_zero_share_selftest() {
+  std::mt19937_64 rng(404);
+  BeaverTriple64Share t0, t1;
+  u64 a = rng(), b = rng(), c = mul_mod(a, b);
+  auto [a0, a1] = split_add(a, rng);
+  auto [b0, b1] = split_add(b, rng);
+  auto [c0, c1] = split_add(c, rng);
+  t0 = {a0, b0, c0};
+  t1 = {a1, b1, c1};
+  LocalChan::Shared sh;
+  LocalChan c0ch(&sh, true), c1ch(&sh, false);
+  BeaverMul64 m0{0, c0ch, std::vector<BeaverTriple64Share>{t0}}, m1{1, c1ch, std::vector<BeaverTriple64Share>{t1}};
+  u64 x0 = 12345;  // arbitrary
+  u64 x1 = sub_mod(0ull, x0);
+  u64 y0 = 1, y1 = 0;
+  u64 z0 = 0, z1 = 0;
+  std::thread tA([&]{ z0 = m0.mul(x0, y0); });
+  std::thread tB([&]{ z1 = m1.mul(x1, y1); });
+  tA.join(); tB.join();
+  return add_mod(z0, z1) == 0;
+}
+
 static int get_iters(const char* env_name, int def_val) {
   if (const char* v = std::getenv(env_name)) {
     try {
@@ -325,7 +347,10 @@ static ReluARSSimKeys dealer_make_reluars_sim(ClearBackend& fss, int f, std::mt1
 
   u64 r = out.r_full;
   u64 r2 = r + (u64(1) << 63);
-  auto [wrap0, wrap1] = split_add((r2 < r) ? 1ull : 0ull, rng);
+  bool wrap = (r2 < r);
+  u64 wrap0 = rng() & 1ull;
+  if (!wrap) wrap0 = 0;
+  u64 wrap1 = wrap ? (1ull - wrap0) : 0ull;
   out.party0.wrap_sign_share = wrap0;
   out.party1.wrap_sign_share = wrap1;
   auto payload_bit1 = []() {
@@ -384,7 +409,10 @@ static GeluSimKeys dealer_make_gelu_sim(ClearBackend& fss, int d, std::mt19937_6
 
   u64 r = out.r_full;
   u64 r2 = r + (u64(1) << 63);
-  auto [wrap0, wrap1] = split_add((r2 < r) ? 1ull : 0ull, rng);
+  bool wrap = (r2 < r);
+  u64 wrap0 = rng() & 1ull;
+  if (!wrap) wrap0 = 0;
+  u64 wrap1 = wrap ? (1ull - wrap0) : 0ull;
   out.party0.wrap_sign_share = wrap0;
   out.party1.wrap_sign_share = wrap1;
   auto payload_bit1 = []() {
@@ -456,6 +484,10 @@ int main() {
     std::cerr << "Beaver batch self-test failed\n";
     return 1;
   }
+  if (!beaver_zero_share_selftest()) {
+    std::cerr << "Beaver zero-share self-test failed\n";
+    return 1;
+  }
   if (!tape_roundtrip_selftest()) {
     std::cerr << "Tape roundtrip self-test failed\n";
     return 1;
@@ -522,6 +554,21 @@ int main() {
       if (y == y_tape && y == yref) {
         pass++;
       } else if (std::getenv("DEBUG_REL_FAIL")) {
+        u64 r = relu_keys.r_full;
+        u64 r2 = add_mod(r, (u64(1) << 63));
+        bool wrap_plain = r2 < r;
+        bool a_plain = hatx < r;
+        bool b_plain = hatx < r2;
+        bool w_plain = wrap_plain ? ((!a_plain) || b_plain) : ((!a_plain) && b_plain);
+        auto recon_dcf = [&](const FssKey& k0, const FssKey& k1, int bits) {
+          auto s0 = backend.eval_dcf(bits, k0, backend.u64_to_bits_msb(hatx, bits));
+          auto s1 = backend.eval_dcf(bits, k1, backend.u64_to_bits_msb(hatx, bits));
+          u64 v0 = unpack_u64_le(s0.data());
+          u64 v1 = unpack_u64_le(s1.data());
+          return add_mod(v0, v1);
+        };
+        u64 a_rec = recon_dcf(relu_keys.party0.dcf_hat_lt_r, relu_keys.party1.dcf_hat_lt_r, 64);
+        u64 b_rec = recon_dcf(relu_keys.party0.dcf_hat_lt_r_plus_2p63, relu_keys.party1.dcf_hat_lt_r_plus_2p63, 64);
         std::cerr << "Relu mismatch: x=" << x
                   << " hatx=" << hatx
                   << " y=" << y
@@ -530,6 +577,10 @@ int main() {
                   << " w=" << add_mod(o0.w, o1.w)
                   << " t=" << add_mod(o0.t, o1.t)
                   << " d=" << add_mod(o0.d, o1.d)
+                  << " wrap=" << add_mod(relu_keys.party0.wrap_sign_share, relu_keys.party1.wrap_sign_share)
+                  << " wrap_plain=" << wrap_plain
+                  << " w_plain=" << w_plain << " a=" << a_plain << " b=" << b_plain
+                  << " a_rec=" << a_rec << " b_rec=" << b_rec
                   << "\n";
       }
     }
