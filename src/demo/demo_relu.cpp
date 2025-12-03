@@ -10,6 +10,8 @@
 #include "compiler/suf_to_pfss.hpp"
 #include "gates/gate_api.hpp"
 #include "gates/relu_gate.hpp"
+#include "gates/reluars_gate.hpp"
+#include "gates/gelu_spline_gate.hpp"
 #include "mpc/beaver.hpp"
 #include "pfss/backend_cleartext.hpp"
 

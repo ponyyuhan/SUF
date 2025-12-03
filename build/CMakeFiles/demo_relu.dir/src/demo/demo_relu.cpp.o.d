@@ -225,10 +225,16 @@ CMakeFiles/demo_relu.dir/src/demo/demo_relu.cpp.o: \
  /home/yuhan/SUF/SUF/include/gates/gate_api.hpp \
  /home/yuhan/SUF/SUF/include/mpc/masked_wire.hpp \
  /home/yuhan/SUF/SUF/include/gates/relu_gate.hpp \
+ /home/yuhan/SUF/SUF/include/gates/reluars_gate.hpp \
  /home/yuhan/SUF/SUF/include/pfss/backend_cleartext.hpp \
  /usr/include/c++/11/cstring /usr/include/string.h /usr/include/strings.h \
  /usr/include/c++/11/unordered_map /usr/include/c++/11/bits/hashtable.h \
  /usr/include/c++/11/bits/hashtable_policy.h \
  /usr/include/c++/11/bits/node_handle.h \
  /usr/include/c++/11/bits/unordered_map.h \
- /usr/include/c++/11/bits/erase_if.h
+ /usr/include/c++/11/bits/erase_if.h \
+ /home/yuhan/SUF/SUF/include/gates/gelu_spline_gate.hpp \
+ /usr/include/c++/11/algorithm /usr/include/c++/11/bits/stl_algo.h \
+ /usr/include/c++/11/bits/algorithmfwd.h \
+ /usr/include/c++/11/pstl/glue_algorithm_defs.h \
+ /usr/include/c++/11/functional /usr/include/c++/11/bits/std_function.h

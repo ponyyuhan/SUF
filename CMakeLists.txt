@@ -13,3 +13,9 @@ target_link_libraries(demo_relu PRIVATE suf_fss)
 
 add_executable(demo_gelu src/demo/demo_gelu.cpp)
 target_link_libraries(demo_gelu PRIVATE suf_fss)
+
+add_executable(demo_proto_reluars src/demo/demo_proto_reluars.cpp)
+target_include_directories(demo_proto_reluars PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+add_executable(demo_proto_gelu src/demo/demo_proto_gelu.cpp)
+target_include_directories(demo_proto_gelu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

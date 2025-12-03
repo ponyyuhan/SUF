@@ -280,6 +280,7 @@ CMakeFiles/demo_relu.dir/src/demo/demo_relu.cpp.o: ../src/demo/demo_relu.cpp \
   ../include/gates/gate_api.hpp \
   ../include/mpc/masked_wire.hpp \
   ../include/gates/relu_gate.hpp \
+  ../include/gates/reluars_gate.hpp \
   ../include/pfss/backend_cleartext.hpp \
   /usr/include/c++/11/cstring \
   /usr/include/string.h \
@@ -289,8 +290,21 @@ CMakeFiles/demo_relu.dir/src/demo/demo_relu.cpp.o: ../src/demo/demo_relu.cpp \
   /usr/include/c++/11/bits/hashtable_policy.h \
   /usr/include/c++/11/bits/node_handle.h \
   /usr/include/c++/11/bits/unordered_map.h \
-  /usr/include/c++/11/bits/erase_if.h
+  /usr/include/c++/11/bits/erase_if.h \
+  ../include/gates/gelu_spline_gate.hpp \
+  /usr/include/c++/11/algorithm \
+  /usr/include/c++/11/bits/stl_algo.h \
+  /usr/include/c++/11/bits/algorithmfwd.h \
+  /usr/include/c++/11/pstl/glue_algorithm_defs.h \
+  /usr/include/c++/11/functional \
+  /usr/include/c++/11/bits/std_function.h
 
+
+/usr/include/c++/11/bits/stl_algo.h:
+
+/usr/include/c++/11/algorithm:
+
+../include/gates/gelu_spline_gate.hpp:
 
 /usr/include/c++/11/bits/unordered_map.h:
 
@@ -303,6 +317,8 @@ CMakeFiles/demo_relu.dir/src/demo/demo_relu.cpp.o: ../src/demo/demo_relu.cpp \
 /usr/include/strings.h:
 
 ../include/pfss/backend_cleartext.hpp:
+
+../include/gates/reluars_gate.hpp:
 
 ../include/mpc/masked_wire.hpp:
 
@@ -319,6 +335,8 @@ CMakeFiles/demo_relu.dir/src/demo/demo_relu.cpp.o: ../src/demo/demo_relu.cpp \
 /usr/include/c++/11/bits/align.h:
 
 /usr/include/c++/11/bits/stl_raw_storage_iter.h:
+
+/usr/include/c++/11/bits/std_function.h:
 
 /usr/include/c++/11/bits/stl_tempbuf.h:
 
@@ -410,6 +428,8 @@ CMakeFiles/demo_relu.dir/src/demo/demo_relu.cpp.o: ../src/demo/demo_relu.cpp \
 
 /usr/include/c++/11/bits/ostream.tcc:
 
+/usr/include/c++/11/pstl/glue_algorithm_defs.h:
+
 /usr/include/c++/11/stdexcept:
 
 /usr/include/x86_64-linux-gnu/bits/types/mbstate_t.h:
@@ -482,6 +502,8 @@ CMakeFiles/demo_relu.dir/src/demo/demo_relu.cpp.o: ../src/demo/demo_relu.cpp \
 
 /usr/include/x86_64-linux-gnu/bits/wordsize.h:
 
+/usr/include/c++/11/bits/algorithmfwd.h:
+
 /usr/include/c++/11/pstl/execution_defs.h:
 
 /usr/include/x86_64-linux-gnu/bits/types/locale_t.h:
@@ -507,6 +529,8 @@ CMakeFiles/demo_relu.dir/src/demo/demo_relu.cpp.o: ../src/demo/demo_relu.cpp \
 /usr/include/c++/11/bits/exception_defines.h:
 
 /usr/include/x86_64-linux-gnu/c++/11/bits/os_defines.h:
+
+/usr/include/c++/11/functional:
 
 /usr/include/linux/errno.h:
 

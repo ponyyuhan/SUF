@@ -142,6 +142,32 @@ demo_gelu/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_gelu.dir/build.make CMakeFiles/demo_gelu.dir/build
 .PHONY : demo_gelu/fast
 
+#=============================================================================
+# Target rules for targets named demo_proto_reluars
+
+# Build rule for target.
+demo_proto_reluars: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 demo_proto_reluars
+.PHONY : demo_proto_reluars
+
+# fast build rule for target.
+demo_proto_reluars/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_reluars.dir/build.make CMakeFiles/demo_proto_reluars.dir/build
+.PHONY : demo_proto_reluars/fast
+
+#=============================================================================
+# Target rules for targets named demo_proto_gelu
+
+# Build rule for target.
+demo_proto_gelu: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 demo_proto_gelu
+.PHONY : demo_proto_gelu
+
+# fast build rule for target.
+demo_proto_gelu/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_gelu.dir/build.make CMakeFiles/demo_proto_gelu.dir/build
+.PHONY : demo_proto_gelu/fast
+
 src/demo/demo_gelu.o: src/demo/demo_gelu.cpp.o
 .PHONY : src/demo/demo_gelu.o
 
@@ -165,6 +191,54 @@ src/demo/demo_gelu.s: src/demo/demo_gelu.cpp.s
 src/demo/demo_gelu.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_gelu.dir/build.make CMakeFiles/demo_gelu.dir/src/demo/demo_gelu.cpp.s
 .PHONY : src/demo/demo_gelu.cpp.s
+
+src/demo/demo_proto_gelu.o: src/demo/demo_proto_gelu.cpp.o
+.PHONY : src/demo/demo_proto_gelu.o
+
+# target to build an object file
+src/demo/demo_proto_gelu.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_gelu.dir/build.make CMakeFiles/demo_proto_gelu.dir/src/demo/demo_proto_gelu.cpp.o
+.PHONY : src/demo/demo_proto_gelu.cpp.o
+
+src/demo/demo_proto_gelu.i: src/demo/demo_proto_gelu.cpp.i
+.PHONY : src/demo/demo_proto_gelu.i
+
+# target to preprocess a source file
+src/demo/demo_proto_gelu.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_gelu.dir/build.make CMakeFiles/demo_proto_gelu.dir/src/demo/demo_proto_gelu.cpp.i
+.PHONY : src/demo/demo_proto_gelu.cpp.i
+
+src/demo/demo_proto_gelu.s: src/demo/demo_proto_gelu.cpp.s
+.PHONY : src/demo/demo_proto_gelu.s
+
+# target to generate assembly for a file
+src/demo/demo_proto_gelu.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_gelu.dir/build.make CMakeFiles/demo_proto_gelu.dir/src/demo/demo_proto_gelu.cpp.s
+.PHONY : src/demo/demo_proto_gelu.cpp.s
+
+src/demo/demo_proto_reluars.o: src/demo/demo_proto_reluars.cpp.o
+.PHONY : src/demo/demo_proto_reluars.o
+
+# target to build an object file
+src/demo/demo_proto_reluars.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_reluars.dir/build.make CMakeFiles/demo_proto_reluars.dir/src/demo/demo_proto_reluars.cpp.o
+.PHONY : src/demo/demo_proto_reluars.cpp.o
+
+src/demo/demo_proto_reluars.i: src/demo/demo_proto_reluars.cpp.i
+.PHONY : src/demo/demo_proto_reluars.i
+
+# target to preprocess a source file
+src/demo/demo_proto_reluars.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_reluars.dir/build.make CMakeFiles/demo_proto_reluars.dir/src/demo/demo_proto_reluars.cpp.i
+.PHONY : src/demo/demo_proto_reluars.cpp.i
+
+src/demo/demo_proto_reluars.s: src/demo/demo_proto_reluars.cpp.s
+.PHONY : src/demo/demo_proto_reluars.s
+
+# target to generate assembly for a file
+src/demo/demo_proto_reluars.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_reluars.dir/build.make CMakeFiles/demo_proto_reluars.dir/src/demo/demo_proto_reluars.cpp.s
+.PHONY : src/demo/demo_proto_reluars.cpp.s
 
 src/demo/demo_relu.o: src/demo/demo_relu.cpp.o
 .PHONY : src/demo/demo_relu.o
@@ -199,10 +273,18 @@ help:
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
 	@echo "... demo_gelu"
+	@echo "... demo_proto_gelu"
+	@echo "... demo_proto_reluars"
 	@echo "... demo_relu"
 	@echo "... src/demo/demo_gelu.o"
 	@echo "... src/demo/demo_gelu.i"
 	@echo "... src/demo/demo_gelu.s"
+	@echo "... src/demo/demo_proto_gelu.o"
+	@echo "... src/demo/demo_proto_gelu.i"
+	@echo "... src/demo/demo_proto_gelu.s"
+	@echo "... src/demo/demo_proto_reluars.o"
+	@echo "... src/demo/demo_proto_reluars.i"
+	@echo "... src/demo/demo_proto_reluars.s"
 	@echo "... src/demo/demo_relu.o"
 	@echo "... src/demo/demo_relu.i"
 	@echo "... src/demo/demo_relu.s"

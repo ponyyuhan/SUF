@@ -12,7 +12,7 @@
 namespace pfss {
 
 // Payload types for cleartext demo
-using PredPayload = std::vector<uint64_t>;   // packed bits (XOR shares)
+using PredPayload = std::vector<uint64_t>;   // packed bits (additive shares of 0/1)
 using CoeffPayload = std::vector<uint64_t>;  // coeff words (additive shares)
 
 inline uint64_t read_u64_key(const Key& k, size_t idx) {
@@ -41,7 +41,7 @@ struct CleartextBackendPred final : Backend<PredPayload> {
   PublicParams setup(int lambda_bits) override { return {"CLEAR_PRED", lambda_bits}; }
 
   std::pair<Key, Key> prog_gen(const PublicParams&, const ProgramDesc& desc) override {
-    if (!desc.kind.empty() && desc.kind != "predicates") {
+    if (!desc.kind.empty() && desc.kind != "predicates" && desc.kind != "lt") {
       throw std::runtime_error("CleartextBackendPred: unexpected program kind");
     }
     auto bits = pfss_desc::deserialize_pred_bits(desc.dealer_only_desc);
@@ -81,13 +81,13 @@ struct CleartextBackendPred final : Backend<PredPayload> {
       if (in) packed[idx / 64] |= (uint64_t(1) << (idx % 64));
     }
 
-    // Deterministic pseudo-random share for party 0, XOR with payload for party 1.
+    // Deterministic pseudo-random additive share for party 0, payload - share for party 1.
     std::mt19937_64 prng(seed ^ x_hat);
     PredPayload out(packed.size(), 0);
     for (size_t i = 0; i < packed.size(); ++i) {
-      uint64_t r = prng();
+      uint64_t r = prng() & 1ull;  // keep shares small (still additive mod 2^64)
       if (party == 0) out[i] = r;
-      else out[i] = packed[i] ^ r;
+      else out[i] = packed[i] - r;
     }
     return out;
   }
@@ -104,7 +104,7 @@ struct CleartextBackendCoeff final : Backend<CoeffPayload> {
   PublicParams setup(int lambda_bits) override { return {"CLEAR_COEFF", lambda_bits}; }
 
   std::pair<Key, Key> prog_gen(const PublicParams&, const ProgramDesc& desc) override {
-    if (!desc.kind.empty() && desc.kind != "coeff_lut") {
+    if (!desc.kind.empty() && desc.kind != "coeff_lut" && desc.kind != "interval_lut") {
       throw std::runtime_error("CleartextBackendCoeff: unexpected program kind");
     }
     auto pw = pfss_desc::deserialize_piecewise(desc.dealer_only_desc);

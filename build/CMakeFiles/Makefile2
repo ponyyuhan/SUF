@@ -65,6 +65,8 @@ CMAKE_BINARY_DIR = /home/yuhan/SUF/SUF/build
 # The main recursive "all" target.
 all: CMakeFiles/demo_relu.dir/all
 all: CMakeFiles/demo_gelu.dir/all
+all: CMakeFiles/demo_proto_reluars.dir/all
+all: CMakeFiles/demo_proto_gelu.dir/all
 .PHONY : all
 
 # The main recursive "preinstall" target.
@@ -74,6 +76,8 @@ preinstall:
 # The main recursive "clean" target.
 clean: CMakeFiles/demo_relu.dir/clean
 clean: CMakeFiles/demo_gelu.dir/clean
+clean: CMakeFiles/demo_proto_reluars.dir/clean
+clean: CMakeFiles/demo_proto_gelu.dir/clean
 .PHONY : clean
 
 #=============================================================================
@@ -83,7 +87,7 @@ clean: CMakeFiles/demo_gelu.dir/clean
 CMakeFiles/demo_relu.dir/all:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_relu.dir/build.make CMakeFiles/demo_relu.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_relu.dir/build.make CMakeFiles/demo_relu.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/SUF/SUF/build/CMakeFiles --progress-num=3,4 "Built target demo_relu"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/SUF/SUF/build/CMakeFiles --progress-num=7,8 "Built target demo_relu"
 .PHONY : CMakeFiles/demo_relu.dir/all
 
 # Build rule for subdir invocation for target.
@@ -127,6 +131,58 @@ demo_gelu: CMakeFiles/demo_gelu.dir/rule
 CMakeFiles/demo_gelu.dir/clean:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_gelu.dir/build.make CMakeFiles/demo_gelu.dir/clean
 .PHONY : CMakeFiles/demo_gelu.dir/clean
+
+#=============================================================================
+# Target rules for target CMakeFiles/demo_proto_reluars.dir
+
+# All Build rule for target.
+CMakeFiles/demo_proto_reluars.dir/all:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_reluars.dir/build.make CMakeFiles/demo_proto_reluars.dir/depend
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_reluars.dir/build.make CMakeFiles/demo_proto_reluars.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/SUF/SUF/build/CMakeFiles --progress-num=5,6 "Built target demo_proto_reluars"
+.PHONY : CMakeFiles/demo_proto_reluars.dir/all
+
+# Build rule for subdir invocation for target.
+CMakeFiles/demo_proto_reluars.dir/rule: cmake_check_build_system
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/yuhan/SUF/SUF/build/CMakeFiles 2
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/demo_proto_reluars.dir/all
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/yuhan/SUF/SUF/build/CMakeFiles 0
+.PHONY : CMakeFiles/demo_proto_reluars.dir/rule
+
+# Convenience name for target.
+demo_proto_reluars: CMakeFiles/demo_proto_reluars.dir/rule
+.PHONY : demo_proto_reluars
+
+# clean rule for target.
+CMakeFiles/demo_proto_reluars.dir/clean:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_reluars.dir/build.make CMakeFiles/demo_proto_reluars.dir/clean
+.PHONY : CMakeFiles/demo_proto_reluars.dir/clean
+
+#=============================================================================
+# Target rules for target CMakeFiles/demo_proto_gelu.dir
+
+# All Build rule for target.
+CMakeFiles/demo_proto_gelu.dir/all:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_gelu.dir/build.make CMakeFiles/demo_proto_gelu.dir/depend
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_gelu.dir/build.make CMakeFiles/demo_proto_gelu.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/SUF/SUF/build/CMakeFiles --progress-num=3,4 "Built target demo_proto_gelu"
+.PHONY : CMakeFiles/demo_proto_gelu.dir/all
+
+# Build rule for subdir invocation for target.
+CMakeFiles/demo_proto_gelu.dir/rule: cmake_check_build_system
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/yuhan/SUF/SUF/build/CMakeFiles 2
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/demo_proto_gelu.dir/all
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/yuhan/SUF/SUF/build/CMakeFiles 0
+.PHONY : CMakeFiles/demo_proto_gelu.dir/rule
+
+# Convenience name for target.
+demo_proto_gelu: CMakeFiles/demo_proto_gelu.dir/rule
+.PHONY : demo_proto_gelu
+
+# clean rule for target.
+CMakeFiles/demo_proto_gelu.dir/clean:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/demo_proto_gelu.dir/build.make CMakeFiles/demo_proto_gelu.dir/clean
+.PHONY : CMakeFiles/demo_proto_gelu.dir/clean
 
 #=============================================================================
 # Special targets to cleanup operation of make.
