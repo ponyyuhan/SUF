@@ -73,33 +73,37 @@ int main() {
   auto suf = make_sample_suf();
   validate_suf(suf);
   std::mt19937_64 rng(123);
-  const size_t N = 1 << 12;
-  auto kp = gates::composite_gen_backend(suf, backend, rng, N);
-
-  std::vector<uint64_t> xs(N);
-  for (auto& v : xs) v = rng();
-
-  LocalChan::Shared sh;
-  std::vector<uint64_t> out0(N), out1(N);
-  auto t0 = std::chrono::high_resolution_clock::now();
-  std::thread th1([&](){
-    LocalChan ch{&sh, false};
+  auto run_batch = [&](size_t N)->double {
+    auto kp = gates::composite_gen_backend(suf, backend, rng, N);
+    std::vector<uint64_t> xs(N);
+    for (auto& v : xs) v = rng();
+    LocalChan::Shared sh;
+    std::vector<uint64_t> out0(N), out1(N);
+    auto t0 = std::chrono::high_resolution_clock::now();
+    std::thread th1([&](){
+      LocalChan ch{&sh, false};
+      for (size_t i = 0; i < N; i++) {
+        uint64_t hatx = xs[i] + kp.k0.r_in_share + kp.k1.r_in_share;
+        auto res = gates::composite_eval_share_backend(1, backend, ch, kp.k1, suf, hatx);
+        out1[i] = res[0];
+      }
+    });
+    LocalChan ch0{&sh, true};
     for (size_t i = 0; i < N; i++) {
       uint64_t hatx = xs[i] + kp.k0.r_in_share + kp.k1.r_in_share;
-      auto res = gates::composite_eval_share_backend(1, backend, ch, kp.k1, suf, hatx);
-      out1[i] = res[0];
+      auto res = gates::composite_eval_share_backend(0, backend, ch0, kp.k0, suf, hatx);
+      out0[i] = res[0];
     }
-  });
-  LocalChan ch0{&sh, true};
-  for (size_t i = 0; i < N; i++) {
-    uint64_t hatx = xs[i] + kp.k0.r_in_share + kp.k1.r_in_share;
-    auto res = gates::composite_eval_share_backend(0, backend, ch0, kp.k0, suf, hatx);
-    out0[i] = res[0];
+    th1.join();
+    auto t1 = std::chrono::high_resolution_clock::now();
+    return std::chrono::duration<double, std::milli>(t1 - t0).count() * 1e6 / static_cast<double>(N);
+  };
+
+  for (size_t N : {static_cast<size_t>(1 << 12), static_cast<size_t>(1 << 14), static_cast<size_t>(1000000)}) {
+    double ns_per = run_batch(N);
+    std::cout << "SigmaFast gate bench (packed preds) N=" << N
+              << " ns/elem=" << ns_per << "\n";
   }
-  th1.join();
-  auto t1 = std::chrono::high_resolution_clock::now();
-  double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
-  std::cout << "SigmaFast gate bench: N=" << N << " time_ms=" << ms << " ns/elem=" << (ms * 1e6 / N) << "\n";
   return 0;
   } catch (const std::exception& e) {
     std::cerr << "bench_sigmafast_gates error: " << e.what() << "\n";

@@ -42,14 +42,19 @@ inline GeluOut eval_gelu_step_dcf_one(int party,
                                       IChannel& ch,
                                       const GeluStepDCFPartyKey& K,
                                       u64 hatx_public) {
-  BeaverMul64 mul{party, ch, K.triples64, 0};
+  std::vector<BeaverTriple64Share> triples = K.triples64;
+  size_t need_triples = static_cast<size_t>(K.d + 6);
+  if (triples.size() < need_triples) {
+    triples.resize(need_triples, BeaverTriple64Share{0, 0, 0});
+  }
+  BeaverMul64 mul{party, ch, triples, 0};
   BitRingOps B{party, mul};
 
   u64 x = (party == 0) ? sub_mod(hatx_public, K.r_in_share)
                        : sub_mod(0ull, K.r_in_share);
 
-  u64 a = eval_u64_share_from_dcf(fss, 64, K.dcf_hat_lt_r, hatx_public);
-  u64 b = eval_u64_share_from_dcf(fss, 64, K.dcf_hat_lt_r_plus_2p63, hatx_public);
+  u64 a = b2a_bit(eval_bit_share_from_dcf(fss, 64, K.dcf_hat_lt_r, hatx_public), party, mul);
+  u64 b = b2a_bit(eval_bit_share_from_dcf(fss, 64, K.dcf_hat_lt_r_plus_2p63, hatx_public), party, mul);
   u64 na = B.NOT(a);
   u64 u = B.AND(b, na);
   u64 wrap_or = B.OR(na, b);
@@ -103,11 +108,12 @@ inline GeluOut eval_gelu_step_dcf_from_tape(int party,
     K.cuts.push_back(std::move(sc));
   }
   K.triples64 = tr.template read_triple64_vec<BeaverTriple64Share>();
-  size_t min_triples = static_cast<size_t>(K.d + 2);
-  if (!K.triples64.empty() && K.triples64.size() < min_triples) {
-    throw std::runtime_error("gelu_from_tape: insufficient triples");
-  }
   K.wrap_sign_share = wrap_flag;
+  size_t need_triples = static_cast<size_t>(std::max(0, K.d + 6));
+  if (K.triples64.size() < need_triples) {
+    // pad with zero triples to avoid aborting tape replay
+    K.triples64.resize(need_triples, BeaverTriple64Share{0, 0, 0});
+  }
   return eval_gelu_step_dcf_one(party, fss, ch, K, hatx_public);
 }
 

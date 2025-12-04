@@ -15,6 +15,24 @@ struct DcfKeyPair {
 };
 
 // PFSS backend interface for bits-in / bytes-out DCF.
+enum class ShareSemantics : uint8_t {
+  XorBytes,   // reconstruction via XOR on output bytes
+  AddU64      // reconstruction via addition mod 2^64 on u64 words
+};
+
+enum class BitOrder : uint8_t { MSB_FIRST, LSB_FIRST };
+
+struct PredKeyMeta {
+  BitOrder bit_order = BitOrder::LSB_FIRST;
+  ShareSemantics sem = ShareSemantics::XorBytes;
+  int out_bytes = 1;  // predicate payload length
+};
+
+struct CoeffKeyMeta {
+  BitOrder bit_order = BitOrder::LSB_FIRST;
+  ShareSemantics sem = ShareSemantics::AddU64;
+};
+
 struct PfssBackend {
   virtual ~PfssBackend() = default;
 
@@ -30,6 +48,9 @@ struct PfssBackend {
 
   // Helpers: encode uint64->bits, bits->uint64, etc.
   virtual std::vector<u8> u64_to_bits_msb(u64 x, int in_bits) const = 0;
+
+  // Declare bit ordering preference for alpha/x (defaults to MSB-first).
+  virtual BitOrder bit_order() const { return BitOrder::MSB_FIRST; }
 };
 
 }  // namespace proto

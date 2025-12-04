@@ -171,6 +171,17 @@ CompiledSUFGate compile_suf_to_pfss_two_programs(
   out.degree = F.degree;
   out.r = F.r_out;
   out.ell = F.l_out;
+  // Default layout names to avoid ambiguity downstream.
+  out.layout.arith_ports.resize(out.r);
+  for (int i = 0; i < out.r; i++) {
+    out.layout.arith_ports[static_cast<size_t>(i)] = "y" + std::to_string(i);
+  }
+  out.layout.bool_ports.resize(out.ell);
+  for (int i = 0; i < out.ell; i++) {
+    out.layout.bool_ports[static_cast<size_t>(i)] = "b" + std::to_string(i);
+  }
+  // Gate-specific extras: keep empty unless filled by a higher-level builder.
+  out.extra_u64.clear();
 
   std::vector<RawPredQuery> queries;
   std::unordered_map<QueryKey,int,QueryKeyHash> qmap;

@@ -82,9 +82,9 @@ inline ReluARSOut eval_reluars_one(int party,
   const int f = K.f;
   const u64 off = (f == 0) ? 0ull : (1ull << (f - 1));
 
-  // helper bits from DCFs
-  u64 a = eval_u64_share_from_dcf(fss, 64, K.dcf_hat_lt_r, hatx_public);                 // 1[hatx < r]
-  u64 b = eval_u64_share_from_dcf(fss, 64, K.dcf_hat_lt_r_plus_2p63, hatx_public);       // 1[hatx < r+2^63]
+  // helper bits from DCFs (XOR shares -> additive via b2a)
+  u64 a = b2a_bit(eval_bit_share_from_dcf(fss, 64, K.dcf_hat_lt_r, hatx_public), party, mul);                 // 1[hatx < r]
+  u64 b = b2a_bit(eval_bit_share_from_dcf(fss, 64, K.dcf_hat_lt_r_plus_2p63, hatx_public), party, mul);       // 1[hatx < r+2^63]
   u64 na = B.NOT(a);
   u64 u = B.AND(b, na);
   u64 wrap_or = B.OR(na, b);
@@ -92,8 +92,8 @@ inline ReluARSOut eval_reluars_one(int party,
 
   u64 hatz = hatx_public + off;
   u64 hatz_low = (f == 64) ? hatz : (hatz & ((1ull << f) - 1));
-  u64 t = eval_u64_share_from_dcf(fss, f, K.dcf_low_lt_r_low, hatz_low);
-  u64 s = eval_u64_share_from_dcf(fss, f, K.dcf_low_lt_r_low_plus1, hatz_low);
+  u64 t = b2a_bit(eval_bit_share_from_dcf(fss, f, K.dcf_low_lt_r_low, hatz_low), party, mul);
+  u64 s = b2a_bit(eval_bit_share_from_dcf(fss, f, K.dcf_low_lt_r_low_plus1, hatz_low), party, mul);
   u64 d = B.AND(s, B.NOT(t));
 
   // truncation core

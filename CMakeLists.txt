@@ -138,6 +138,10 @@ add_executable(test_composite_equiv_proto_sigmafast src/demo/test_composite_equi
 target_include_directories(test_composite_equiv_proto_sigmafast PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_composite_equiv_proto_sigmafast PRIVATE suf_fss ${MYL7_LINK_LIBS})
 
+add_executable(test_postproc_hooks src/demo/test_postproc_hooks.cpp)
+target_include_directories(test_postproc_hooks PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_postproc_hooks PRIVATE suf_fss ${MYL7_LINK_LIBS})
+
 add_executable(bench_sigmafast_pred src/bench/bench_sigmafast_pred.cpp)
 target_include_directories(bench_sigmafast_pred PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(bench_sigmafast_pred PRIVATE suf_fss ${MYL7_LINK_LIBS})

@@ -63,7 +63,7 @@ struct ReluARSDealerOut {
   ReluARSPartyKey k1;
 };
 
-inline constexpr size_t reluars_triples64_needed() { return 12; }
+inline constexpr size_t reluars_triples64_needed() { return 16; }
 
 class ReluARSDealer {
 public:
@@ -100,7 +100,7 @@ public:
     out.k0.wrap_sign_share = wrap0;
     out.k1.wrap_sign_share = wrap1;
 
-    auto one_byte = pack_u64_le(1ull);
+    std::vector<u8> one_byte{1u};
 
     auto thr1_bits = fss.u64_to_bits_msb(thr1, 64);
     auto thr2_bits = fss.u64_to_bits_msb(thr2, 64);

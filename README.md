@@ -14,7 +14,7 @@ include/
   proto/                          # bits-in/bytes-out DCF 原型层
     backend_clear.hpp             # 明文 DCF/区间 LUT
     myl7_fss_backend.hpp          # 真实 myl7/fss 适配（支持 payload 分块）
-    sigma_fast_backend_ext.hpp    # packed compare / interval LUT stub
+    sigma_fast_backend_ext.hpp    # packed compare / interval LUT（CPU stub，支持 in_bits<=64 掩码打包）
     beaver*/bit_ring_ops.hpp      # 批量 Beaver + 布尔算子
     tape.hpp                      # Vec/File tape，统一标签格式
     reluars_* / gelu_*            # 离线 dealer + 在线 evaluator
@@ -38,7 +38,7 @@ expand*.md, initial.md, milestone*.md, paper.md
 - **后端抽象**：
   - `proto/backend_clear.hpp`：确定性明文 share（party0 负载，party1=0），用于自测/harness。
   - `proto/myl7_fss_backend.hpp`：真实 myl7/fss 适配。若检测到 `<fss/dcf.h>`，使用 C 库 keygen/eval；payload 超过 `kLambda` 时自动按 `kLambda` 分块生成多把 DCF key 并拼回原始长度；key header 编码包含 in_bits / 分块数 / party 位 / payload_len。
-  - `proto/sigma_fast_backend_ext.hpp`：packed compare / interval LUT 的 stub（当前委托明文逻辑，预留 SIGMA fast path）。
+  - `proto/sigma_fast_backend_ext.hpp`：packed compare / interval LUT 的 CPU 实现（party0 为真实掩码或 payload，party1=0），支持 `in_bits<=64`，带断言测试 `test_sigmafast`。
 
 ## 构建与运行
 
@@ -50,6 +50,8 @@ expand*.md, initial.md, milestone*.md, paper.md
   ./build/test_suf_ref_eval      # SUF 参考语义
   ./build/test_mask_rewrite      # 掩码重写性质
   ./build/test_compile_pfss      # SUF→PFSS 编译一致性
+  ./build/test_sigmafast         # SigmaFast packed compare + interval LUT
+  ./build/test_composite_runtime # 组合式 SUF 门运行时（Clear 后端，两方线程）
   ```
 - **接入真实 myl7/fss（自动 FetchContent，禁用 CUDA/样例/测试）**
   ```bash
@@ -70,4 +72,6 @@ expand*.md, initial.md, milestone*.md, paper.md
 
 - Milestone 1-6 ✅：核心 runtime + Tape + SUF 语义/掩码重写 + SUF→PFSS 编译 + 清晰的后端接口；wrap 泄露已修复（additive share + MPC SEL）。`sim_harness`、`test_*` 皆通过（ReluARS/GeLU 断言式随机 2000 例）。
 - 已接入 myl7/fss：CMake 可一键拉取/链接，后端实际调用 `dcf_gen/eval`，支持 payload 分块；未检测到头文件时自动回退到内存 stub。
-- 待优化：真实 Delta/LUT/样条系数替换 toy 数据；SigmaFast packed compare & interval LUT 真实现；性能化批处理（GPU/SoA）可复用现有 pack/batch API。
+- SigmaFast（CPU）现有 packed compare/interval LUT stub，输出 party0 掩码或 payload，配合 `test_sigmafast` 做正确性；后续可替换为 SIGMA 风格 PRG/packing 以获得真实吞吐。
+- 组合式 SUF 运行时雏形：`gates/composite_fss.hpp` + `test_composite_runtime`（使用 ClearBackend+Beaver/线程通道）；接口已为通用后端设计，Myl7/SigmaFast 需要按各自输出域做比特重分享/布尔 DAG MPC。
+- 待优化：真实 Delta/LUT/样条系数替换 toy 数据；性能化批处理（GPU/SoA）与 SigmaFast PRG 优化。

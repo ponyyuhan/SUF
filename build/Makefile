@@ -85,51 +85,6 @@ rebuild_cache:
 rebuild_cache/fast: rebuild_cache
 .PHONY : rebuild_cache/fast
 
-# Special rule for the target list_install_components
-list_install_components:
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --cyan "Available install components are: \"gmock\" \"gtest\""
-.PHONY : list_install_components
-
-# Special rule for the target list_install_components
-list_install_components/fast: list_install_components
-.PHONY : list_install_components/fast
-
-# Special rule for the target install
-install: preinstall
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --cyan "Install the project..."
-	/usr/bin/cmake -P cmake_install.cmake
-.PHONY : install
-
-# Special rule for the target install
-install/fast: preinstall/fast
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --cyan "Install the project..."
-	/usr/bin/cmake -P cmake_install.cmake
-.PHONY : install/fast
-
-# Special rule for the target install/local
-install/local: preinstall
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --cyan "Installing only the local directory..."
-	/usr/bin/cmake -DCMAKE_INSTALL_LOCAL_ONLY=1 -P cmake_install.cmake
-.PHONY : install/local
-
-# Special rule for the target install/local
-install/local/fast: preinstall/fast
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --cyan "Installing only the local directory..."
-	/usr/bin/cmake -DCMAKE_INSTALL_LOCAL_ONLY=1 -P cmake_install.cmake
-.PHONY : install/local/fast
-
-# Special rule for the target install/strip
-install/strip: preinstall
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --cyan "Installing the project stripped..."
-	/usr/bin/cmake -DCMAKE_INSTALL_DO_STRIP=1 -P cmake_install.cmake
-.PHONY : install/strip
-
-# Special rule for the target install/strip
-install/strip/fast: preinstall/fast
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --cyan "Installing the project stripped..."
-	/usr/bin/cmake -DCMAKE_INSTALL_DO_STRIP=1 -P cmake_install.cmake
-.PHONY : install/strip/fast
-
 # The main all target
 all: cmake_check_build_system
 	$(CMAKE_COMMAND) -E cmake_progress_start /home/yuhan/SUF/SUF/build/CMakeFiles /home/yuhan/SUF/SUF/build//CMakeFiles/progress.marks
@@ -160,6 +115,19 @@ preinstall/fast:
 depend:
 	$(CMAKE_COMMAND) -S$(CMAKE_SOURCE_DIR) -B$(CMAKE_BINARY_DIR) --check-build-system CMakeFiles/Makefile.cmake 1
 .PHONY : depend
+
+#=============================================================================
+# Target rules for targets named myl7_core
+
+# Build rule for target.
+myl7_core: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 myl7_core
+.PHONY : myl7_core
+
+# fast build rule for target.
+myl7_core/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/myl7_core.dir/build.make CMakeFiles/myl7_core.dir/build
+.PHONY : myl7_core/fast
 
 #=============================================================================
 # Target rules for targets named sim_harness
@@ -214,225 +182,219 @@ test_compile_pfss/fast:
 .PHONY : test_compile_pfss/fast
 
 #=============================================================================
-# Target rules for targets named dpf
+# Target rules for targets named test_sigmafast
 
 # Build rule for target.
-dpf: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 dpf
-.PHONY : dpf
+test_sigmafast: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_sigmafast
+.PHONY : test_sigmafast
 
 # fast build rule for target.
-dpf/fast:
-	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/dpf.dir/build.make _deps/myl7_fss-build/CMakeFiles/dpf.dir/build
-.PHONY : dpf/fast
+test_sigmafast/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_sigmafast.dir/build.make CMakeFiles/test_sigmafast.dir/build
+.PHONY : test_sigmafast/fast
 
 #=============================================================================
-# Target rules for targets named dcf
+# Target rules for targets named test_composite_runtime
 
 # Build rule for target.
-dcf: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 dcf
-.PHONY : dcf
+test_composite_runtime: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_composite_runtime
+.PHONY : test_composite_runtime
 
 # fast build rule for target.
-dcf/fast:
-	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/dcf.dir/build.make _deps/myl7_fss-build/CMakeFiles/dcf.dir/build
-.PHONY : dcf/fast
+test_composite_runtime/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_runtime.dir/build.make CMakeFiles/test_composite_runtime.dir/build
+.PHONY : test_composite_runtime/fast
 
 #=============================================================================
-# Target rules for targets named cw_mac_bytes
+# Target rules for targets named test_pred_semantics
 
 # Build rule for target.
-cw_mac_bytes: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 cw_mac_bytes
-.PHONY : cw_mac_bytes
+test_pred_semantics: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_pred_semantics
+.PHONY : test_pred_semantics
 
 # fast build rule for target.
-cw_mac_bytes/fast:
-	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/cw_mac_bytes.dir/build.make _deps/myl7_fss-build/CMakeFiles/cw_mac_bytes.dir/build
-.PHONY : cw_mac_bytes/fast
+test_pred_semantics/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pred_semantics.dir/build.make CMakeFiles/test_pred_semantics.dir/build
+.PHONY : test_pred_semantics/fast
 
 #=============================================================================
-# Target rules for targets named dpf_u128_le_test
+# Target rules for targets named test_composite_equiv_proto
 
 # Build rule for target.
-dpf_u128_le_test: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 dpf_u128_le_test
-.PHONY : dpf_u128_le_test
+test_composite_equiv_proto: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_composite_equiv_proto
+.PHONY : test_composite_equiv_proto
 
 # fast build rule for target.
-dpf_u128_le_test/fast:
-	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/dpf_u128_le_test.dir/build.make _deps/myl7_fss-build/CMakeFiles/dpf_u128_le_test.dir/build
-.PHONY : dpf_u128_le_test/fast
+test_composite_equiv_proto/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto.dir/build.make CMakeFiles/test_composite_equiv_proto.dir/build
+.PHONY : test_composite_equiv_proto/fast
 
 #=============================================================================
-# Target rules for targets named dpf_bytes_test
+# Target rules for targets named test_composite_equiv_proto_myl7
 
 # Build rule for target.
-dpf_bytes_test: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 dpf_bytes_test
-.PHONY : dpf_bytes_test
+test_composite_equiv_proto_myl7: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_composite_equiv_proto_myl7
+.PHONY : test_composite_equiv_proto_myl7
 
 # fast build rule for target.
-dpf_bytes_test/fast:
-	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/dpf_bytes_test.dir/build.make _deps/myl7_fss-build/CMakeFiles/dpf_bytes_test.dir/build
-.PHONY : dpf_bytes_test/fast
+test_composite_equiv_proto_myl7/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_myl7.dir/build.make CMakeFiles/test_composite_equiv_proto_myl7.dir/build
+.PHONY : test_composite_equiv_proto_myl7/fast
 
 #=============================================================================
-# Target rules for targets named dcf_u128_le_test
+# Target rules for targets named test_composite_equiv_proto_sigmafast
 
 # Build rule for target.
-dcf_u128_le_test: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 dcf_u128_le_test
-.PHONY : dcf_u128_le_test
+test_composite_equiv_proto_sigmafast: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_composite_equiv_proto_sigmafast
+.PHONY : test_composite_equiv_proto_sigmafast
 
 # fast build rule for target.
-dcf_u128_le_test/fast:
-	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/dcf_u128_le_test.dir/build.make _deps/myl7_fss-build/CMakeFiles/dcf_u128_le_test.dir/build
-.PHONY : dcf_u128_le_test/fast
+test_composite_equiv_proto_sigmafast/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_sigmafast.dir/build.make CMakeFiles/test_composite_equiv_proto_sigmafast.dir/build
+.PHONY : test_composite_equiv_proto_sigmafast/fast
 
 #=============================================================================
-# Target rules for targets named dcf_bytes_test
+# Target rules for targets named test_postproc_hooks
 
 # Build rule for target.
-dcf_bytes_test: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 dcf_bytes_test
-.PHONY : dcf_bytes_test
+test_postproc_hooks: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_postproc_hooks
+.PHONY : test_postproc_hooks
 
 # fast build rule for target.
-dcf_bytes_test/fast:
-	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/dcf_bytes_test.dir/build.make _deps/myl7_fss-build/CMakeFiles/dcf_bytes_test.dir/build
-.PHONY : dcf_bytes_test/fast
+test_postproc_hooks/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_postproc_hooks.dir/build.make CMakeFiles/test_postproc_hooks.dir/build
+.PHONY : test_postproc_hooks/fast
 
 #=============================================================================
-# Target rules for targets named cw_mac_bytes_test
+# Target rules for targets named bench_sigmafast_pred
 
 # Build rule for target.
-cw_mac_bytes_test: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 cw_mac_bytes_test
-.PHONY : cw_mac_bytes_test
+bench_sigmafast_pred: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 bench_sigmafast_pred
+.PHONY : bench_sigmafast_pred
 
 # fast build rule for target.
-cw_mac_bytes_test/fast:
-	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/cw_mac_bytes_test.dir/build.make _deps/myl7_fss-build/CMakeFiles/cw_mac_bytes_test.dir/build
-.PHONY : cw_mac_bytes_test/fast
+bench_sigmafast_pred/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_sigmafast_pred.dir/build.make CMakeFiles/bench_sigmafast_pred.dir/build
+.PHONY : bench_sigmafast_pred/fast
 
 #=============================================================================
-# Target rules for targets named dpf_cuda
+# Target rules for targets named bench_sigmafast_coeff
 
 # Build rule for target.
-dpf_cuda: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 dpf_cuda
-.PHONY : dpf_cuda
+bench_sigmafast_coeff: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 bench_sigmafast_coeff
+.PHONY : bench_sigmafast_coeff
 
 # fast build rule for target.
-dpf_cuda/fast:
-	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/dpf_cuda.dir/build.make _deps/myl7_fss-build/CMakeFiles/dpf_cuda.dir/build
-.PHONY : dpf_cuda/fast
+bench_sigmafast_coeff/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_sigmafast_coeff.dir/build.make CMakeFiles/bench_sigmafast_coeff.dir/build
+.PHONY : bench_sigmafast_coeff/fast
 
 #=============================================================================
-# Target rules for targets named sample_dpf_u128_le_aes_mmo
+# Target rules for targets named bench_sigmafast_gates
 
 # Build rule for target.
-sample_dpf_u128_le_aes_mmo: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 sample_dpf_u128_le_aes_mmo
-.PHONY : sample_dpf_u128_le_aes_mmo
+bench_sigmafast_gates: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 bench_sigmafast_gates
+.PHONY : bench_sigmafast_gates
 
 # fast build rule for target.
-sample_dpf_u128_le_aes_mmo/fast:
-	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/sample_dpf_u128_le_aes_mmo.dir/build.make _deps/myl7_fss-build/CMakeFiles/sample_dpf_u128_le_aes_mmo.dir/build
-.PHONY : sample_dpf_u128_le_aes_mmo/fast
+bench_sigmafast_gates/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_sigmafast_gates.dir/build.make CMakeFiles/bench_sigmafast_gates.dir/build
+.PHONY : bench_sigmafast_gates/fast
 
 #=============================================================================
-# Target rules for targets named sample_dpf_u128_le_aes_mmo_ni
+# Target rules for targets named test_myl7_bit_order
 
 # Build rule for target.
-sample_dpf_u128_le_aes_mmo_ni: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 sample_dpf_u128_le_aes_mmo_ni
-.PHONY : sample_dpf_u128_le_aes_mmo_ni
+test_myl7_bit_order: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_myl7_bit_order
+.PHONY : test_myl7_bit_order
 
 # fast build rule for target.
-sample_dpf_u128_le_aes_mmo_ni/fast:
-	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/sample_dpf_u128_le_aes_mmo_ni.dir/build.make _deps/myl7_fss-build/CMakeFiles/sample_dpf_u128_le_aes_mmo_ni.dir/build
-.PHONY : sample_dpf_u128_le_aes_mmo_ni/fast
+test_myl7_bit_order/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_myl7_bit_order.dir/build.make CMakeFiles/test_myl7_bit_order.dir/build
+.PHONY : test_myl7_bit_order/fast
 
-#=============================================================================
-# Target rules for targets named sample_dpf_full_domain_u128_le_aes_mmo_ni
+src/bench/bench_sigmafast_coeff.o: src/bench/bench_sigmafast_coeff.cpp.o
+.PHONY : src/bench/bench_sigmafast_coeff.o
 
-# Build rule for target.
-sample_dpf_full_domain_u128_le_aes_mmo_ni: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 sample_dpf_full_domain_u128_le_aes_mmo_ni
-.PHONY : sample_dpf_full_domain_u128_le_aes_mmo_ni
+# target to build an object file
+src/bench/bench_sigmafast_coeff.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_sigmafast_coeff.dir/build.make CMakeFiles/bench_sigmafast_coeff.dir/src/bench/bench_sigmafast_coeff.cpp.o
+.PHONY : src/bench/bench_sigmafast_coeff.cpp.o
 
-# fast build rule for target.
-sample_dpf_full_domain_u128_le_aes_mmo_ni/fast:
-	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/sample_dpf_full_domain_u128_le_aes_mmo_ni.dir/build.make _deps/myl7_fss-build/CMakeFiles/sample_dpf_full_domain_u128_le_aes_mmo_ni.dir/build
-.PHONY : sample_dpf_full_domain_u128_le_aes_mmo_ni/fast
+src/bench/bench_sigmafast_coeff.i: src/bench/bench_sigmafast_coeff.cpp.i
+.PHONY : src/bench/bench_sigmafast_coeff.i
 
-#=============================================================================
-# Target rules for targets named sample_dpf_cuda_u128_le_salsa20
+# target to preprocess a source file
+src/bench/bench_sigmafast_coeff.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_sigmafast_coeff.dir/build.make CMakeFiles/bench_sigmafast_coeff.dir/src/bench/bench_sigmafast_coeff.cpp.i
+.PHONY : src/bench/bench_sigmafast_coeff.cpp.i
 
-# Build rule for target.
-sample_dpf_cuda_u128_le_salsa20: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 sample_dpf_cuda_u128_le_salsa20
-.PHONY : sample_dpf_cuda_u128_le_salsa20
+src/bench/bench_sigmafast_coeff.s: src/bench/bench_sigmafast_coeff.cpp.s
+.PHONY : src/bench/bench_sigmafast_coeff.s
 
-# fast build rule for target.
-sample_dpf_cuda_u128_le_salsa20/fast:
-	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/CMakeFiles/sample_dpf_cuda_u128_le_salsa20.dir/build.make _deps/myl7_fss-build/CMakeFiles/sample_dpf_cuda_u128_le_salsa20.dir/build
-.PHONY : sample_dpf_cuda_u128_le_salsa20/fast
+# target to generate assembly for a file
+src/bench/bench_sigmafast_coeff.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_sigmafast_coeff.dir/build.make CMakeFiles/bench_sigmafast_coeff.dir/src/bench/bench_sigmafast_coeff.cpp.s
+.PHONY : src/bench/bench_sigmafast_coeff.cpp.s
 
-#=============================================================================
-# Target rules for targets named gmock
+src/bench/bench_sigmafast_gates.o: src/bench/bench_sigmafast_gates.cpp.o
+.PHONY : src/bench/bench_sigmafast_gates.o
 
-# Build rule for target.
-gmock: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 gmock
-.PHONY : gmock
+# target to build an object file
+src/bench/bench_sigmafast_gates.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_sigmafast_gates.dir/build.make CMakeFiles/bench_sigmafast_gates.dir/src/bench/bench_sigmafast_gates.cpp.o
+.PHONY : src/bench/bench_sigmafast_gates.cpp.o
 
-# fast build rule for target.
-gmock/fast:
-	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/third_party/googletest/googlemock/CMakeFiles/gmock.dir/build.make _deps/myl7_fss-build/third_party/googletest/googlemock/CMakeFiles/gmock.dir/build
-.PHONY : gmock/fast
+src/bench/bench_sigmafast_gates.i: src/bench/bench_sigmafast_gates.cpp.i
+.PHONY : src/bench/bench_sigmafast_gates.i
 
-#=============================================================================
-# Target rules for targets named gmock_main
+# target to preprocess a source file
+src/bench/bench_sigmafast_gates.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_sigmafast_gates.dir/build.make CMakeFiles/bench_sigmafast_gates.dir/src/bench/bench_sigmafast_gates.cpp.i
+.PHONY : src/bench/bench_sigmafast_gates.cpp.i
 
-# Build rule for target.
-gmock_main: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 gmock_main
-.PHONY : gmock_main
+src/bench/bench_sigmafast_gates.s: src/bench/bench_sigmafast_gates.cpp.s
+.PHONY : src/bench/bench_sigmafast_gates.s
 
-# fast build rule for target.
-gmock_main/fast:
-	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/third_party/googletest/googlemock/CMakeFiles/gmock_main.dir/build.make _deps/myl7_fss-build/third_party/googletest/googlemock/CMakeFiles/gmock_main.dir/build
-.PHONY : gmock_main/fast
+# target to generate assembly for a file
+src/bench/bench_sigmafast_gates.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_sigmafast_gates.dir/build.make CMakeFiles/bench_sigmafast_gates.dir/src/bench/bench_sigmafast_gates.cpp.s
+.PHONY : src/bench/bench_sigmafast_gates.cpp.s
 
-#=============================================================================
-# Target rules for targets named gtest
+src/bench/bench_sigmafast_pred.o: src/bench/bench_sigmafast_pred.cpp.o
+.PHONY : src/bench/bench_sigmafast_pred.o
 
-# Build rule for target.
-gtest: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 gtest
-.PHONY : gtest
+# target to build an object file
+src/bench/bench_sigmafast_pred.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_sigmafast_pred.dir/build.make CMakeFiles/bench_sigmafast_pred.dir/src/bench/bench_sigmafast_pred.cpp.o
+.PHONY : src/bench/bench_sigmafast_pred.cpp.o
 
-# fast build rule for target.
-gtest/fast:
-	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/third_party/googletest/googletest/CMakeFiles/gtest.dir/build.make _deps/myl7_fss-build/third_party/googletest/googletest/CMakeFiles/gtest.dir/build
-.PHONY : gtest/fast
+src/bench/bench_sigmafast_pred.i: src/bench/bench_sigmafast_pred.cpp.i
+.PHONY : src/bench/bench_sigmafast_pred.i
 
-#=============================================================================
-# Target rules for targets named gtest_main
+# target to preprocess a source file
+src/bench/bench_sigmafast_pred.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_sigmafast_pred.dir/build.make CMakeFiles/bench_sigmafast_pred.dir/src/bench/bench_sigmafast_pred.cpp.i
+.PHONY : src/bench/bench_sigmafast_pred.cpp.i
 
-# Build rule for target.
-gtest_main: cmake_check_build_system
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 gtest_main
-.PHONY : gtest_main
+src/bench/bench_sigmafast_pred.s: src/bench/bench_sigmafast_pred.cpp.s
+.PHONY : src/bench/bench_sigmafast_pred.s
 
-# fast build rule for target.
-gtest_main/fast:
-	$(MAKE) $(MAKESILENT) -f _deps/myl7_fss-build/third_party/googletest/googletest/CMakeFiles/gtest_main.dir/build.make _deps/myl7_fss-build/third_party/googletest/googletest/CMakeFiles/gtest_main.dir/build
-.PHONY : gtest_main/fast
+# target to generate assembly for a file
+src/bench/bench_sigmafast_pred.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_sigmafast_pred.dir/build.make CMakeFiles/bench_sigmafast_pred.dir/src/bench/bench_sigmafast_pred.cpp.s
+.PHONY : src/bench/bench_sigmafast_pred.cpp.s
 
 src/compiler/suf_to_pfss.o: src/compiler/suf_to_pfss.cpp.o
 .PHONY : src/compiler/suf_to_pfss.o
@@ -440,6 +402,11 @@ src/compiler/suf_to_pfss.o: src/compiler/suf_to_pfss.cpp.o
 # target to build an object file
 src/compiler/suf_to_pfss.cpp.o:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_compile_pfss.dir/build.make CMakeFiles/test_compile_pfss.dir/src/compiler/suf_to_pfss.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_runtime.dir/build.make CMakeFiles/test_composite_runtime.dir/src/compiler/suf_to_pfss.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto.dir/build.make CMakeFiles/test_composite_equiv_proto.dir/src/compiler/suf_to_pfss.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_myl7.dir/build.make CMakeFiles/test_composite_equiv_proto_myl7.dir/src/compiler/suf_to_pfss.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_sigmafast.dir/build.make CMakeFiles/test_composite_equiv_proto_sigmafast.dir/src/compiler/suf_to_pfss.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_sigmafast_gates.dir/build.make CMakeFiles/bench_sigmafast_gates.dir/src/compiler/suf_to_pfss.cpp.o
 .PHONY : src/compiler/suf_to_pfss.cpp.o
 
 src/compiler/suf_to_pfss.i: src/compiler/suf_to_pfss.cpp.i
@@ -448,6 +415,11 @@ src/compiler/suf_to_pfss.i: src/compiler/suf_to_pfss.cpp.i
 # target to preprocess a source file
 src/compiler/suf_to_pfss.cpp.i:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_compile_pfss.dir/build.make CMakeFiles/test_compile_pfss.dir/src/compiler/suf_to_pfss.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_runtime.dir/build.make CMakeFiles/test_composite_runtime.dir/src/compiler/suf_to_pfss.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto.dir/build.make CMakeFiles/test_composite_equiv_proto.dir/src/compiler/suf_to_pfss.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_myl7.dir/build.make CMakeFiles/test_composite_equiv_proto_myl7.dir/src/compiler/suf_to_pfss.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_sigmafast.dir/build.make CMakeFiles/test_composite_equiv_proto_sigmafast.dir/src/compiler/suf_to_pfss.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_sigmafast_gates.dir/build.make CMakeFiles/bench_sigmafast_gates.dir/src/compiler/suf_to_pfss.cpp.i
 .PHONY : src/compiler/suf_to_pfss.cpp.i
 
 src/compiler/suf_to_pfss.s: src/compiler/suf_to_pfss.cpp.s
@@ -456,6 +428,11 @@ src/compiler/suf_to_pfss.s: src/compiler/suf_to_pfss.cpp.s
 # target to generate assembly for a file
 src/compiler/suf_to_pfss.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_compile_pfss.dir/build.make CMakeFiles/test_compile_pfss.dir/src/compiler/suf_to_pfss.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_runtime.dir/build.make CMakeFiles/test_composite_runtime.dir/src/compiler/suf_to_pfss.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto.dir/build.make CMakeFiles/test_composite_equiv_proto.dir/src/compiler/suf_to_pfss.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_myl7.dir/build.make CMakeFiles/test_composite_equiv_proto_myl7.dir/src/compiler/suf_to_pfss.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_sigmafast.dir/build.make CMakeFiles/test_composite_equiv_proto_sigmafast.dir/src/compiler/suf_to_pfss.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_sigmafast_gates.dir/build.make CMakeFiles/bench_sigmafast_gates.dir/src/compiler/suf_to_pfss.cpp.s
 .PHONY : src/compiler/suf_to_pfss.cpp.s
 
 src/demo/sim_harness.o: src/demo/sim_harness.cpp.o
@@ -506,6 +483,102 @@ src/demo/test_compile_pfss.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_compile_pfss.dir/build.make CMakeFiles/test_compile_pfss.dir/src/demo/test_compile_pfss.cpp.s
 .PHONY : src/demo/test_compile_pfss.cpp.s
 
+src/demo/test_composite_equiv_proto.o: src/demo/test_composite_equiv_proto.cpp.o
+.PHONY : src/demo/test_composite_equiv_proto.o
+
+# target to build an object file
+src/demo/test_composite_equiv_proto.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto.dir/build.make CMakeFiles/test_composite_equiv_proto.dir/src/demo/test_composite_equiv_proto.cpp.o
+.PHONY : src/demo/test_composite_equiv_proto.cpp.o
+
+src/demo/test_composite_equiv_proto.i: src/demo/test_composite_equiv_proto.cpp.i
+.PHONY : src/demo/test_composite_equiv_proto.i
+
+# target to preprocess a source file
+src/demo/test_composite_equiv_proto.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto.dir/build.make CMakeFiles/test_composite_equiv_proto.dir/src/demo/test_composite_equiv_proto.cpp.i
+.PHONY : src/demo/test_composite_equiv_proto.cpp.i
+
+src/demo/test_composite_equiv_proto.s: src/demo/test_composite_equiv_proto.cpp.s
+.PHONY : src/demo/test_composite_equiv_proto.s
+
+# target to generate assembly for a file
+src/demo/test_composite_equiv_proto.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto.dir/build.make CMakeFiles/test_composite_equiv_proto.dir/src/demo/test_composite_equiv_proto.cpp.s
+.PHONY : src/demo/test_composite_equiv_proto.cpp.s
+
+src/demo/test_composite_equiv_proto_myl7.o: src/demo/test_composite_equiv_proto_myl7.cpp.o
+.PHONY : src/demo/test_composite_equiv_proto_myl7.o
+
+# target to build an object file
+src/demo/test_composite_equiv_proto_myl7.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_myl7.dir/build.make CMakeFiles/test_composite_equiv_proto_myl7.dir/src/demo/test_composite_equiv_proto_myl7.cpp.o
+.PHONY : src/demo/test_composite_equiv_proto_myl7.cpp.o
+
+src/demo/test_composite_equiv_proto_myl7.i: src/demo/test_composite_equiv_proto_myl7.cpp.i
+.PHONY : src/demo/test_composite_equiv_proto_myl7.i
+
+# target to preprocess a source file
+src/demo/test_composite_equiv_proto_myl7.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_myl7.dir/build.make CMakeFiles/test_composite_equiv_proto_myl7.dir/src/demo/test_composite_equiv_proto_myl7.cpp.i
+.PHONY : src/demo/test_composite_equiv_proto_myl7.cpp.i
+
+src/demo/test_composite_equiv_proto_myl7.s: src/demo/test_composite_equiv_proto_myl7.cpp.s
+.PHONY : src/demo/test_composite_equiv_proto_myl7.s
+
+# target to generate assembly for a file
+src/demo/test_composite_equiv_proto_myl7.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_myl7.dir/build.make CMakeFiles/test_composite_equiv_proto_myl7.dir/src/demo/test_composite_equiv_proto_myl7.cpp.s
+.PHONY : src/demo/test_composite_equiv_proto_myl7.cpp.s
+
+src/demo/test_composite_equiv_proto_sigmafast.o: src/demo/test_composite_equiv_proto_sigmafast.cpp.o
+.PHONY : src/demo/test_composite_equiv_proto_sigmafast.o
+
+# target to build an object file
+src/demo/test_composite_equiv_proto_sigmafast.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_sigmafast.dir/build.make CMakeFiles/test_composite_equiv_proto_sigmafast.dir/src/demo/test_composite_equiv_proto_sigmafast.cpp.o
+.PHONY : src/demo/test_composite_equiv_proto_sigmafast.cpp.o
+
+src/demo/test_composite_equiv_proto_sigmafast.i: src/demo/test_composite_equiv_proto_sigmafast.cpp.i
+.PHONY : src/demo/test_composite_equiv_proto_sigmafast.i
+
+# target to preprocess a source file
+src/demo/test_composite_equiv_proto_sigmafast.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_sigmafast.dir/build.make CMakeFiles/test_composite_equiv_proto_sigmafast.dir/src/demo/test_composite_equiv_proto_sigmafast.cpp.i
+.PHONY : src/demo/test_composite_equiv_proto_sigmafast.cpp.i
+
+src/demo/test_composite_equiv_proto_sigmafast.s: src/demo/test_composite_equiv_proto_sigmafast.cpp.s
+.PHONY : src/demo/test_composite_equiv_proto_sigmafast.s
+
+# target to generate assembly for a file
+src/demo/test_composite_equiv_proto_sigmafast.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_sigmafast.dir/build.make CMakeFiles/test_composite_equiv_proto_sigmafast.dir/src/demo/test_composite_equiv_proto_sigmafast.cpp.s
+.PHONY : src/demo/test_composite_equiv_proto_sigmafast.cpp.s
+
+src/demo/test_composite_runtime.o: src/demo/test_composite_runtime.cpp.o
+.PHONY : src/demo/test_composite_runtime.o
+
+# target to build an object file
+src/demo/test_composite_runtime.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_runtime.dir/build.make CMakeFiles/test_composite_runtime.dir/src/demo/test_composite_runtime.cpp.o
+.PHONY : src/demo/test_composite_runtime.cpp.o
+
+src/demo/test_composite_runtime.i: src/demo/test_composite_runtime.cpp.i
+.PHONY : src/demo/test_composite_runtime.i
+
+# target to preprocess a source file
+src/demo/test_composite_runtime.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_runtime.dir/build.make CMakeFiles/test_composite_runtime.dir/src/demo/test_composite_runtime.cpp.i
+.PHONY : src/demo/test_composite_runtime.cpp.i
+
+src/demo/test_composite_runtime.s: src/demo/test_composite_runtime.cpp.s
+.PHONY : src/demo/test_composite_runtime.s
+
+# target to generate assembly for a file
+src/demo/test_composite_runtime.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_runtime.dir/build.make CMakeFiles/test_composite_runtime.dir/src/demo/test_composite_runtime.cpp.s
+.PHONY : src/demo/test_composite_runtime.cpp.s
+
 src/demo/test_mask_rewrite.o: src/demo/test_mask_rewrite.cpp.o
 .PHONY : src/demo/test_mask_rewrite.o
 
@@ -529,6 +602,102 @@ src/demo/test_mask_rewrite.s: src/demo/test_mask_rewrite.cpp.s
 src/demo/test_mask_rewrite.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_mask_rewrite.dir/build.make CMakeFiles/test_mask_rewrite.dir/src/demo/test_mask_rewrite.cpp.s
 .PHONY : src/demo/test_mask_rewrite.cpp.s
+
+src/demo/test_myl7_bit_order.o: src/demo/test_myl7_bit_order.cpp.o
+.PHONY : src/demo/test_myl7_bit_order.o
+
+# target to build an object file
+src/demo/test_myl7_bit_order.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_myl7_bit_order.dir/build.make CMakeFiles/test_myl7_bit_order.dir/src/demo/test_myl7_bit_order.cpp.o
+.PHONY : src/demo/test_myl7_bit_order.cpp.o
+
+src/demo/test_myl7_bit_order.i: src/demo/test_myl7_bit_order.cpp.i
+.PHONY : src/demo/test_myl7_bit_order.i
+
+# target to preprocess a source file
+src/demo/test_myl7_bit_order.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_myl7_bit_order.dir/build.make CMakeFiles/test_myl7_bit_order.dir/src/demo/test_myl7_bit_order.cpp.i
+.PHONY : src/demo/test_myl7_bit_order.cpp.i
+
+src/demo/test_myl7_bit_order.s: src/demo/test_myl7_bit_order.cpp.s
+.PHONY : src/demo/test_myl7_bit_order.s
+
+# target to generate assembly for a file
+src/demo/test_myl7_bit_order.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_myl7_bit_order.dir/build.make CMakeFiles/test_myl7_bit_order.dir/src/demo/test_myl7_bit_order.cpp.s
+.PHONY : src/demo/test_myl7_bit_order.cpp.s
+
+src/demo/test_postproc_hooks.o: src/demo/test_postproc_hooks.cpp.o
+.PHONY : src/demo/test_postproc_hooks.o
+
+# target to build an object file
+src/demo/test_postproc_hooks.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_postproc_hooks.dir/build.make CMakeFiles/test_postproc_hooks.dir/src/demo/test_postproc_hooks.cpp.o
+.PHONY : src/demo/test_postproc_hooks.cpp.o
+
+src/demo/test_postproc_hooks.i: src/demo/test_postproc_hooks.cpp.i
+.PHONY : src/demo/test_postproc_hooks.i
+
+# target to preprocess a source file
+src/demo/test_postproc_hooks.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_postproc_hooks.dir/build.make CMakeFiles/test_postproc_hooks.dir/src/demo/test_postproc_hooks.cpp.i
+.PHONY : src/demo/test_postproc_hooks.cpp.i
+
+src/demo/test_postproc_hooks.s: src/demo/test_postproc_hooks.cpp.s
+.PHONY : src/demo/test_postproc_hooks.s
+
+# target to generate assembly for a file
+src/demo/test_postproc_hooks.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_postproc_hooks.dir/build.make CMakeFiles/test_postproc_hooks.dir/src/demo/test_postproc_hooks.cpp.s
+.PHONY : src/demo/test_postproc_hooks.cpp.s
+
+src/demo/test_pred_semantics.o: src/demo/test_pred_semantics.cpp.o
+.PHONY : src/demo/test_pred_semantics.o
+
+# target to build an object file
+src/demo/test_pred_semantics.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pred_semantics.dir/build.make CMakeFiles/test_pred_semantics.dir/src/demo/test_pred_semantics.cpp.o
+.PHONY : src/demo/test_pred_semantics.cpp.o
+
+src/demo/test_pred_semantics.i: src/demo/test_pred_semantics.cpp.i
+.PHONY : src/demo/test_pred_semantics.i
+
+# target to preprocess a source file
+src/demo/test_pred_semantics.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pred_semantics.dir/build.make CMakeFiles/test_pred_semantics.dir/src/demo/test_pred_semantics.cpp.i
+.PHONY : src/demo/test_pred_semantics.cpp.i
+
+src/demo/test_pred_semantics.s: src/demo/test_pred_semantics.cpp.s
+.PHONY : src/demo/test_pred_semantics.s
+
+# target to generate assembly for a file
+src/demo/test_pred_semantics.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pred_semantics.dir/build.make CMakeFiles/test_pred_semantics.dir/src/demo/test_pred_semantics.cpp.s
+.PHONY : src/demo/test_pred_semantics.cpp.s
+
+src/demo/test_sigmafast.o: src/demo/test_sigmafast.cpp.o
+.PHONY : src/demo/test_sigmafast.o
+
+# target to build an object file
+src/demo/test_sigmafast.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_sigmafast.dir/build.make CMakeFiles/test_sigmafast.dir/src/demo/test_sigmafast.cpp.o
+.PHONY : src/demo/test_sigmafast.cpp.o
+
+src/demo/test_sigmafast.i: src/demo/test_sigmafast.cpp.i
+.PHONY : src/demo/test_sigmafast.i
+
+# target to preprocess a source file
+src/demo/test_sigmafast.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_sigmafast.dir/build.make CMakeFiles/test_sigmafast.dir/src/demo/test_sigmafast.cpp.i
+.PHONY : src/demo/test_sigmafast.cpp.i
+
+src/demo/test_sigmafast.s: src/demo/test_sigmafast.cpp.s
+.PHONY : src/demo/test_sigmafast.s
+
+# target to generate assembly for a file
+src/demo/test_sigmafast.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_sigmafast.dir/build.make CMakeFiles/test_sigmafast.dir/src/demo/test_sigmafast.cpp.s
+.PHONY : src/demo/test_sigmafast.cpp.s
 
 src/demo/test_suf_ref_eval.o: src/demo/test_suf_ref_eval.cpp.o
 .PHONY : src/demo/test_suf_ref_eval.o
@@ -554,6 +723,78 @@ src/demo/test_suf_ref_eval.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_suf_ref_eval.dir/build.make CMakeFiles/test_suf_ref_eval.dir/src/demo/test_suf_ref_eval.cpp.s
 .PHONY : src/demo/test_suf_ref_eval.cpp.s
 
+third_party/myl7_fss/src/group/bytes.o: third_party/myl7_fss/src/group/bytes.c.o
+.PHONY : third_party/myl7_fss/src/group/bytes.o
+
+# target to build an object file
+third_party/myl7_fss/src/group/bytes.c.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/myl7_core.dir/build.make CMakeFiles/myl7_core.dir/third_party/myl7_fss/src/group/bytes.c.o
+.PHONY : third_party/myl7_fss/src/group/bytes.c.o
+
+third_party/myl7_fss/src/group/bytes.i: third_party/myl7_fss/src/group/bytes.c.i
+.PHONY : third_party/myl7_fss/src/group/bytes.i
+
+# target to preprocess a source file
+third_party/myl7_fss/src/group/bytes.c.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/myl7_core.dir/build.make CMakeFiles/myl7_core.dir/third_party/myl7_fss/src/group/bytes.c.i
+.PHONY : third_party/myl7_fss/src/group/bytes.c.i
+
+third_party/myl7_fss/src/group/bytes.s: third_party/myl7_fss/src/group/bytes.c.s
+.PHONY : third_party/myl7_fss/src/group/bytes.s
+
+# target to generate assembly for a file
+third_party/myl7_fss/src/group/bytes.c.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/myl7_core.dir/build.make CMakeFiles/myl7_core.dir/third_party/myl7_fss/src/group/bytes.c.s
+.PHONY : third_party/myl7_fss/src/group/bytes.c.s
+
+third_party/myl7_fss/src/group/u128_le.o: third_party/myl7_fss/src/group/u128_le.c.o
+.PHONY : third_party/myl7_fss/src/group/u128_le.o
+
+# target to build an object file
+third_party/myl7_fss/src/group/u128_le.c.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/myl7_core.dir/build.make CMakeFiles/myl7_core.dir/third_party/myl7_fss/src/group/u128_le.c.o
+.PHONY : third_party/myl7_fss/src/group/u128_le.c.o
+
+third_party/myl7_fss/src/group/u128_le.i: third_party/myl7_fss/src/group/u128_le.c.i
+.PHONY : third_party/myl7_fss/src/group/u128_le.i
+
+# target to preprocess a source file
+third_party/myl7_fss/src/group/u128_le.c.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/myl7_core.dir/build.make CMakeFiles/myl7_core.dir/third_party/myl7_fss/src/group/u128_le.c.i
+.PHONY : third_party/myl7_fss/src/group/u128_le.c.i
+
+third_party/myl7_fss/src/group/u128_le.s: third_party/myl7_fss/src/group/u128_le.c.s
+.PHONY : third_party/myl7_fss/src/group/u128_le.s
+
+# target to generate assembly for a file
+third_party/myl7_fss/src/group/u128_le.c.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/myl7_core.dir/build.make CMakeFiles/myl7_core.dir/third_party/myl7_fss/src/group/u128_le.c.s
+.PHONY : third_party/myl7_fss/src/group/u128_le.c.s
+
+third_party/myl7_fss/src/prg/aes128_mmo.o: third_party/myl7_fss/src/prg/aes128_mmo.c.o
+.PHONY : third_party/myl7_fss/src/prg/aes128_mmo.o
+
+# target to build an object file
+third_party/myl7_fss/src/prg/aes128_mmo.c.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/myl7_core.dir/build.make CMakeFiles/myl7_core.dir/third_party/myl7_fss/src/prg/aes128_mmo.c.o
+.PHONY : third_party/myl7_fss/src/prg/aes128_mmo.c.o
+
+third_party/myl7_fss/src/prg/aes128_mmo.i: third_party/myl7_fss/src/prg/aes128_mmo.c.i
+.PHONY : third_party/myl7_fss/src/prg/aes128_mmo.i
+
+# target to preprocess a source file
+third_party/myl7_fss/src/prg/aes128_mmo.c.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/myl7_core.dir/build.make CMakeFiles/myl7_core.dir/third_party/myl7_fss/src/prg/aes128_mmo.c.i
+.PHONY : third_party/myl7_fss/src/prg/aes128_mmo.c.i
+
+third_party/myl7_fss/src/prg/aes128_mmo.s: third_party/myl7_fss/src/prg/aes128_mmo.c.s
+.PHONY : third_party/myl7_fss/src/prg/aes128_mmo.s
+
+# target to generate assembly for a file
+third_party/myl7_fss/src/prg/aes128_mmo.c.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/myl7_core.dir/build.make CMakeFiles/myl7_core.dir/third_party/myl7_fss/src/prg/aes128_mmo.c.s
+.PHONY : third_party/myl7_fss/src/prg/aes128_mmo.c.s
+
 # Help Target
 help:
 	@echo "The following are some of the valid targets for this Makefile:"
@@ -561,32 +802,32 @@ help:
 	@echo "... clean"
 	@echo "... depend"
 	@echo "... edit_cache"
-	@echo "... install"
-	@echo "... install/local"
-	@echo "... install/strip"
-	@echo "... list_install_components"
 	@echo "... rebuild_cache"
-	@echo "... cw_mac_bytes"
-	@echo "... cw_mac_bytes_test"
-	@echo "... dcf"
-	@echo "... dcf_bytes_test"
-	@echo "... dcf_u128_le_test"
-	@echo "... dpf"
-	@echo "... dpf_bytes_test"
-	@echo "... dpf_cuda"
-	@echo "... dpf_u128_le_test"
-	@echo "... gmock"
-	@echo "... gmock_main"
-	@echo "... gtest"
-	@echo "... gtest_main"
-	@echo "... sample_dpf_cuda_u128_le_salsa20"
-	@echo "... sample_dpf_full_domain_u128_le_aes_mmo_ni"
-	@echo "... sample_dpf_u128_le_aes_mmo"
-	@echo "... sample_dpf_u128_le_aes_mmo_ni"
+	@echo "... bench_sigmafast_coeff"
+	@echo "... bench_sigmafast_gates"
+	@echo "... bench_sigmafast_pred"
+	@echo "... myl7_core"
 	@echo "... sim_harness"
 	@echo "... test_compile_pfss"
+	@echo "... test_composite_equiv_proto"
+	@echo "... test_composite_equiv_proto_myl7"
+	@echo "... test_composite_equiv_proto_sigmafast"
+	@echo "... test_composite_runtime"
 	@echo "... test_mask_rewrite"
+	@echo "... test_myl7_bit_order"
+	@echo "... test_postproc_hooks"
+	@echo "... test_pred_semantics"
+	@echo "... test_sigmafast"
 	@echo "... test_suf_ref_eval"
+	@echo "... src/bench/bench_sigmafast_coeff.o"
+	@echo "... src/bench/bench_sigmafast_coeff.i"
+	@echo "... src/bench/bench_sigmafast_coeff.s"
+	@echo "... src/bench/bench_sigmafast_gates.o"
+	@echo "... src/bench/bench_sigmafast_gates.i"
+	@echo "... src/bench/bench_sigmafast_gates.s"
+	@echo "... src/bench/bench_sigmafast_pred.o"
+	@echo "... src/bench/bench_sigmafast_pred.i"
+	@echo "... src/bench/bench_sigmafast_pred.s"
 	@echo "... src/compiler/suf_to_pfss.o"
 	@echo "... src/compiler/suf_to_pfss.i"
 	@echo "... src/compiler/suf_to_pfss.s"
@@ -596,12 +837,45 @@ help:
 	@echo "... src/demo/test_compile_pfss.o"
 	@echo "... src/demo/test_compile_pfss.i"
 	@echo "... src/demo/test_compile_pfss.s"
+	@echo "... src/demo/test_composite_equiv_proto.o"
+	@echo "... src/demo/test_composite_equiv_proto.i"
+	@echo "... src/demo/test_composite_equiv_proto.s"
+	@echo "... src/demo/test_composite_equiv_proto_myl7.o"
+	@echo "... src/demo/test_composite_equiv_proto_myl7.i"
+	@echo "... src/demo/test_composite_equiv_proto_myl7.s"
+	@echo "... src/demo/test_composite_equiv_proto_sigmafast.o"
+	@echo "... src/demo/test_composite_equiv_proto_sigmafast.i"
+	@echo "... src/demo/test_composite_equiv_proto_sigmafast.s"
+	@echo "... src/demo/test_composite_runtime.o"
+	@echo "... src/demo/test_composite_runtime.i"
+	@echo "... src/demo/test_composite_runtime.s"
 	@echo "... src/demo/test_mask_rewrite.o"
 	@echo "... src/demo/test_mask_rewrite.i"
 	@echo "... src/demo/test_mask_rewrite.s"
+	@echo "... src/demo/test_myl7_bit_order.o"
+	@echo "... src/demo/test_myl7_bit_order.i"
+	@echo "... src/demo/test_myl7_bit_order.s"
+	@echo "... src/demo/test_postproc_hooks.o"
+	@echo "... src/demo/test_postproc_hooks.i"
+	@echo "... src/demo/test_postproc_hooks.s"
+	@echo "... src/demo/test_pred_semantics.o"
+	@echo "... src/demo/test_pred_semantics.i"
+	@echo "... src/demo/test_pred_semantics.s"
+	@echo "... src/demo/test_sigmafast.o"
+	@echo "... src/demo/test_sigmafast.i"
+	@echo "... src/demo/test_sigmafast.s"
 	@echo "... src/demo/test_suf_ref_eval.o"
 	@echo "... src/demo/test_suf_ref_eval.i"
 	@echo "... src/demo/test_suf_ref_eval.s"
+	@echo "... third_party/myl7_fss/src/group/bytes.o"
+	@echo "... third_party/myl7_fss/src/group/bytes.i"
+	@echo "... third_party/myl7_fss/src/group/bytes.s"
+	@echo "... third_party/myl7_fss/src/group/u128_le.o"
+	@echo "... third_party/myl7_fss/src/group/u128_le.i"
+	@echo "... third_party/myl7_fss/src/group/u128_le.s"
+	@echo "... third_party/myl7_fss/src/prg/aes128_mmo.o"
+	@echo "... third_party/myl7_fss/src/prg/aes128_mmo.i"
+	@echo "... third_party/myl7_fss/src/prg/aes128_mmo.s"
 .PHONY : help
 
 

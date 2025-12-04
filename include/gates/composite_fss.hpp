@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <functional>
 #include <random>
+#include <stdexcept>
 #if __has_include(<span>)
   #include <span>
 #elif __has_include(<experimental/span>)
@@ -51,6 +52,15 @@ struct CompositePartyKey {
   std::vector<uint64_t> r_out_share;   // size r
   std::vector<uint64_t> wrap_share;    // shares of wrap bits (same order as compiled.wrap_bits)
 
+  // Optional postproc masks (ReluARS/GeLU). Stored if layout needs them.
+  uint64_t r_hi_share = 0;       // r_in >> f share (ReluARS)
+  uint64_t wrap_sign_share = 0;  // wrap bit share for ReluARS
+  std::vector<uint64_t> extra_params; // gate-specific constants (e.g., delta LUT flattened)
+
+  proto::PredKeyMeta pred_meta;
+  proto::PredKeyMeta cut_pred_meta;
+  proto::CoeffKeyMeta coeff_meta;
+
   std::vector<proto::FssKey> pred_keys;   // one per RawPredQuery
   std::vector<proto::FssKey> cut_pred_keys; // one per coeff cutpoint (piece selectors)
   std::vector<proto::FssKey> coeff_keys;  // one per cutpoint (step-DCF)
@@ -66,6 +76,11 @@ struct CompositePartyKey {
   proto::FssKey packed_pred_key;
   bool use_packed_pred = false;
   int packed_pred_words = 0;
+
+  // Optional packed cutpoint predicates (SigmaFast)
+  proto::FssKey packed_cut_key;
+  bool use_packed_cut = false;
+  int packed_cut_words = 0;
 };
 
 struct CompositeKeyPair {
@@ -96,12 +111,16 @@ struct CompositeTapePair {
 
 // Build additive-shared coefficient table per piece (party0 holds payload, party1 zeros).
 inline std::vector<std::vector<uint64_t>> build_coeff_table(const compiler::CompiledSUFGate& compiled,
-                                                            const CompositePartyKey& k) {
+                                                            const CompositePartyKey& k,
+                                                            bool add_deltas) {
+  if (k.coeff_meta.sem != proto::ShareSemantics::AddU64) {
+    throw std::runtime_error("build_coeff_table: coeff semantics must be additive");
+  }
   size_t pieces = compiled.coeff.cutpoints_ge.size() + 1;
   std::vector<std::vector<uint64_t>> coeff_table(pieces, k.base_coeff_share);
   for (size_t p = 1; p < pieces; p++) {
     coeff_table[p] = coeff_table[p - 1];
-    if (p - 1 < compiled.coeff.deltas_words.size()) {
+    if (add_deltas && p - 1 < compiled.coeff.deltas_words.size()) {
       const auto& delta = compiled.coeff.deltas_words[p - 1];
       for (size_t j = 0; j < delta.size(); j++) {
         coeff_table[p][j] = proto::add_mod(coeff_table[p][j], delta[j]);
@@ -178,6 +197,28 @@ inline CompositeKeyPair composite_gen_backend(const suf::SUF<uint64_t>& F,
     out.k1.wrap_share[i] = s1;
   }
 
+  // Optional gate-specific extras (e.g., ReluARS masks/params): default zeros.
+  out.k0.r_hi_share = 0;
+  out.k1.r_hi_share = 0;
+  out.k0.wrap_sign_share = 0;
+  out.k1.wrap_sign_share = 0;
+  out.k0.extra_params = compiled.extra_u64;
+  out.k1.extra_params = compiled.extra_u64;
+
+  proto::BitOrder bit_order = backend.bit_order();
+  out.k0.pred_meta.bit_order = bit_order;
+  out.k1.pred_meta.bit_order = bit_order;
+  out.k0.pred_meta.sem = proto::ShareSemantics::XorBytes;
+  out.k1.pred_meta.sem = proto::ShareSemantics::XorBytes;
+  out.k0.pred_meta.out_bytes = 1;
+  out.k1.pred_meta.out_bytes = 1;
+  out.k0.cut_pred_meta = out.k0.pred_meta;
+  out.k1.cut_pred_meta = out.k1.pred_meta;
+  out.k0.coeff_meta.bit_order = bit_order;
+  out.k1.coeff_meta.bit_order = bit_order;
+  out.k0.coeff_meta.sem = proto::ShareSemantics::AddU64;
+  out.k1.coeff_meta.sem = proto::ShareSemantics::AddU64;
+
   // Pred keys: payload=1 byte (XOR bit). If backend is SigmaFast, also emit packed key.
   bool is_sigmafast = (dynamic_cast<proto::SigmaFastBackend*>(&backend) != nullptr);
   if (is_sigmafast) {
@@ -189,6 +230,14 @@ inline CompositeKeyPair composite_gen_backend(const suf::SUF<uint64_t>& F,
     out.k1.packed_pred_key = kp.k1;
     out.k0.use_packed_pred = out.k1.use_packed_pred = true;
     out.k0.packed_pred_words = out.k1.packed_pred_words = static_cast<int>((thrs.size() + 63) / 64);
+    // Packed cutpoints (selector predicates)
+    if (!compiled.coeff.cutpoints_ge.empty()) {
+      auto kp_cut = sb->gen_packed_lt(compiled.coeff.n, compiled.coeff.cutpoints_ge);
+      out.k0.packed_cut_key = kp_cut.k0;
+      out.k1.packed_cut_key = kp_cut.k1;
+      out.k0.use_packed_cut = out.k1.use_packed_cut = true;
+      out.k0.packed_cut_words = out.k1.packed_cut_words = static_cast<int>((compiled.coeff.cutpoints_ge.size() + 63) / 64);
+    }
   }
   for (const auto& q : compiled.pred.queries) {
     uint64_t thr = q.theta;
@@ -362,6 +411,15 @@ inline std::vector<uint64_t> composite_eval_share_backend(int party,
   const auto& compiled = k.compiled;
   proto::BeaverMul64 mul{party, ch, k.triples, 0};
   size_t bit_idx = 0;
+  if (k.pred_meta.sem != proto::ShareSemantics::XorBytes) {
+    throw std::runtime_error("composite_eval_share_backend: predicate semantics not XOR bytes");
+  }
+  if (k.cut_pred_meta.sem != proto::ShareSemantics::XorBytes) {
+    throw std::runtime_error("composite_eval_share_backend: selector predicate semantics not XOR bytes");
+  }
+  if (k.coeff_meta.sem != proto::ShareSemantics::AddU64) {
+    throw std::runtime_error("composite_eval_share_backend: coeff semantics must be additive");
+  }
 
   // Pred bits
   std::vector<uint64_t> bits_xor(compiled.pred.queries.size(), 0);
@@ -374,19 +432,76 @@ inline std::vector<uint64_t> composite_eval_share_backend(int party,
     sb->eval_packed_lt_many(key_bytes, keys_flat.data(), std::vector<uint64_t>{hatx},
                             compiled.pred.n, k.packed_pred_words, outs.data());
     PredViewPacked pv{outs.data(), static_cast<size_t>(k.packed_pred_words)};
-    for (size_t i = 0; i < compiled.pred.queries.size(); i++) bits_xor[i] = pv.get(i);
+    auto get_pred = [&](size_t idx) { return pv.get(idx); };
+    // Cut predicates remain scalar bits_xor below; we won't fill bits_xor vector here.
+    // Wrap shares already additive.
+    // Build selectors below uses cut_bits_xor.
+    std::vector<uint64_t> cut_bits_xor(k.cut_pred_keys.size(), 0);
+    if (k.use_packed_cut && k.packed_cut_words > 0) {
+      size_t key_bytes_cut = k.packed_cut_key.bytes.size();
+      std::vector<uint8_t> cut_flat(key_bytes_cut);
+      std::memcpy(cut_flat.data(), k.packed_cut_key.bytes.data(), key_bytes_cut);
+      std::vector<uint64_t> cut_masks(static_cast<size_t>(k.packed_cut_words), 0);
+      sb->eval_packed_lt_many(key_bytes_cut, cut_flat.data(), std::vector<uint64_t>{hatx},
+                              compiled.coeff.n, k.packed_cut_words, cut_masks.data());
+      PredViewPacked pc{cut_masks.data(), static_cast<size_t>(k.packed_cut_words)};
+      for (size_t ci = 0; ci < k.cut_pred_keys.size(); ci++) cut_bits_xor[ci] = pc.get(ci);
+    } else {
+      for (size_t ci = 0; ci < k.cut_pred_keys.size(); ci++) {
+        cut_bits_xor[ci] = proto::eval_pred_bit_share(backend, compiled.coeff.n, k.cut_pred_meta, k.cut_pred_keys[ci], hatx) & 1ull;
+      }
+    }
+    auto coeff_table = build_coeff_table(compiled, k, /*add_deltas=*/(party == 0));
+    auto selectors = selectors_from_cutbits(cut_bits_xor, party, mul);
+    // Selector-weighted coeffs (additive)
+    std::vector<uint64_t> coeff(compiled.coeff.out_words, 0);
+    for (size_t p = 0; p < coeff_table.size(); p++) {
+      uint64_t sel_add = selectors[p];
+      for (int j = 0; j < compiled.coeff.out_words; j++) {
+        uint64_t term = mul.mul(sel_add, coeff_table[p][static_cast<size_t>(j)]);
+        coeff[static_cast<size_t>(j)] = proto::add_mod(coeff[static_cast<size_t>(j)], term);
+      }
+    }
+    // Bool outputs blended by selectors
+    std::vector<uint64_t> bools(compiled.ell, 0);
+    for (size_t p = 0; p < selectors.size(); p++) {
+      if (p >= compiled.bool_per_piece.size()) break;
+      for (int j = 0; j < compiled.ell; j++) {
+        uint64_t bx = gates::eval_bool_xor_view(compiled.bool_per_piece[p][static_cast<size_t>(j)], get_pred, k.wrap_share, mul, k.bit_triples.data(), &bit_idx) & 1ull;
+        uint64_t badd = gates::b2a_bit(bx, party, mul);
+        uint64_t term = mul.mul(selectors[p], badd);
+        bools[static_cast<size_t>(j)] = proto::add_mod(bools[static_cast<size_t>(j)], term);
+      }
+    }
+    std::vector<uint64_t> ys(compiled.r, 0);
+    int stride = compiled.degree + 1;
+    uint64_t x_share = (party == 0) ? proto::sub_mod(hatx, k.r_in_share)
+                                    : proto::sub_mod(0ull, k.r_in_share);
+    for (int j = 0; j < compiled.r; j++) {
+      uint64_t acc = coeff[static_cast<size_t>(j * stride + compiled.degree)];
+      for (int d = compiled.degree - 1; d >= 0; d--) {
+        acc = mul.mul(acc, x_share);
+        acc = proto::add_mod(acc, coeff[static_cast<size_t>(j * stride + d)]);
+      }
+      ys[static_cast<size_t>(j)] = proto::add_mod(acc, k.r_out_share[static_cast<size_t>(j)]);
+    }
+    std::vector<uint64_t> out;
+    out.reserve(static_cast<size_t>(compiled.r + compiled.ell));
+    for (auto v : ys) out.push_back(v);
+    for (auto v : bools) out.push_back(v);
+    return out;
   } else {
     for (size_t i = 0; i < compiled.pred.queries.size(); i++) {
       int bits_in = (compiled.pred.queries[i].kind == compiler::RawPredKind::kLtU64) ? compiled.pred.n : compiled.pred.queries[i].f;
-      bits_xor[i] = proto::eval_bit_share_from_dcf(backend, bits_in, k.pred_keys[i], hatx);
+      bits_xor[i] = proto::eval_pred_bit_share(backend, bits_in, k.pred_meta, k.pred_keys[i], hatx);
     }
   }
   // Cut predicates for piece selectors
   std::vector<uint64_t> cut_bits_xor(k.cut_pred_keys.size(), 0);
   for (size_t ci = 0; ci < k.cut_pred_keys.size(); ci++) {
-    cut_bits_xor[ci] = proto::eval_bit_share_from_dcf(backend, compiled.coeff.n, k.cut_pred_keys[ci], hatx) & 1ull;
+    cut_bits_xor[ci] = proto::eval_pred_bit_share(backend, compiled.coeff.n, k.cut_pred_meta, k.cut_pred_keys[ci], hatx) & 1ull;
   }
-  auto coeff_table = build_coeff_table(compiled, k);
+  auto coeff_table = build_coeff_table(compiled, k, /*add_deltas=*/(party == 0));
   auto selectors = selectors_from_cutbits(cut_bits_xor, party, mul);
 
   // Selector-weighted coeffs (additive)
@@ -457,9 +572,20 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
   size_t N = in.N;
   out.haty_share.resize(N * static_cast<size_t>(compiled.r), 0);
   out.bool_share.resize(N * static_cast<size_t>(compiled.ell), 0);
+  if (k.pred_meta.sem != proto::ShareSemantics::XorBytes) {
+    throw std::runtime_error("composite_eval_batch_backend: predicate semantics not XOR bytes");
+  }
+  if (k.cut_pred_meta.sem != proto::ShareSemantics::XorBytes) {
+    throw std::runtime_error("composite_eval_batch_backend: selector predicate semantics not XOR bytes");
+  }
+  if (k.coeff_meta.sem != proto::ShareSemantics::AddU64) {
+    throw std::runtime_error("composite_eval_batch_backend: coeff semantics must be additive");
+  }
 
   // Evaluate predicate bits in batch (packed mask if available)
-  std::vector<uint64_t> pred_bits_xor(compiled.pred.queries.size() * N, 0);
+  std::vector<uint64_t> pred_bits_xor;
+  std::vector<uint64_t> pred_masks;
+  std::vector<uint64_t> cut_masks;
   auto* sb = dynamic_cast<proto::SigmaFastBackend*>(&backend);
   if (sb && k.use_packed_pred && k.packed_pred_words > 0) {
     size_t key_bytes = k.packed_pred_key.bytes.size();
@@ -467,18 +593,11 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     for (size_t i = 0; i < N; i++) {
       std::memcpy(keys_flat.data() + i * key_bytes, k.packed_pred_key.bytes.data(), key_bytes);
     }
-    std::vector<uint64_t> outs(N * static_cast<size_t>(k.packed_pred_words), 0);
+    pred_masks.resize(N * static_cast<size_t>(k.packed_pred_words), 0);
     sb->eval_packed_lt_many(key_bytes, keys_flat.data(), std::vector<uint64_t>(in.hatx, in.hatx + N),
-                            compiled.pred.n, k.packed_pred_words, outs.data());
-    for (size_t i = 0; i < N; i++) {
-      for (size_t qi = 0; qi < compiled.pred.queries.size(); qi++) {
-        size_t w = qi / 64;
-        size_t b = qi % 64;
-        uint64_t word = outs[i * static_cast<size_t>(k.packed_pred_words) + w];
-        pred_bits_xor[qi * N + i] = (word >> b) & 1ull;
-      }
-    }
+                            compiled.pred.n, k.packed_pred_words, pred_masks.data());
   } else {
+    pred_bits_xor.resize(compiled.pred.queries.size() * N, 0);
     for (size_t qi = 0; qi < compiled.pred.queries.size(); qi++) {
       int bits_in = (compiled.pred.queries[qi].kind == compiler::RawPredKind::kLtU64) ? compiled.pred.n : compiled.pred.queries[qi].f;
       // pack keys_flat [N][key_bytes]
@@ -487,34 +606,132 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       for (size_t i = 0; i < N; i++) {
         std::memcpy(keys_flat.data() + i * key_bytes, k.pred_keys[qi].bytes.data(), key_bytes);
       }
-      std::vector<uint8_t> outs_flat(N * 1);
-      backend.eval_dcf_many_u64(bits_in, key_bytes, keys_flat.data(), std::vector<uint64_t>(in.hatx, in.hatx + N), 1, outs_flat.data());
+      size_t out_bytes = static_cast<size_t>(k.pred_meta.out_bytes);
+      if (out_bytes == 0) throw std::runtime_error("pred_meta.out_bytes must be >0");
+      std::vector<uint8_t> outs_flat(N * out_bytes);
+      backend.eval_dcf_many_u64(bits_in, key_bytes, keys_flat.data(), std::vector<uint64_t>(in.hatx, in.hatx + N), k.pred_meta.out_bytes, outs_flat.data());
       for (size_t i = 0; i < N; i++) {
-        pred_bits_xor[qi * N + i] = static_cast<uint64_t>(outs_flat[i] & 1u);
+        if (k.pred_meta.sem == proto::ShareSemantics::XorBytes) {
+          pred_bits_xor[qi * N + i] = static_cast<uint64_t>(outs_flat[i * out_bytes] & 1u);
+        } else {
+          uint64_t v = 0;
+          std::memcpy(&v, outs_flat.data() + i * out_bytes, std::min<size_t>(8, out_bytes));
+          pred_bits_xor[qi * N + i] = v & 1ull;
+        }
       }
     }
   }
 
   // Cut predicate bits (XOR)
   std::vector<uint64_t> cut_bits_xor(k.cut_pred_keys.size() * N, 0);
-  for (size_t ci = 0; ci < k.cut_pred_keys.size(); ci++) {
-    size_t key_bytes = k.cut_pred_keys[ci].bytes.size();
+  if (sb && k.use_packed_cut && k.packed_cut_words > 0) {
+    size_t key_bytes = k.packed_cut_key.bytes.size();
     std::vector<uint8_t> keys_flat(N * key_bytes);
     for (size_t i = 0; i < N; i++) {
-      std::memcpy(keys_flat.data() + i * key_bytes, k.cut_pred_keys[ci].bytes.data(), key_bytes);
+      std::memcpy(keys_flat.data() + i * key_bytes, k.packed_cut_key.bytes.data(), key_bytes);
     }
-    std::vector<uint8_t> outs_flat(N * 1);
-    backend.eval_dcf_many_u64(compiled.coeff.n, key_bytes, keys_flat.data(), std::vector<uint64_t>(in.hatx, in.hatx + N),
-                              1, outs_flat.data());
+    cut_masks.resize(N * static_cast<size_t>(k.packed_cut_words), 0);
+    sb->eval_packed_lt_many(key_bytes, keys_flat.data(), std::vector<uint64_t>(in.hatx, in.hatx + N),
+                            compiled.coeff.n, k.packed_cut_words, cut_masks.data());
     for (size_t i = 0; i < N; i++) {
-      cut_bits_xor[ci * N + i] = static_cast<uint64_t>(outs_flat[i] & 1u);
+      PredViewPacked pc{cut_masks.data() + i * static_cast<size_t>(k.packed_cut_words),
+                        static_cast<size_t>(k.packed_cut_words)};
+      for (size_t ci = 0; ci < k.cut_pred_keys.size(); ci++) {
+        cut_bits_xor[ci * N + i] = pc.get(ci);
+      }
+    }
+  } else {
+    for (size_t ci = 0; ci < k.cut_pred_keys.size(); ci++) {
+      size_t key_bytes = k.cut_pred_keys[ci].bytes.size();
+      std::vector<uint8_t> keys_flat(N * key_bytes);
+      for (size_t i = 0; i < N; i++) {
+        std::memcpy(keys_flat.data() + i * key_bytes, k.cut_pred_keys[ci].bytes.data(), key_bytes);
+      }
+      size_t out_bytes = static_cast<size_t>(k.cut_pred_meta.out_bytes);
+      if (out_bytes == 0) throw std::runtime_error("cut_pred_meta.out_bytes must be >0");
+      std::vector<uint8_t> outs_flat(N * out_bytes);
+      backend.eval_dcf_many_u64(compiled.coeff.n, key_bytes, keys_flat.data(), std::vector<uint64_t>(in.hatx, in.hatx + N),
+                                k.cut_pred_meta.out_bytes, outs_flat.data());
+      for (size_t i = 0; i < N; i++) {
+        if (k.cut_pred_meta.sem == proto::ShareSemantics::XorBytes) {
+          cut_bits_xor[ci * N + i] = static_cast<uint64_t>(outs_flat[i * out_bytes] & 1u);
+        } else {
+          uint64_t v = 0;
+          std::memcpy(&v, outs_flat.data() + i * out_bytes, std::min<size_t>(8, out_bytes));
+          cut_bits_xor[ci * N + i] = v & 1ull;
+        }
+      }
     }
   }
 
-  auto coeff_table = build_coeff_table(compiled, k);
+  auto coeff_table = build_coeff_table(compiled, k, /*add_deltas=*/(party == 0));
 
-  // Evaluate per element with Beaver MPC
   proto::BeaverMul64 mul_single{party, ch, k.triples, 0};
+  if (sb && k.use_packed_pred && k.packed_pred_words > 0) {
+    const size_t block_sz = 64;
+    size_t pieces = coeff_table.size();
+    size_t stride = compiled.degree + 1;
+    std::vector<uint64_t> cut_i(k.cut_pred_keys.size(), 0);
+    std::vector<uint64_t> selectors_block(pieces * block_sz, 0);
+    std::vector<uint64_t> bool_block;
+    std::vector<uint64_t> coeff_sel(compiled.coeff.out_words, 0);
+    for (size_t blk = 0; blk < N; blk += block_sz) {
+      size_t bsize = std::min(block_sz, N - blk);
+      std::fill(selectors_block.begin(), selectors_block.end(), 0ull);
+      for (size_t off = 0; off < bsize; off++) {
+        size_t idx = blk + off;
+        for (size_t ci = 0; ci < k.cut_pred_keys.size(); ci++) {
+          cut_i[ci] = cut_bits_xor[ci * N + idx] & 1ull;
+        }
+        auto sels = selectors_from_cutbits(cut_i, party, mul_single);
+        for (size_t p = 0; p < sels.size(); p++) {
+          selectors_block[p * block_sz + off] = sels[p];
+        }
+      }
+      for (size_t p = 0; p < pieces && p < compiled.bool_per_piece.size(); p++) {
+        const auto& exprs = compiled.bool_per_piece[p];
+        if (exprs.empty()) continue;
+        gates::eval_bool_xor_packed_block_soa(exprs,
+                                              pred_masks.data() + blk * static_cast<size_t>(k.packed_pred_words),
+                                              static_cast<size_t>(k.packed_pred_words),
+                                              bsize, k.wrap_share, party, mul_single,
+                                              k.bit_triples.data(), 0, bool_block);
+        for (int j = 0; j < compiled.ell; j++) {
+          for (size_t off = 0; off < bsize; off++) {
+            uint64_t term = mul_single.mul(selectors_block[p * block_sz + off],
+                                           bool_block[static_cast<size_t>(j) * bsize + off]);
+            size_t out_idx = (blk + off) * compiled.ell + static_cast<size_t>(j);
+            out.bool_share[out_idx] = proto::add_mod(out.bool_share[out_idx], term);
+          }
+        }
+      }
+      for (size_t off = 0; off < bsize; off++) {
+        std::fill(coeff_sel.begin(), coeff_sel.end(), 0ull);
+        for (size_t p = 0; p < pieces; p++) {
+          uint64_t sel = selectors_block[p * block_sz + off];
+          if (sel == 0) continue;
+          for (int j = 0; j < compiled.coeff.out_words; j++) {
+            uint64_t term = mul_single.mul(sel, coeff_table[p][static_cast<size_t>(j)]);
+            coeff_sel[static_cast<size_t>(j)] = proto::add_mod(coeff_sel[static_cast<size_t>(j)], term);
+          }
+        }
+        uint64_t x_share = (party == 0) ? proto::sub_mod(in.hatx[blk + off], k.r_in_share)
+                                        : proto::sub_mod(0ull, k.r_in_share);
+        for (int j = 0; j < compiled.r; j++) {
+          uint64_t acc = coeff_sel[static_cast<size_t>(j * stride + compiled.degree)];
+          for (int d = compiled.degree - 1; d >= 0; d--) {
+            acc = mul_single.mul(acc, x_share);
+            acc = proto::add_mod(acc, coeff_sel[static_cast<size_t>(j * stride + d)]);
+          }
+          out.haty_share[(blk + off) * compiled.r + static_cast<size_t>(j)] =
+              proto::add_mod(acc, k.r_out_share[static_cast<size_t>(j)]);
+        }
+      }
+    }
+    return out;
+  }
+
+  // Fallback scalar path (no packed predicates)
   size_t bit_idx = 0;
   std::vector<uint64_t> preds_i(compiled.pred.queries.size(), 0);
   std::vector<uint64_t> cut_i(k.cut_pred_keys.size(), 0);
@@ -523,6 +740,10 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
 
   for (size_t i = 0; i < N; i++) {
     const auto& wrap_vars = k.wrap_share;
+
+    auto get_pred = [&](size_t idx) -> uint64_t {
+      return (idx < preds_i.size()) ? preds_i[idx] : 0ull;
+    };
 
     for (size_t qi = 0; qi < compiled.pred.queries.size(); qi++) {
       preds_i[qi] = pred_bits_xor[qi * N + i] & 1ull;
@@ -538,7 +759,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       uint64_t accb = 0;
       for (size_t p = 0; p < selectors.size(); p++) {
         if (p >= compiled.bool_per_piece.size()) break;
-        uint64_t bx = gates::eval_bool_xor(compiled.bool_per_piece[p][static_cast<size_t>(j)], preds_i, wrap_vars, mul_single, k.bit_triples.data(), &bit_idx) & 1ull;
+        uint64_t bx = gates::eval_bool_xor_view(compiled.bool_per_piece[p][static_cast<size_t>(j)], get_pred, wrap_vars, mul_single, k.bit_triples.data(), &bit_idx) & 1ull;
         uint64_t badd = gates::b2a_bit(bx, party, mul_single);
         uint64_t term = mul_single.mul(selectors[p], badd);
         accb = proto::add_mod(accb, term);
@@ -576,6 +797,19 @@ inline CompositeTape write_composite_tape(const CompositePartyKey& k) {
   for (auto x : k.r_out_share) tape_append_u64(v, x);
   tape_append_u32(v, static_cast<uint32_t>(k.wrap_share.size()));
   for (auto x : k.wrap_share) tape_append_u64(v, x);
+  tape_append_u64(v, k.r_hi_share);
+  tape_append_u64(v, k.wrap_sign_share);
+  tape_append_u32(v, static_cast<uint32_t>(k.extra_params.size()));
+  for (auto x : k.extra_params) tape_append_u64(v, x);
+
+  v.push_back(static_cast<uint8_t>(k.pred_meta.bit_order));
+  v.push_back(static_cast<uint8_t>(k.pred_meta.sem));
+  tape_append_u32(v, static_cast<uint32_t>(k.pred_meta.out_bytes));
+  v.push_back(static_cast<uint8_t>(k.cut_pred_meta.bit_order));
+  v.push_back(static_cast<uint8_t>(k.cut_pred_meta.sem));
+  tape_append_u32(v, static_cast<uint32_t>(k.cut_pred_meta.out_bytes));
+  v.push_back(static_cast<uint8_t>(k.coeff_meta.bit_order));
+  v.push_back(static_cast<uint8_t>(k.coeff_meta.sem));
 
   auto write_keys = [&](const std::vector<proto::FssKey>& ks) {
     tape_append_u32(v, static_cast<uint32_t>(ks.size()));
@@ -629,6 +863,24 @@ inline CompositePartyKey read_composite_tape(const uint8_t* data, size_t len) {
   need(static_cast<size_t>(wrap_len) * 8);
   k.wrap_share.resize(wrap_len);
   for (uint32_t i = 0; i < wrap_len; i++) k.wrap_share[i] = tape_read_u64(p);
+  need(8);
+  k.r_hi_share = tape_read_u64(p);
+  need(8);
+  k.wrap_sign_share = tape_read_u64(p);
+  need(4);
+  uint32_t extra_len = tape_read_u32(p);
+  need(static_cast<size_t>(extra_len) * 8);
+  k.extra_params.resize(extra_len);
+  for (uint32_t i = 0; i < extra_len; i++) k.extra_params[i] = tape_read_u64(p);
+  need(2 + 2 + 4 + 4 + 2);
+  k.pred_meta.bit_order = static_cast<proto::BitOrder>(*p++);
+  k.pred_meta.sem = static_cast<proto::ShareSemantics>(*p++);
+  k.pred_meta.out_bytes = static_cast<int>(tape_read_u32(p));
+  k.cut_pred_meta.bit_order = static_cast<proto::BitOrder>(*p++);
+  k.cut_pred_meta.sem = static_cast<proto::ShareSemantics>(*p++);
+  k.cut_pred_meta.out_bytes = static_cast<int>(tape_read_u32(p));
+  k.coeff_meta.bit_order = static_cast<proto::BitOrder>(*p++);
+  k.coeff_meta.sem = static_cast<proto::ShareSemantics>(*p++);
 
   auto read_keys = [&](std::vector<proto::FssKey>& ks) {
     need(4);
@@ -721,11 +973,21 @@ inline CompositeBatchOutput composite_eval_batch_with_postproc(int party,
                                                                const CompositePartyKey& k,
                                                                const suf::SUF<uint64_t>& F,
                                                                const CompositeBatchInput& in,
-                                                               const gates::PostProcHook& hook) {
+                                                               gates::PostProcHook& hook) {
   auto out = composite_eval_batch_backend(party, backend, ch, k, F, in);
   proto::BeaverMul64 mul{party, ch, k.triples, 0};
+  hook.configure(k.compiled.layout);
+  if (auto* relu = dynamic_cast<gates::ReluARSPostProc*>(&hook)) {
+    relu->r_hi_share = k.r_hi_share;
+    relu->wrap_sign_share = k.wrap_sign_share;
+    if (relu->delta.empty() && !k.extra_params.empty()) {
+      relu->delta = k.extra_params;
+    }
+  }
   hook.run_batch(party, ch, mul, in.hatx, out.haty_share.data(),
-                 out.bool_share.data(), in.N, out.haty_share.data());
+                 static_cast<size_t>(k.compiled.r),
+                 out.bool_share.data(), static_cast<size_t>(k.compiled.ell),
+                 in.N, out.haty_share.data());
   return out;
 }
 

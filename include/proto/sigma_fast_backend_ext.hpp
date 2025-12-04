@@ -7,6 +7,10 @@
 #include <vector>
 #include <unordered_map>
 #include <openssl/aes.h>
+#if defined(__AES__) && defined(__SSE2__)
+  #include <wmmintrin.h>
+  #include <emmintrin.h>
+#endif
 #ifdef _OPENMP
 #include <omp.h>
 #endif
@@ -72,6 +76,11 @@ public:
     PackedEntry pe;
     pe.in_bits = in_bits;
     pe.thresholds = thresholds;
+    pe.mask = (in_bits == 64) ? ~0ull : ((u64(1) << in_bits) - 1);
+    pe.thresholds_masked.resize(thresholds.size());
+    for (size_t i = 0; i < thresholds.size(); i++) {
+      pe.thresholds_masked[i] = thresholds[i] & pe.mask;
+    }
     std::array<uint8_t,16> seed0{}, seed1{};
     std::mt19937_64 rng(id * 0x9e3779b97f4a7c15ull + thresholds.size());
     for (auto& b : seed0) b = static_cast<uint8_t>(rng() & 0xFFu);
@@ -98,48 +107,34 @@ public:
     if (in_bits <= 0 || in_bits > 64) throw std::runtime_error("SigmaFastBackend: in_bits out of range");
     u64 mask = (in_bits == 64) ? ~0ull : ((u64(1) << in_bits) - 1);
     size_t total = xs_u64.size();
+    const size_t block = 1024;
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
-    for (long long ii = 0; ii < static_cast<long long>(total); ii++) {
-      size_t i = static_cast<size_t>(ii);
-      u64 kid = proto::unpack_u64_le(keys_flat + i * key_bytes);
+    for (long long bb = 0; bb < static_cast<long long>((total + block - 1) / block); bb++) {
+      size_t blk_start = static_cast<size_t>(bb) * block;
+      size_t blk_end = std::min(blk_start + block, total);
+      u64 kid = proto::unpack_u64_le(keys_flat + blk_start * key_bytes);
       u64 id = kid >> 1;
       int party = static_cast<int>(kid & 1ull);
       auto it = packed_.find(id);
       if (it == packed_.end()) throw std::runtime_error("SigmaFastBackend: unknown key");
       if (it->second.in_bits != in_bits) throw std::runtime_error("SigmaFastBackend: in_bits mismatch");
-      const auto& thr = it->second.thresholds;
-      const AES_KEY& ks = (party == 0) ? it->second.aes0 : it->second.aes1;
-      // out_words must cover thresholds bits; pack into u64 words (xor-share)
-      std::vector<u64> words(static_cast<size_t>(out_words), 0);
-      u64 x_masked = xs_u64[i] & mask;
-      // AES-CTR PRG masks: generate enough blocks to cover threshold bits
-      const size_t blocks = (thr.size() + 127) / 128;
-      for (size_t blk = 0; blk < blocks; blk++) {
-        std::array<uint8_t,16> ctr{};
-        u64 counter = (static_cast<u64>(i) << 32) ^ static_cast<u64>(blk);
-        for (int b = 0; b < 8; b++) ctr[15 - b] = static_cast<uint8_t>(counter >> (b * 8));
-        std::array<uint8_t,16> stream{};
-        AES_encrypt(ctr.data(), stream.data(), &ks);
-        for (int byte = 0; byte < 16; byte++) {
-          uint8_t val = stream[byte];
-          for (int bit = 0; bit < 8; bit++) {
-            size_t t = blk * 128 + static_cast<size_t>(byte * 8 + bit);
-            if (t >= thr.size()) break;
-            bool cmp = x_masked < (thr[t] & mask);
-            uint8_t share = (val >> (7 - bit)) & 1u;
-            if (party == 1) share ^= static_cast<uint8_t>(cmp ? 1u : 0u);
-            size_t word_idx = t / 64;
-            size_t bit_idx = t % 64;
-            if (word_idx < words.size() && share) {
-              words[word_idx] |= (uint64_t(1) << bit_idx);
-            }
-          }
+      const auto& thr = it->second.thresholds_masked.empty() ? it->second.thresholds : it->second.thresholds_masked;
+      std::vector<u64> cmp_masks(static_cast<size_t>(out_words) * (blk_end - blk_start), 0);
+      build_mask_block_words(xs_u64, blk_start, blk_end, thr, mask, static_cast<size_t>(out_words), cmp_masks.data());
+      // Apply keystream/masking per element.
+      std::vector<u64> ks(static_cast<size_t>(out_words), 0);
+      for (size_t idx = blk_start; idx < blk_end; idx++) {
+        fill_keystream_words(it->second.aes0, (id << 32) ^ static_cast<u64>(idx), ks.data(), ks.size());
+        for (int w = 0; w < out_words; w++) {
+          u64 cm = cmp_masks[(idx - blk_start) * static_cast<size_t>(out_words) + static_cast<size_t>(w)];
+          u64 share = ks[static_cast<size_t>(w)];
+          if (params_.xor_bitmask && party == 1) share ^= cm;
+          if (!params_.xor_bitmask && party == 1) share = cm;
+          if (!params_.xor_bitmask && party == 0) share = 0ull;
+          outs_bitmask[idx * out_words + static_cast<size_t>(w)] = share;
         }
-      }
-      for (int w = 0; w < out_words; w++) {
-        outs_bitmask[i * out_words + w] = words[static_cast<size_t>(w)];
       }
     }
   }
@@ -149,11 +144,35 @@ public:
     u64 id = next_id_++;
     IntervalEntry ie;
     ie.desc = desc;
+    if (desc.in_bits <= 0 || desc.in_bits > 64) throw std::runtime_error("SigmaFastBackend: interval in_bits out of range");
+    ie.mask = (desc.in_bits == 64) ? ~0ull : ((u64(1) << desc.in_bits) - 1);
+    ie.boundaries_masked.clear();
+    if (desc.cutpoints.size() >= 2) {
+      for (size_t i = 1; i + 1 < desc.cutpoints.size(); i++) {
+        ie.boundaries_masked.push_back(desc.cutpoints[i] & ie.mask);
+      }
+    }
     std::mt19937_64 rng(id * 0xdeadbeefULL + desc.cutpoints.size());
     for (auto& b : ie.seed0) b = static_cast<uint8_t>(rng() & 0xFFu);
     for (auto& b : ie.seed1) b = static_cast<uint8_t>(rng() & 0xFFu);
     AES_set_encrypt_key(ie.seed0.data(), 128, &ie.aes0);
     AES_set_encrypt_key(ie.seed1.data(), 128, &ie.aes1);
+    // Pre-mask payloads into additive shares using AES keystream.
+    size_t words_total = desc.payload_flat.size();
+    ie.payload0.resize(words_total);
+    ie.payload1.resize(words_total);
+    size_t intervals = desc.cutpoints.size() > 0 ? desc.cutpoints.size() - 1 : 0;
+    for (size_t iv = 0; iv < intervals; iv++) {
+      size_t base = iv * static_cast<size_t>(desc.out_words);
+      std::vector<u64> ks(static_cast<size_t>(desc.out_words), 0);
+      fill_keystream_words(ie.aes0, (id << 24) ^ static_cast<u64>(iv), ks.data(), ks.size());
+      for (int w = 0; w < desc.out_words; w++) {
+        size_t idx = base + static_cast<size_t>(w);
+        u64 payload = desc.payload_flat[idx];
+        ie.payload0[idx] = ks[static_cast<size_t>(w)];
+        ie.payload1[idx] = proto::sub_mod(payload, ie.payload0[idx]);
+      }
+    }
     intervals_[id] = std::move(ie);
     IntervalLutKeyPair kp;
     kp.k0.bytes = proto::pack_u64_le(id << 1);
@@ -168,35 +187,49 @@ public:
                                   u64* outs_flat) const override {
     if (key_bytes < 8) throw std::runtime_error("SigmaFastBackend: key size too small");
     size_t total = xs_u64.size();
+    const size_t block = 1024;
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
-    for (long long ii = 0; ii < static_cast<long long>(total); ii++) {
-      size_t i = static_cast<size_t>(ii);
-      u64 kid = proto::unpack_u64_le(keys_flat + i * key_bytes);
+    for (long long bb = 0; bb < static_cast<long long>((total + block - 1) / block); bb++) {
+      size_t blk_start = static_cast<size_t>(bb) * block;
+      size_t blk_end = std::min(blk_start + block, total);
+      u64 kid = proto::unpack_u64_le(keys_flat + blk_start * key_bytes);
       u64 id = kid >> 1;
       int party = static_cast<int>(kid & 1ull);
       auto it = intervals_.find(id);
       if (it == intervals_.end()) throw std::runtime_error("SigmaFastBackend: unknown interval key");
-      const auto& e = it->second;
-      const auto& d = e.desc;
-      const AES_KEY& ks = (party == 0) ? e.aes0 : e.aes1;
-      std::vector<u64> out(static_cast<size_t>(out_words), 0);
-      size_t idx = d.cutpoints.size() - 1;
-      for (size_t j = 0; j + 1 < d.cutpoints.size(); j++) {
-        if (xs_u64[i] >= d.cutpoints[j] && xs_u64[i] < d.cutpoints[j + 1]) { idx = j; break; }
+      const auto& ie = it->second;
+      const auto& d = ie.desc;
+      if (out_words != d.out_words) throw std::runtime_error("SigmaFastBackend: interval out_words mismatch");
+      size_t intervals = d.cutpoints.size() > 1 ? d.cutpoints.size() - 1 : 0;
+      if (intervals == 0) continue;
+      const auto& bounds = ie.boundaries_masked;
+      size_t cut_words = bounds.empty() ? 0 : ((bounds.size() + 63) / 64);
+      std::vector<u64> cmp_masks(cut_words * (blk_end - blk_start), 0);
+      if (cut_words > 0) {
+        build_mask_block_words(xs_u64, blk_start, blk_end, bounds, ie.mask,
+                               cut_words, cmp_masks.data());
       }
-      for (int j = 0; j < out_words; j++) {
-        u64 v = d.payload_flat[idx * d.out_words + j];
-        // AES mask per element/word
-        std::array<uint8_t,16> ctr{};
-        u64 counter = (static_cast<u64>(i) << 32) ^ static_cast<u64>(j);
-        for (int b = 0; b < 8; b++) ctr[15 - b] = static_cast<uint8_t>(counter >> (b * 8));
-        std::array<uint8_t,16> stream{};
-        AES_encrypt(ctr.data(), stream.data(), &ks);
-        u64 mask = 0;
-        std::memcpy(&mask, stream.data(), sizeof(u64));
-        outs_flat[i * out_words + j] = (party == 0) ? add_mod(v, mask) : mask;
+      for (size_t idx_i = blk_start; idx_i < blk_end; idx_i++) {
+        size_t local = idx_i - blk_start;
+        size_t interval_idx = intervals - 1;
+        if (cut_words > 0) {
+          const u64* base = cmp_masks.data() + local * cut_words;
+          for (size_t b = 0; b < bounds.size(); b++) {
+            size_t w = b >> 6;
+            size_t bit = b & 63;
+            u64 word = base[w];
+            if ((word >> bit) & 1ull) { interval_idx = b; break; }
+          }
+        } else {
+          interval_idx = 0;
+        }
+        for (int j = 0; j < out_words; j++) {
+          size_t pos = interval_idx * static_cast<size_t>(d.out_words) + static_cast<size_t>(j);
+          u64 share = (party == 0) ? ie.payload0[pos] : ie.payload1[pos];
+          outs_flat[idx_i * out_words + static_cast<size_t>(j)] = share;
+        }
       }
     }
   }
@@ -358,11 +391,60 @@ private:
     return out;
   }
 
+  // Build packed comparison words for a block of inputs (SoA over thresholds).
+  static void build_mask_block_words(const std::vector<u64>& xs_u64,
+                                     size_t blk_start,
+                                     size_t blk_end,
+                                     const std::vector<u64>& thresholds,
+                                     u64 mask,
+                                     size_t out_words,
+                                     u64* dst_words) {
+    const size_t blk_size = blk_end - blk_start;
+    if (blk_size == 0 || out_words == 0) return;
+    for (size_t w = 0; w < out_words; w++) {
+      size_t t_start = w * 64;
+      size_t t_end = std::min(t_start + 64, thresholds.size());
+      size_t span = t_end - t_start;
+      size_t local_idx = 0;
+      for (size_t idx = blk_start; idx + 3 < blk_end; idx += 4) {
+        u64 x0 = xs_u64[idx] & mask;
+        u64 x1 = xs_u64[idx + 1] & mask;
+        u64 x2 = xs_u64[idx + 2] & mask;
+        u64 x3 = xs_u64[idx + 3] & mask;
+        u64 w0 = 0, w1 = 0, w2 = 0, w3 = 0;
+        for (size_t b = 0; b < span; b++) {
+          u64 thr = thresholds[t_start + b] & mask;
+          u64 bit = u64(1) << b;
+          if (x0 < thr) w0 |= bit;
+          if (x1 < thr) w1 |= bit;
+          if (x2 < thr) w2 |= bit;
+          if (x3 < thr) w3 |= bit;
+        }
+        dst_words[(local_idx + 0) * out_words + w] = w0;
+        dst_words[(local_idx + 1) * out_words + w] = w1;
+        dst_words[(local_idx + 2) * out_words + w] = w2;
+        dst_words[(local_idx + 3) * out_words + w] = w3;
+        local_idx += 4;
+      }
+      for (size_t idx = blk_start + local_idx; idx < blk_end; idx++) {
+        u64 x = xs_u64[idx] & mask;
+        u64 word = 0;
+        for (size_t b = 0; b < span; b++) {
+          u64 thr = thresholds[t_start + b] & mask;
+          word |= (static_cast<u64>(x < thr) << b);
+        }
+        dst_words[(idx - blk_start) * out_words + w] = word;
+      }
+    }
+  }
+
   Params params_;
   mutable u64 next_id_ = 1;
   struct PackedEntry {
     int in_bits;
     std::vector<u64> thresholds;
+    std::vector<u64> thresholds_masked;
+    u64 mask = ~0ull;
     std::array<uint8_t,16> seed0;
     std::array<uint8_t,16> seed1;
     AES_KEY aes0;
@@ -370,10 +452,14 @@ private:
   };
   struct IntervalEntry {
     IntervalLutDesc desc;
+    u64 mask = ~0ull;
     std::array<uint8_t,16> seed0;
     std::array<uint8_t,16> seed1;
     AES_KEY aes0;
     AES_KEY aes1;
+    std::vector<u64> boundaries_masked;
+    std::vector<u64> payload0; // additive share for party 0 (flat)
+    std::vector<u64> payload1; // additive share for party 1 (flat)
   };
   mutable std::unordered_map<u64, PackedEntry> packed_;
   mutable std::unordered_map<u64, IntervalEntry> intervals_;
@@ -384,6 +470,48 @@ private:
     std::vector<u8> payload1;
   };
   mutable std::unordered_map<u64, Program> progs_;
+
+  // Generate keystream words using AES-CTR (fixed key, little-endian counter).
+  static inline void fill_keystream_words(const AES_KEY& key, u64 counter, u64* out, size_t words) {
+#if defined(__AES__) && defined(__SSE2__)
+    // AES-NI path: process 2 counters per iteration to amortize overhead.
+    size_t produced = 0;
+    while (produced < words) {
+      __m128i ctr0 = _mm_set_epi64x(0, static_cast<long long>(counter));
+      __m128i ctr1 = _mm_set_epi64x(0, static_cast<long long>(counter + 1));
+      __m128i b0 = ctr0, b1 = ctr1;
+      b0 = _mm_xor_si128(b0, ((__m128i*)key.rd_key)[0]);
+      b1 = _mm_xor_si128(b1, ((__m128i*)key.rd_key)[0]);
+      for (int r = 1; r < key.rounds; r++) {
+        b0 = _mm_aesenc_si128(b0, ((__m128i*)key.rd_key)[r]);
+        b1 = _mm_aesenc_si128(b1, ((__m128i*)key.rd_key)[r]);
+      }
+      b0 = _mm_aesenclast_si128(b0, ((__m128i*)key.rd_key)[key.rounds]);
+      b1 = _mm_aesenclast_si128(b1, ((__m128i*)key.rd_key)[key.rounds]);
+      alignas(16) uint64_t buf[4];
+      _mm_store_si128((__m128i*)(buf + 0), b0);
+      _mm_store_si128((__m128i*)(buf + 2), b1);
+      for (int k = 0; k < 4 && produced < words; k++) {
+        out[produced++] = buf[k];
+      }
+      counter += 2;
+    }
+#else
+    std::array<uint8_t,16> in{};
+    std::array<uint8_t,16> block{};
+    size_t produced = 0;
+    while (produced < words) {
+      std::memcpy(in.data(), &counter, sizeof(u64));
+      AES_encrypt(in.data(), block.data(), &key);
+      uint64_t w0 = 0, w1 = 0;
+      std::memcpy(&w0, block.data(), sizeof(uint64_t));
+      std::memcpy(&w1, block.data() + 8, sizeof(uint64_t));
+      out[produced++] = w0;
+      if (produced < words) out[produced++] = w1;
+      counter++;
+    }
+#endif
+  }
 };
 
 }  // namespace proto

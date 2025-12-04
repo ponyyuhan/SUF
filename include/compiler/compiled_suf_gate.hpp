@@ -2,10 +2,16 @@
 
 #include <vector>
 #include <cstdint>
+#include <string>
 #include "suf/bool_expr.hpp"
 #include "compiler/pfss_program_desc.hpp"
 
 namespace compiler {
+
+struct PortLayout {
+  std::vector<std::string> arith_ports; // size r
+  std::vector<std::string> bool_ports;  // size ell
+};
 
 struct CompiledSUFGate {
   uint64_t r_in = 0;
@@ -23,6 +29,11 @@ struct CompiledSUFGate {
   int degree = 0;
   int r = 0;
   int ell = 0;
+
+  PortLayout layout;
+
+  // Optional: gate-specific meta for postproc (e.g., ReluARS params).
+  std::vector<uint64_t> extra_u64;
 };
 
 }  // namespace compiler

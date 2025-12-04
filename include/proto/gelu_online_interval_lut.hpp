@@ -32,12 +32,16 @@ inline GeluOut eval_gelu_interval_lut_one(int party,
                                           u64 hatx_public) {
   BeaverMul64 mul{party, ch, K.triples64, 0};
   BitRingOps B{party, mul};
+  size_t need_triples = static_cast<size_t>(K.d + 6);
+  if (!K.triples64.empty() && K.triples64.size() < need_triples) {
+    throw std::runtime_error("gelu_interval_lut: insufficient triples");
+  }
 
   u64 x = (party == 0) ? sub_mod(hatx_public, K.r_in_share)
                        : sub_mod(0ull, K.r_in_share);
 
-  u64 a = eval_u64_share_from_dcf(fss, 64, K.dcf_hat_lt_r, hatx_public);
-  u64 b = eval_u64_share_from_dcf(fss, 64, K.dcf_hat_lt_r_plus_2p63, hatx_public);
+  u64 a = b2a_bit(eval_bit_share_from_dcf(fss, 64, K.dcf_hat_lt_r, hatx_public), party, mul);
+  u64 b = b2a_bit(eval_bit_share_from_dcf(fss, 64, K.dcf_hat_lt_r_plus_2p63, hatx_public), party, mul);
   u64 na = B.NOT(a);
   u64 u = B.AND(b, na);
   u64 wrap_or = B.OR(na, b);

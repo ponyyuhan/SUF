@@ -479,22 +479,27 @@ static GeluSimKeys dealer_make_gelu_sim(ClearBackend& fss, int d, std::mt19937_6
 // ---------------- Simulation harness ----------------
 int main() {
   try {
+  std::cerr << "sim_harness: beaver_batch_selftest\n";
   if (!beaver_batch_selftest()) {
     std::cerr << "Beaver batch self-test failed\n";
     return 1;
   }
+  std::cerr << "sim_harness: beaver_zero_share_selftest\n";
   if (!beaver_zero_share_selftest()) {
     std::cerr << "Beaver zero-share self-test failed\n";
     return 1;
   }
+  std::cerr << "sim_harness: tape_roundtrip_selftest\n";
   if (!tape_roundtrip_selftest()) {
     std::cerr << "Tape roundtrip self-test failed\n";
     return 1;
   }
+  std::cerr << "sim_harness: bitops_lut_selftest\n";
   if (!bitops_lut_selftest()) {
     std::cerr << "Bit/LUT self-test failed\n";
     return 1;
   }
+  std::cerr << "sim_harness: pack_evalmany_selftest\n";
   if (!pack_evalmany_selftest()) {
     std::cerr << "pack_keys_flat/eval_many self-test failed\n";
     return 1;
@@ -504,6 +509,7 @@ int main() {
 
   // ReluARS test
   {
+    std::cerr << "sim_harness: reluars loop\n";
     const int N = get_iters("RELU_ITERS", 2000);
     int pass = 0;
     for (int i = 0; i < N; i++) {
@@ -593,6 +599,7 @@ int main() {
 
   // GeLU test (toy)
   {
+    std::cerr << "sim_harness: gelu loop\n";
     const int N = get_iters("GELU_ITERS", 2000);
     int pass = 0;
     for (int i = 0; i < N; i++) {
@@ -602,10 +609,22 @@ int main() {
       LocalChan::Shared sh;
       GeluOut g0{}, g1{};
       LocalChan c0(&sh, true), c1(&sh, false);
-      std::thread t0([&] { g0 = eval_gelu_step_dcf_one(0, backend, c0, gelu_keys.party0, hatx); });
-      std::thread t1([&] { g1 = eval_gelu_step_dcf_one(1, backend, c1, gelu_keys.party1, hatx); });
+      bool fail = false;
+      std::string errmsg;
+      std::thread t0([&] {
+        try { g0 = eval_gelu_step_dcf_one(0, backend, c0, gelu_keys.party0, hatx); }
+        catch (const std::exception& e) { fail = true; errmsg = e.what(); }
+      });
+      std::thread t1([&] {
+        try { g1 = eval_gelu_step_dcf_one(1, backend, c1, gelu_keys.party1, hatx); }
+        catch (const std::exception& e) { fail = true; errmsg = e.what(); }
+      });
       t0.join();
       t1.join();
+      if (fail) {
+        std::cerr << "gelu eval exception: " << errmsg << "\n";
+        return 1;
+      }
       u64 y = add_mod(g0.y_share, g1.y_share);
       u64 yref = gelu_plain_piecewise(x, gelu_keys.cut_bias, gelu_keys.coeffs, gelu_keys.party0.d, gelu_keys.r_full);
 
@@ -637,10 +656,22 @@ int main() {
       LocalChan::Shared sh2;
       GeluOut gt0{}, gt1{};
       LocalChan tc0(&sh2, true), tc1(&sh2, false);
-      std::thread tt0([&] { gt0 = eval_gelu_step_dcf_from_tape(0, backend, tc0, tr0, hatx); });
-      std::thread tt1([&] { gt1 = eval_gelu_step_dcf_from_tape(1, backend, tc1, tr1, hatx); });
+      bool fail_tape = false;
+      std::string err_tape;
+      std::thread tt0([&] {
+        try { gt0 = eval_gelu_step_dcf_from_tape(0, backend, tc0, tr0, hatx); }
+        catch (const std::exception& e) { fail_tape = true; err_tape = e.what(); }
+      });
+      std::thread tt1([&] {
+        try { gt1 = eval_gelu_step_dcf_from_tape(1, backend, tc1, tr1, hatx); }
+        catch (const std::exception& e) { fail_tape = true; err_tape = e.what(); }
+      });
       tt0.join();
       tt1.join();
+      if (fail_tape) {
+        std::cerr << "gelu tape eval exception: " << err_tape << "\n";
+        return 1;
+      }
       u64 y_tape = add_mod(gt0.y_share, gt1.y_share);
 
       if (y == y_tape && y == yref) {

@@ -4,6 +4,7 @@
 #include "proto/pfss_backend_batch.hpp"
 #include "proto/beaver_mul64.hpp"
 #include "proto/bit_ring_ops.hpp"
+#include "proto/pfss_utils.hpp"
 #include <vector>
 
 namespace proto {
@@ -42,7 +43,7 @@ inline void gelu_eval_batch_step_dcf(
     const GeluStepDCFKeysPacked& K,
     GeluBatchIO io) {
   const size_t N = io.hatx->size();
-  const int out_bytes_bit = 8;
+  const int out_bytes_bit = 1;
 
   std::vector<u64> x(N);
   for (size_t i = 0; i < N; i++) {
@@ -54,14 +55,22 @@ inline void gelu_eval_batch_step_dcf(
   fss.eval_dcf_many_u64(64, K.key_bytes_sign, K.k_hat_lt_r, *io.hatx, out_bytes_bit, out_a.data());
   fss.eval_dcf_many_u64(64, K.key_bytes_sign, K.k_hat_lt_r2, *io.hatx, out_bytes_bit, out_b.data());
 
-  std::vector<u64> a(N), b(N);
-  for (size_t i = 0; i < N; i++) {
-    a[i] = unpack_u64_le(out_a.data() + 8 * i);
-    b[i] = unpack_u64_le(out_b.data() + 8 * i);
-  }
-
+  if (K.triples64 == nullptr) throw std::runtime_error("gelu_batch_step_dcf: missing triples");
   BeaverMul64 mul{party, ch, *K.triples64, 0};
   BitRingOps B{party, mul};
+  size_t need_triples = (static_cast<size_t>(K.d + 5)) * N;
+  if (K.triples64->size() < need_triples) {
+    throw std::runtime_error("gelu_batch_step_dcf: insufficient triples");
+  }
+
+  std::vector<uint64_t> a_xor(N), b_xor(N);
+  for (size_t i = 0; i < N; i++) {
+    a_xor[i] = static_cast<uint64_t>(out_a[i] & 1u);
+    b_xor[i] = static_cast<uint64_t>(out_b[i] & 1u);
+  }
+  std::vector<uint64_t> a, b;
+  b2a_bits_batch(a_xor, party, mul, a);
+  b2a_bits_batch(b_xor, party, mul, b);
 
   std::vector<u64> na(N), u(N), w(N);
   for (size_t i = 0; i < N; i++) na[i] = sub_mod((party == 0) ? 1ULL : 0ULL, a[i]);

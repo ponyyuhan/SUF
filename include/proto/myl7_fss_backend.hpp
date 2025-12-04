@@ -24,7 +24,7 @@ class Myl7FssBackend final : public PfssBackend {
 public:
   struct Params {
     int lambda_bytes = 16;   // 128-bit security
-    bool bits_msb_first = true;
+    bool bits_msb_first = false; // myl7 comparison keys expect LSB-first bits
   };
 
   Myl7FssBackend() : params_() {}
@@ -38,6 +38,10 @@ public:
       bits[i] = static_cast<u8>((x >> shift) & 1u);
     }
     return bits;
+  }
+
+  BitOrder bit_order() const override {
+    return params_.bits_msb_first ? BitOrder::MSB_FIRST : BitOrder::LSB_FIRST;
   }
 
   DcfKeyPair gen_dcf(int in_bits,
