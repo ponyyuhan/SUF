@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        compiler: [gcc, clang]
+        lambda: [16, 32]
+        include:
+          - compiler: gcc
+            c_compiler: gcc
+            cxx_compiler: g++
+            extra_packages: ""
+          - compiler: clang
+            c_compiler: clang
+            cxx_compiler: clang++
+            extra_packages: "clang libomp-dev"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            libsodium-dev \
+            libssl-dev \
+            lcov \
+            ${{ matrix.extra_packages }}
+
+      - name: Configure CMake with ${{ matrix.compiler }} and lambda=${{ matrix.lambda }}
+        run: |
+          cmake -B build -S . \
+            -DFSS_kLambda=${{ matrix.lambda }} \
+            -DBUILD_WITH_CUDA=OFF \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=${{ matrix.c_compiler }} \
+            -DCMAKE_CXX_COMPILER=${{ matrix.cxx_compiler }} \
+            -DCMAKE_C_FLAGS='--coverage' \
+            -DCMAKE_CXX_FLAGS='--coverage' \
+            -DCMAKE_EXE_LINKER_FLAGS='--coverage'
+      - name: Build
+        run: |
+          cmake --build build --config Debug
+
+      - name: Test
+        run: |
+          cd build
+          ctest --output-on-failure
+
+      - name: Collect coverage
+        if: matrix.compiler == 'gcc'
+        run: |
+          cd build
+          lcov --capture --directory . --output-file coverage.info \
+            --exclude '*_test.cc' \
+            --exclude '**/build/_deps/**' \
+            --exclude '/usr/**'
+          lcov --list coverage.info
+
+  doc:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Doxygen
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y doxygen graphviz
+
+      - name: Build documentation
+        run: |
+          doxygen
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          deploy_key: ${{ secrets.ACTIONS_DEPLOY_KEY }}
+          publish_dir: doc/html
