@@ -17,12 +17,15 @@ struct RawPredQuery {
 };
 
 enum class PredOutMode : uint8_t {
-  kU64PerBit
+  kU64PerBit         = 0,  // legacy additive bit shares
+  kU64PerBit_Xor     = 0,  // alias: XOR bit in LSB of u64
+  kU64PerBit_Add     = 1,
+  kPackedMask_Xor    = 2
 };
 
 struct PredProgramDesc {
   int n = 64;
-  PredOutMode out_mode = PredOutMode::kU64PerBit;
+  PredOutMode out_mode = PredOutMode::kU64PerBit_Xor;
   std::vector<RawPredQuery> queries;  // deduplicated, stable order
 };
 
@@ -44,6 +47,31 @@ struct CoeffProgramDesc {
   std::vector<uint64_t> base_payload_words;         // size out_words
   std::vector<uint64_t> cutpoints_ge;               // sorted asc
   std::vector<std::vector<uint64_t>> deltas_words;  // each size out_words
+};
+
+enum class ShareSemantics : uint8_t {
+  XorBytes,
+  AddU64
+};
+
+enum class BitOrder : uint8_t {
+  MSB_FIRST,
+  LSB_FIRST
+};
+
+struct PredKeyMeta {
+  int n = 64;
+  PredOutMode out_mode = PredOutMode::kU64PerBit_Xor;
+  BitOrder bit_order = BitOrder::MSB_FIRST;
+  ShareSemantics sem = ShareSemantics::XorBytes;
+  uint32_t out_words = 1;
+};
+
+struct CoeffKeyMeta {
+  int n = 64;
+  CoeffMode mode = CoeffMode::kStepDcf;
+  ShareSemantics sem = ShareSemantics::AddU64;
+  int out_words = 0;
 };
 
 } // namespace compiler

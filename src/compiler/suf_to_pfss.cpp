@@ -39,7 +39,8 @@ static suf::BoolExpr make_wrap_expr(uint64_t wrap_idx_offset, int idx_raw, int i
   suf::BoolExpr na{ suf::BNot{ std::make_unique<suf::BoolExpr>(a) } };
   suf::BoolExpr and_expr{ suf::BAnd{ std::make_unique<suf::BoolExpr>(na), std::make_unique<suf::BoolExpr>(b) } };
   suf::BoolExpr or_expr{ suf::BOr{ std::make_unique<suf::BoolExpr>(na), std::make_unique<suf::BoolExpr>(b) } };
-  suf::BoolExpr wrap_var{ suf::BVar{ static_cast<int>(wrap_idx_offset) } };
+  // Use negative indices to refer to wrap bits; evaluator interprets them with offset.
+  suf::BoolExpr wrap_var{ suf::BVar{ -1 - static_cast<int>(wrap_idx_offset) } };
   suf::BoolExpr not_wrap{ suf::BNot{ std::make_unique<suf::BoolExpr>(wrap_var) } };
   suf::BoolExpr term0{ suf::BAnd{ std::make_unique<suf::BoolExpr>(not_wrap), std::make_unique<suf::BoolExpr>(and_expr) } };
   suf::BoolExpr term1{ suf::BAnd{ std::make_unique<suf::BoolExpr>(wrap_var), std::make_unique<suf::BoolExpr>(or_expr) } };

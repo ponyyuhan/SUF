@@ -25,4 +25,11 @@ inline std::vector<u64> eval_vec_u64_from_dcf(const PfssBackend& fss, int in_bit
   return v;
 }
 
+inline uint64_t eval_bit_share_from_dcf(const PfssBackend& fss, int in_bits,
+                                        const FssKey& kb, u64 x) {
+  auto out = fss.eval_dcf(in_bits, kb, fss.u64_to_bits_msb(x, in_bits));
+  if (out.empty()) return 0;
+  return static_cast<uint64_t>(out[0] & 1u);
+}
+
 }  // namespace proto

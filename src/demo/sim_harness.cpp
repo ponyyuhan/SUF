@@ -8,7 +8,6 @@
 #include <random>
 #include <thread>
 #include <vector>
-#include <span>
 #include <string>
 #include <array>
 
@@ -96,10 +95,10 @@ static bool beaver_batch_selftest() {
     x0[i] = xs0; x1[i] = xs1; y0[i] = ys0; y1[i] = ys1;
   }
   std::vector<u64> z0(N), z1(N);
-  BeaverMul64Batch bm0(0, c0, std::span<const BeaverTriple64Share>(t0.data(), t0.size()));
-  BeaverMul64Batch bm1(1, c1, std::span<const BeaverTriple64Share>(t1.data(), t1.size()));
-  std::thread tA([&]{ bm0.mul(std::span<const u64>(x0), std::span<const u64>(y0), std::span<u64>(z0)); });
-  std::thread tB([&]{ bm1.mul(std::span<const u64>(x1), std::span<const u64>(y1), std::span<u64>(z1)); });
+  BeaverMul64Batch bm0(0, c0, t0);
+  BeaverMul64Batch bm1(1, c1, t1);
+  std::thread tA([&]{ bm0.mul(x0, y0, z0); });
+  std::thread tB([&]{ bm1.mul(x1, y1, z1); });
   tA.join(); tB.join();
   for (size_t i = 0; i < N; i++) {
     u64 z = add_mod(z0[i], z1[i]);

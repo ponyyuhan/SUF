@@ -5,8 +5,6 @@
 #include "proto/beaver.hpp"
 #include <vector>
 #include <stdexcept>
-#include <span>
-
 namespace proto {
 
 struct BeaverMul64 {
@@ -75,11 +73,11 @@ struct BeaverMul64 {
 // Batched wrapper API (preferred)
 class BeaverMul64Batch {
 public:
-  BeaverMul64Batch(int party_, IChannel& ch_, std::span<const BeaverTriple64Share> triples_)
+  BeaverMul64Batch(int party_, IChannel& ch_, const std::vector<BeaverTriple64Share>& triples_)
       : party(party_), ch(ch_), triples(triples_), idx(0) {}
 
-  void mul(std::span<const u64> x, std::span<const u64> y, std::span<u64> out) {
-    if (x.size() != y.size() || out.size() != x.size()) throw std::runtime_error("BeaverMul64Batch size mismatch");
+  void mul(const std::vector<u64>& x, const std::vector<u64>& y, std::vector<u64>& out) {
+    if (x.size() != y.size()) throw std::runtime_error("BeaverMul64Batch size mismatch");
     if (idx + x.size() > triples.size()) throw std::runtime_error("BeaverMul64Batch out of triples");
 
     std::vector<u64> e_share(x.size()), f_share(x.size()), other_e(x.size()), other_f(x.size());
@@ -91,6 +89,7 @@ public:
     exchange_u64_vec(ch, e_share, other_e);
     exchange_u64_vec(ch, f_share, other_f);
 
+    out.resize(x.size());
     for (size_t i = 0; i < x.size(); i++) {
       const auto& t = triples[idx + i];
       u64 e = add_mod(e_share[i], other_e[i]);
@@ -109,7 +108,7 @@ public:
 private:
   int party;
   IChannel& ch;
-  std::span<const BeaverTriple64Share> triples;
+  const std::vector<BeaverTriple64Share>& triples;
   size_t idx;
 };
 

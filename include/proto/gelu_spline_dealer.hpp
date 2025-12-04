@@ -4,7 +4,34 @@
 #include "proto/pfss_backend.hpp"
 #include <algorithm>
 #include <vector>
-#include <span>
+#if __has_include(<span>)
+  #include <span>
+#elif __has_include(<experimental/span>)
+  #include <experimental/span>
+  namespace std { using experimental::span; }
+#elif !defined(SUF_SPAN_FALLBACK_DEFINED)
+  #define SUF_SPAN_FALLBACK_DEFINED
+  namespace std {
+    template <typename T>
+    class span {
+     public:
+      span(T* ptr, std::size_t n) : data_(ptr), size_(n) {}
+      template <typename U>
+      span(std::vector<U>& v) : data_(v.data()), size_(v.size()) {}
+      template <typename U>
+      span(const std::vector<U>& v) : data_(const_cast<U*>(v.data())), size_(v.size()) {}
+      T* data() const { return data_; }
+      std::size_t size() const { return size_; }
+      bool empty() const { return size_ == 0; }
+      T* begin() const { return data_; }
+      T* end() const { return data_ + size_; }
+      T& operator[](std::size_t i) const { return data_[i]; }
+     private:
+      T* data_;
+      std::size_t size_;
+    };
+  }
+#endif
 
 namespace proto {
 
