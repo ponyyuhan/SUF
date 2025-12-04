@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -72,6 +73,24 @@ struct CoeffKeyMeta {
   CoeffMode mode = CoeffMode::kStepDcf;
   ShareSemantics sem = ShareSemantics::AddU64;
   int out_words = 0;
+};
+
+enum class GateKind : uint8_t {
+  SiLUSpline,
+  NExp,
+  Reciprocal,
+  Rsqrt,
+  SoftmaxBlock,
+  LayerNormBlock
+};
+
+struct GateParams {
+  GateKind kind = GateKind::SiLUSpline;
+  int frac_bits = 0;
+  int nr_iters = 1;
+  int segments = 0;
+  size_t L = 0;
+  double eps = 0.0;
 };
 
 } // namespace compiler

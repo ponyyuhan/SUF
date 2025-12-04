@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 #include "core/ring.hpp"
+#include "compiler/utils.hpp"
 #include "mpc/beaver.hpp"
 #include "mpc/masked_wire.hpp"
 #include "mpc/net.hpp"

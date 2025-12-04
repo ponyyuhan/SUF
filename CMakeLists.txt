@@ -142,6 +142,10 @@ add_executable(test_postproc_hooks src/demo/test_postproc_hooks.cpp)
 target_include_directories(test_postproc_hooks PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_postproc_hooks PRIVATE suf_fss ${MYL7_LINK_LIBS})
 
+add_executable(test_llm_gates src/demo/test_llm_gates.cpp)
+target_include_directories(test_llm_gates PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_llm_gates PRIVATE suf_fss ${MYL7_LINK_LIBS})
+
 add_executable(bench_sigmafast_pred src/bench/bench_sigmafast_pred.cpp)
 target_include_directories(bench_sigmafast_pred PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(bench_sigmafast_pred PRIVATE suf_fss ${MYL7_LINK_LIBS})
@@ -153,6 +157,36 @@ target_link_libraries(bench_sigmafast_coeff PRIVATE suf_fss ${MYL7_LINK_LIBS})
 add_executable(bench_sigmafast_gates src/bench/bench_sigmafast_gates.cpp src/compiler/suf_to_pfss.cpp)
 target_include_directories(bench_sigmafast_gates PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(bench_sigmafast_gates PRIVATE suf_fss ${MYL7_LINK_LIBS})
+
+add_library(nn_ops STATIC
+  src/nn/linops.cpp
+  src/nn/matmul_publicW.cpp
+  src/nn/matmul_beaver.cpp
+  src/nn/attention_block.cpp
+  src/nn/mlp_block.cpp
+  src/nn/transformer_layer.cpp)
+target_include_directories(nn_ops PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(nn_ops PUBLIC suf_fss ${MYL7_LINK_LIBS})
+
+add_executable(bench_llm_gates src/bench/bench_llm_gates.cpp)
+target_include_directories(bench_llm_gates PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(bench_llm_gates PRIVATE suf_fss ${MYL7_LINK_LIBS})
+
+add_executable(bench_attention src/bench/bench_attention.cpp)
+target_include_directories(bench_attention PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(bench_attention PRIVATE nn_ops suf_fss ${MYL7_LINK_LIBS})
+
+add_executable(test_matmul_and_attention src/demo/test_matmul_and_attention.cpp)
+target_include_directories(test_matmul_and_attention PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_matmul_and_attention PRIVATE nn_ops suf_fss ${MYL7_LINK_LIBS})
+
+add_executable(test_matmul src/demo/test_matmul.cpp)
+target_include_directories(test_matmul PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_matmul PRIVATE nn_ops suf_fss ${MYL7_LINK_LIBS})
+
+add_executable(bench_gemm src/bench/bench_gemm.cpp)
+target_include_directories(bench_gemm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(bench_gemm PRIVATE nn_ops suf_fss ${MYL7_LINK_LIBS})
 
 if(HAVE_MYL7_FSS)
 add_executable(test_myl7_bit_order src/demo/test_myl7_bit_order.cpp)

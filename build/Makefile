@@ -273,6 +273,19 @@ test_postproc_hooks/fast:
 .PHONY : test_postproc_hooks/fast
 
 #=============================================================================
+# Target rules for targets named test_llm_gates
+
+# Build rule for target.
+test_llm_gates: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_llm_gates
+.PHONY : test_llm_gates
+
+# fast build rule for target.
+test_llm_gates/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_llm_gates.dir/build.make CMakeFiles/test_llm_gates.dir/build
+.PHONY : test_llm_gates/fast
+
+#=============================================================================
 # Target rules for targets named bench_sigmafast_pred
 
 # Build rule for target.
@@ -312,6 +325,84 @@ bench_sigmafast_gates/fast:
 .PHONY : bench_sigmafast_gates/fast
 
 #=============================================================================
+# Target rules for targets named nn_ops
+
+# Build rule for target.
+nn_ops: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 nn_ops
+.PHONY : nn_ops
+
+# fast build rule for target.
+nn_ops/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/build
+.PHONY : nn_ops/fast
+
+#=============================================================================
+# Target rules for targets named bench_llm_gates
+
+# Build rule for target.
+bench_llm_gates: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 bench_llm_gates
+.PHONY : bench_llm_gates
+
+# fast build rule for target.
+bench_llm_gates/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_llm_gates.dir/build.make CMakeFiles/bench_llm_gates.dir/build
+.PHONY : bench_llm_gates/fast
+
+#=============================================================================
+# Target rules for targets named bench_attention
+
+# Build rule for target.
+bench_attention: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 bench_attention
+.PHONY : bench_attention
+
+# fast build rule for target.
+bench_attention/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_attention.dir/build.make CMakeFiles/bench_attention.dir/build
+.PHONY : bench_attention/fast
+
+#=============================================================================
+# Target rules for targets named test_matmul_and_attention
+
+# Build rule for target.
+test_matmul_and_attention: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_matmul_and_attention
+.PHONY : test_matmul_and_attention
+
+# fast build rule for target.
+test_matmul_and_attention/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_matmul_and_attention.dir/build.make CMakeFiles/test_matmul_and_attention.dir/build
+.PHONY : test_matmul_and_attention/fast
+
+#=============================================================================
+# Target rules for targets named test_matmul
+
+# Build rule for target.
+test_matmul: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_matmul
+.PHONY : test_matmul
+
+# fast build rule for target.
+test_matmul/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_matmul.dir/build.make CMakeFiles/test_matmul.dir/build
+.PHONY : test_matmul/fast
+
+#=============================================================================
+# Target rules for targets named bench_gemm
+
+# Build rule for target.
+bench_gemm: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 bench_gemm
+.PHONY : bench_gemm
+
+# fast build rule for target.
+bench_gemm/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_gemm.dir/build.make CMakeFiles/bench_gemm.dir/build
+.PHONY : bench_gemm/fast
+
+#=============================================================================
 # Target rules for targets named test_myl7_bit_order
 
 # Build rule for target.
@@ -323,6 +414,78 @@ test_myl7_bit_order: cmake_check_build_system
 test_myl7_bit_order/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_myl7_bit_order.dir/build.make CMakeFiles/test_myl7_bit_order.dir/build
 .PHONY : test_myl7_bit_order/fast
+
+src/bench/bench_attention.o: src/bench/bench_attention.cpp.o
+.PHONY : src/bench/bench_attention.o
+
+# target to build an object file
+src/bench/bench_attention.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_attention.dir/build.make CMakeFiles/bench_attention.dir/src/bench/bench_attention.cpp.o
+.PHONY : src/bench/bench_attention.cpp.o
+
+src/bench/bench_attention.i: src/bench/bench_attention.cpp.i
+.PHONY : src/bench/bench_attention.i
+
+# target to preprocess a source file
+src/bench/bench_attention.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_attention.dir/build.make CMakeFiles/bench_attention.dir/src/bench/bench_attention.cpp.i
+.PHONY : src/bench/bench_attention.cpp.i
+
+src/bench/bench_attention.s: src/bench/bench_attention.cpp.s
+.PHONY : src/bench/bench_attention.s
+
+# target to generate assembly for a file
+src/bench/bench_attention.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_attention.dir/build.make CMakeFiles/bench_attention.dir/src/bench/bench_attention.cpp.s
+.PHONY : src/bench/bench_attention.cpp.s
+
+src/bench/bench_gemm.o: src/bench/bench_gemm.cpp.o
+.PHONY : src/bench/bench_gemm.o
+
+# target to build an object file
+src/bench/bench_gemm.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_gemm.dir/build.make CMakeFiles/bench_gemm.dir/src/bench/bench_gemm.cpp.o
+.PHONY : src/bench/bench_gemm.cpp.o
+
+src/bench/bench_gemm.i: src/bench/bench_gemm.cpp.i
+.PHONY : src/bench/bench_gemm.i
+
+# target to preprocess a source file
+src/bench/bench_gemm.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_gemm.dir/build.make CMakeFiles/bench_gemm.dir/src/bench/bench_gemm.cpp.i
+.PHONY : src/bench/bench_gemm.cpp.i
+
+src/bench/bench_gemm.s: src/bench/bench_gemm.cpp.s
+.PHONY : src/bench/bench_gemm.s
+
+# target to generate assembly for a file
+src/bench/bench_gemm.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_gemm.dir/build.make CMakeFiles/bench_gemm.dir/src/bench/bench_gemm.cpp.s
+.PHONY : src/bench/bench_gemm.cpp.s
+
+src/bench/bench_llm_gates.o: src/bench/bench_llm_gates.cpp.o
+.PHONY : src/bench/bench_llm_gates.o
+
+# target to build an object file
+src/bench/bench_llm_gates.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_llm_gates.dir/build.make CMakeFiles/bench_llm_gates.dir/src/bench/bench_llm_gates.cpp.o
+.PHONY : src/bench/bench_llm_gates.cpp.o
+
+src/bench/bench_llm_gates.i: src/bench/bench_llm_gates.cpp.i
+.PHONY : src/bench/bench_llm_gates.i
+
+# target to preprocess a source file
+src/bench/bench_llm_gates.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_llm_gates.dir/build.make CMakeFiles/bench_llm_gates.dir/src/bench/bench_llm_gates.cpp.i
+.PHONY : src/bench/bench_llm_gates.cpp.i
+
+src/bench/bench_llm_gates.s: src/bench/bench_llm_gates.cpp.s
+.PHONY : src/bench/bench_llm_gates.s
+
+# target to generate assembly for a file
+src/bench/bench_llm_gates.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_llm_gates.dir/build.make CMakeFiles/bench_llm_gates.dir/src/bench/bench_llm_gates.cpp.s
+.PHONY : src/bench/bench_llm_gates.cpp.s
 
 src/bench/bench_sigmafast_coeff.o: src/bench/bench_sigmafast_coeff.cpp.o
 .PHONY : src/bench/bench_sigmafast_coeff.o
@@ -579,6 +742,30 @@ src/demo/test_composite_runtime.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_runtime.dir/build.make CMakeFiles/test_composite_runtime.dir/src/demo/test_composite_runtime.cpp.s
 .PHONY : src/demo/test_composite_runtime.cpp.s
 
+src/demo/test_llm_gates.o: src/demo/test_llm_gates.cpp.o
+.PHONY : src/demo/test_llm_gates.o
+
+# target to build an object file
+src/demo/test_llm_gates.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_llm_gates.dir/build.make CMakeFiles/test_llm_gates.dir/src/demo/test_llm_gates.cpp.o
+.PHONY : src/demo/test_llm_gates.cpp.o
+
+src/demo/test_llm_gates.i: src/demo/test_llm_gates.cpp.i
+.PHONY : src/demo/test_llm_gates.i
+
+# target to preprocess a source file
+src/demo/test_llm_gates.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_llm_gates.dir/build.make CMakeFiles/test_llm_gates.dir/src/demo/test_llm_gates.cpp.i
+.PHONY : src/demo/test_llm_gates.cpp.i
+
+src/demo/test_llm_gates.s: src/demo/test_llm_gates.cpp.s
+.PHONY : src/demo/test_llm_gates.s
+
+# target to generate assembly for a file
+src/demo/test_llm_gates.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_llm_gates.dir/build.make CMakeFiles/test_llm_gates.dir/src/demo/test_llm_gates.cpp.s
+.PHONY : src/demo/test_llm_gates.cpp.s
+
 src/demo/test_mask_rewrite.o: src/demo/test_mask_rewrite.cpp.o
 .PHONY : src/demo/test_mask_rewrite.o
 
@@ -602,6 +789,54 @@ src/demo/test_mask_rewrite.s: src/demo/test_mask_rewrite.cpp.s
 src/demo/test_mask_rewrite.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_mask_rewrite.dir/build.make CMakeFiles/test_mask_rewrite.dir/src/demo/test_mask_rewrite.cpp.s
 .PHONY : src/demo/test_mask_rewrite.cpp.s
+
+src/demo/test_matmul.o: src/demo/test_matmul.cpp.o
+.PHONY : src/demo/test_matmul.o
+
+# target to build an object file
+src/demo/test_matmul.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_matmul.dir/build.make CMakeFiles/test_matmul.dir/src/demo/test_matmul.cpp.o
+.PHONY : src/demo/test_matmul.cpp.o
+
+src/demo/test_matmul.i: src/demo/test_matmul.cpp.i
+.PHONY : src/demo/test_matmul.i
+
+# target to preprocess a source file
+src/demo/test_matmul.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_matmul.dir/build.make CMakeFiles/test_matmul.dir/src/demo/test_matmul.cpp.i
+.PHONY : src/demo/test_matmul.cpp.i
+
+src/demo/test_matmul.s: src/demo/test_matmul.cpp.s
+.PHONY : src/demo/test_matmul.s
+
+# target to generate assembly for a file
+src/demo/test_matmul.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_matmul.dir/build.make CMakeFiles/test_matmul.dir/src/demo/test_matmul.cpp.s
+.PHONY : src/demo/test_matmul.cpp.s
+
+src/demo/test_matmul_and_attention.o: src/demo/test_matmul_and_attention.cpp.o
+.PHONY : src/demo/test_matmul_and_attention.o
+
+# target to build an object file
+src/demo/test_matmul_and_attention.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_matmul_and_attention.dir/build.make CMakeFiles/test_matmul_and_attention.dir/src/demo/test_matmul_and_attention.cpp.o
+.PHONY : src/demo/test_matmul_and_attention.cpp.o
+
+src/demo/test_matmul_and_attention.i: src/demo/test_matmul_and_attention.cpp.i
+.PHONY : src/demo/test_matmul_and_attention.i
+
+# target to preprocess a source file
+src/demo/test_matmul_and_attention.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_matmul_and_attention.dir/build.make CMakeFiles/test_matmul_and_attention.dir/src/demo/test_matmul_and_attention.cpp.i
+.PHONY : src/demo/test_matmul_and_attention.cpp.i
+
+src/demo/test_matmul_and_attention.s: src/demo/test_matmul_and_attention.cpp.s
+.PHONY : src/demo/test_matmul_and_attention.s
+
+# target to generate assembly for a file
+src/demo/test_matmul_and_attention.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_matmul_and_attention.dir/build.make CMakeFiles/test_matmul_and_attention.dir/src/demo/test_matmul_and_attention.cpp.s
+.PHONY : src/demo/test_matmul_and_attention.cpp.s
 
 src/demo/test_myl7_bit_order.o: src/demo/test_myl7_bit_order.cpp.o
 .PHONY : src/demo/test_myl7_bit_order.o
@@ -723,6 +958,150 @@ src/demo/test_suf_ref_eval.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_suf_ref_eval.dir/build.make CMakeFiles/test_suf_ref_eval.dir/src/demo/test_suf_ref_eval.cpp.s
 .PHONY : src/demo/test_suf_ref_eval.cpp.s
 
+src/nn/attention_block.o: src/nn/attention_block.cpp.o
+.PHONY : src/nn/attention_block.o
+
+# target to build an object file
+src/nn/attention_block.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/attention_block.cpp.o
+.PHONY : src/nn/attention_block.cpp.o
+
+src/nn/attention_block.i: src/nn/attention_block.cpp.i
+.PHONY : src/nn/attention_block.i
+
+# target to preprocess a source file
+src/nn/attention_block.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/attention_block.cpp.i
+.PHONY : src/nn/attention_block.cpp.i
+
+src/nn/attention_block.s: src/nn/attention_block.cpp.s
+.PHONY : src/nn/attention_block.s
+
+# target to generate assembly for a file
+src/nn/attention_block.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/attention_block.cpp.s
+.PHONY : src/nn/attention_block.cpp.s
+
+src/nn/linops.o: src/nn/linops.cpp.o
+.PHONY : src/nn/linops.o
+
+# target to build an object file
+src/nn/linops.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/linops.cpp.o
+.PHONY : src/nn/linops.cpp.o
+
+src/nn/linops.i: src/nn/linops.cpp.i
+.PHONY : src/nn/linops.i
+
+# target to preprocess a source file
+src/nn/linops.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/linops.cpp.i
+.PHONY : src/nn/linops.cpp.i
+
+src/nn/linops.s: src/nn/linops.cpp.s
+.PHONY : src/nn/linops.s
+
+# target to generate assembly for a file
+src/nn/linops.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/linops.cpp.s
+.PHONY : src/nn/linops.cpp.s
+
+src/nn/matmul_beaver.o: src/nn/matmul_beaver.cpp.o
+.PHONY : src/nn/matmul_beaver.o
+
+# target to build an object file
+src/nn/matmul_beaver.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/matmul_beaver.cpp.o
+.PHONY : src/nn/matmul_beaver.cpp.o
+
+src/nn/matmul_beaver.i: src/nn/matmul_beaver.cpp.i
+.PHONY : src/nn/matmul_beaver.i
+
+# target to preprocess a source file
+src/nn/matmul_beaver.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/matmul_beaver.cpp.i
+.PHONY : src/nn/matmul_beaver.cpp.i
+
+src/nn/matmul_beaver.s: src/nn/matmul_beaver.cpp.s
+.PHONY : src/nn/matmul_beaver.s
+
+# target to generate assembly for a file
+src/nn/matmul_beaver.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/matmul_beaver.cpp.s
+.PHONY : src/nn/matmul_beaver.cpp.s
+
+src/nn/matmul_publicW.o: src/nn/matmul_publicW.cpp.o
+.PHONY : src/nn/matmul_publicW.o
+
+# target to build an object file
+src/nn/matmul_publicW.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/matmul_publicW.cpp.o
+.PHONY : src/nn/matmul_publicW.cpp.o
+
+src/nn/matmul_publicW.i: src/nn/matmul_publicW.cpp.i
+.PHONY : src/nn/matmul_publicW.i
+
+# target to preprocess a source file
+src/nn/matmul_publicW.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/matmul_publicW.cpp.i
+.PHONY : src/nn/matmul_publicW.cpp.i
+
+src/nn/matmul_publicW.s: src/nn/matmul_publicW.cpp.s
+.PHONY : src/nn/matmul_publicW.s
+
+# target to generate assembly for a file
+src/nn/matmul_publicW.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/matmul_publicW.cpp.s
+.PHONY : src/nn/matmul_publicW.cpp.s
+
+src/nn/mlp_block.o: src/nn/mlp_block.cpp.o
+.PHONY : src/nn/mlp_block.o
+
+# target to build an object file
+src/nn/mlp_block.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/mlp_block.cpp.o
+.PHONY : src/nn/mlp_block.cpp.o
+
+src/nn/mlp_block.i: src/nn/mlp_block.cpp.i
+.PHONY : src/nn/mlp_block.i
+
+# target to preprocess a source file
+src/nn/mlp_block.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/mlp_block.cpp.i
+.PHONY : src/nn/mlp_block.cpp.i
+
+src/nn/mlp_block.s: src/nn/mlp_block.cpp.s
+.PHONY : src/nn/mlp_block.s
+
+# target to generate assembly for a file
+src/nn/mlp_block.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/mlp_block.cpp.s
+.PHONY : src/nn/mlp_block.cpp.s
+
+src/nn/transformer_layer.o: src/nn/transformer_layer.cpp.o
+.PHONY : src/nn/transformer_layer.o
+
+# target to build an object file
+src/nn/transformer_layer.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/transformer_layer.cpp.o
+.PHONY : src/nn/transformer_layer.cpp.o
+
+src/nn/transformer_layer.i: src/nn/transformer_layer.cpp.i
+.PHONY : src/nn/transformer_layer.i
+
+# target to preprocess a source file
+src/nn/transformer_layer.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/transformer_layer.cpp.i
+.PHONY : src/nn/transformer_layer.cpp.i
+
+src/nn/transformer_layer.s: src/nn/transformer_layer.cpp.s
+.PHONY : src/nn/transformer_layer.s
+
+# target to generate assembly for a file
+src/nn/transformer_layer.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/transformer_layer.cpp.s
+.PHONY : src/nn/transformer_layer.cpp.s
+
 third_party/myl7_fss/src/group/bytes.o: third_party/myl7_fss/src/group/bytes.c.o
 .PHONY : third_party/myl7_fss/src/group/bytes.o
 
@@ -803,22 +1182,38 @@ help:
 	@echo "... depend"
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
+	@echo "... bench_attention"
+	@echo "... bench_gemm"
+	@echo "... bench_llm_gates"
 	@echo "... bench_sigmafast_coeff"
 	@echo "... bench_sigmafast_gates"
 	@echo "... bench_sigmafast_pred"
 	@echo "... myl7_core"
+	@echo "... nn_ops"
 	@echo "... sim_harness"
 	@echo "... test_compile_pfss"
 	@echo "... test_composite_equiv_proto"
 	@echo "... test_composite_equiv_proto_myl7"
 	@echo "... test_composite_equiv_proto_sigmafast"
 	@echo "... test_composite_runtime"
+	@echo "... test_llm_gates"
 	@echo "... test_mask_rewrite"
+	@echo "... test_matmul"
+	@echo "... test_matmul_and_attention"
 	@echo "... test_myl7_bit_order"
 	@echo "... test_postproc_hooks"
 	@echo "... test_pred_semantics"
 	@echo "... test_sigmafast"
 	@echo "... test_suf_ref_eval"
+	@echo "... src/bench/bench_attention.o"
+	@echo "... src/bench/bench_attention.i"
+	@echo "... src/bench/bench_attention.s"
+	@echo "... src/bench/bench_gemm.o"
+	@echo "... src/bench/bench_gemm.i"
+	@echo "... src/bench/bench_gemm.s"
+	@echo "... src/bench/bench_llm_gates.o"
+	@echo "... src/bench/bench_llm_gates.i"
+	@echo "... src/bench/bench_llm_gates.s"
 	@echo "... src/bench/bench_sigmafast_coeff.o"
 	@echo "... src/bench/bench_sigmafast_coeff.i"
 	@echo "... src/bench/bench_sigmafast_coeff.s"
@@ -849,9 +1244,18 @@ help:
 	@echo "... src/demo/test_composite_runtime.o"
 	@echo "... src/demo/test_composite_runtime.i"
 	@echo "... src/demo/test_composite_runtime.s"
+	@echo "... src/demo/test_llm_gates.o"
+	@echo "... src/demo/test_llm_gates.i"
+	@echo "... src/demo/test_llm_gates.s"
 	@echo "... src/demo/test_mask_rewrite.o"
 	@echo "... src/demo/test_mask_rewrite.i"
 	@echo "... src/demo/test_mask_rewrite.s"
+	@echo "... src/demo/test_matmul.o"
+	@echo "... src/demo/test_matmul.i"
+	@echo "... src/demo/test_matmul.s"
+	@echo "... src/demo/test_matmul_and_attention.o"
+	@echo "... src/demo/test_matmul_and_attention.i"
+	@echo "... src/demo/test_matmul_and_attention.s"
 	@echo "... src/demo/test_myl7_bit_order.o"
 	@echo "... src/demo/test_myl7_bit_order.i"
 	@echo "... src/demo/test_myl7_bit_order.s"
@@ -867,6 +1271,24 @@ help:
 	@echo "... src/demo/test_suf_ref_eval.o"
 	@echo "... src/demo/test_suf_ref_eval.i"
 	@echo "... src/demo/test_suf_ref_eval.s"
+	@echo "... src/nn/attention_block.o"
+	@echo "... src/nn/attention_block.i"
+	@echo "... src/nn/attention_block.s"
+	@echo "... src/nn/linops.o"
+	@echo "... src/nn/linops.i"
+	@echo "... src/nn/linops.s"
+	@echo "... src/nn/matmul_beaver.o"
+	@echo "... src/nn/matmul_beaver.i"
+	@echo "... src/nn/matmul_beaver.s"
+	@echo "... src/nn/matmul_publicW.o"
+	@echo "... src/nn/matmul_publicW.i"
+	@echo "... src/nn/matmul_publicW.s"
+	@echo "... src/nn/mlp_block.o"
+	@echo "... src/nn/mlp_block.i"
+	@echo "... src/nn/mlp_block.s"
+	@echo "... src/nn/transformer_layer.o"
+	@echo "... src/nn/transformer_layer.i"
+	@echo "... src/nn/transformer_layer.s"
 	@echo "... third_party/myl7_fss/src/group/bytes.o"
 	@echo "... third_party/myl7_fss/src/group/bytes.i"
 	@echo "... third_party/myl7_fss/src/group/bytes.s"
