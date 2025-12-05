@@ -59,6 +59,7 @@ set(CMAKE_DEPEND_INFO_FILES
   "CMakeFiles/test_suf_ref_eval.dir/DependInfo.cmake"
   "CMakeFiles/test_mask_rewrite.dir/DependInfo.cmake"
   "CMakeFiles/test_compile_pfss.dir/DependInfo.cmake"
+  "CMakeFiles/compiler_passes.dir/DependInfo.cmake"
   "CMakeFiles/test_sigmafast.dir/DependInfo.cmake"
   "CMakeFiles/test_composite_runtime.dir/DependInfo.cmake"
   "CMakeFiles/test_pred_semantics.dir/DependInfo.cmake"
@@ -75,6 +76,8 @@ set(CMAKE_DEPEND_INFO_FILES
   "CMakeFiles/bench_attention.dir/DependInfo.cmake"
   "CMakeFiles/test_matmul_and_attention.dir/DependInfo.cmake"
   "CMakeFiles/test_matmul.dir/DependInfo.cmake"
+  "CMakeFiles/test_truncation.dir/DependInfo.cmake"
   "CMakeFiles/bench_gemm.dir/DependInfo.cmake"
+  "CMakeFiles/bench_truncation.dir/DependInfo.cmake"
   "CMakeFiles/test_myl7_bit_order.dir/DependInfo.cmake"
   )

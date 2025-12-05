@@ -7,9 +7,10 @@
 namespace nn {
 
 struct MatmulParams {
-  int frac_bits = 0;
+  int frac_bits = 0;  // stored frac bits of operands; output is unscaled if local_rescale=false.
   bool w_transposed = false;
   const std::vector<int64_t>* bias = nullptr;
+  bool local_rescale = true;  // legacy shift; set false when explicit Rescale nodes are used.
 };
 
 void matmul_publicW(const TensorView<uint64_t>& X_share,

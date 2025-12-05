@@ -34,6 +34,9 @@ struct CompiledSUFGate {
 
   // Optional: gate-specific meta for postproc (e.g., ReluARS params).
   std::vector<uint64_t> extra_u64;
+
+  // Optional: originating gate kind (for postproc dispatch/metadata).
+  compiler::GateKind gate_kind = compiler::GateKind::SiLUSpline;
 };
 
 }  // namespace compiler

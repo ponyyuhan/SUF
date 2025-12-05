@@ -3,6 +3,7 @@
 /home/yuhan/SUF/SUF/build/CMakeFiles/test_suf_ref_eval.dir
 /home/yuhan/SUF/SUF/build/CMakeFiles/test_mask_rewrite.dir
 /home/yuhan/SUF/SUF/build/CMakeFiles/test_compile_pfss.dir
+/home/yuhan/SUF/SUF/build/CMakeFiles/compiler_passes.dir
 /home/yuhan/SUF/SUF/build/CMakeFiles/test_sigmafast.dir
 /home/yuhan/SUF/SUF/build/CMakeFiles/test_composite_runtime.dir
 /home/yuhan/SUF/SUF/build/CMakeFiles/test_pred_semantics.dir
@@ -19,7 +20,9 @@
 /home/yuhan/SUF/SUF/build/CMakeFiles/bench_attention.dir
 /home/yuhan/SUF/SUF/build/CMakeFiles/test_matmul_and_attention.dir
 /home/yuhan/SUF/SUF/build/CMakeFiles/test_matmul.dir
+/home/yuhan/SUF/SUF/build/CMakeFiles/test_truncation.dir
 /home/yuhan/SUF/SUF/build/CMakeFiles/bench_gemm.dir
+/home/yuhan/SUF/SUF/build/CMakeFiles/bench_truncation.dir
 /home/yuhan/SUF/SUF/build/CMakeFiles/test_myl7_bit_order.dir
 /home/yuhan/SUF/SUF/build/CMakeFiles/edit_cache.dir
 /home/yuhan/SUF/SUF/build/CMakeFiles/rebuild_cache.dir

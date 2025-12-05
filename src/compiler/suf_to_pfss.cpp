@@ -32,7 +32,7 @@ static int add_query(const RawPredQuery& q, std::vector<RawPredQuery>& out, std:
   return idx;
 }
 
-static suf::BoolExpr make_wrap_expr(uint64_t wrap_idx_offset, int idx_raw, int idx_raw2) {
+static suf::BoolExpr make_wrap_expr(uint64_t wrap_idx, int idx_raw, int idx_raw2) {
   // w = wrap ? ((!a)|b) : ((!a)&b)
   suf::BoolExpr a{ suf::BVar{idx_raw} };
   suf::BoolExpr b{ suf::BVar{idx_raw2} };
@@ -40,7 +40,7 @@ static suf::BoolExpr make_wrap_expr(uint64_t wrap_idx_offset, int idx_raw, int i
   suf::BoolExpr and_expr{ suf::BAnd{ std::make_unique<suf::BoolExpr>(na), std::make_unique<suf::BoolExpr>(b) } };
   suf::BoolExpr or_expr{ suf::BOr{ std::make_unique<suf::BoolExpr>(na), std::make_unique<suf::BoolExpr>(b) } };
   // Use negative indices to refer to wrap bits; evaluator interprets them with offset.
-  suf::BoolExpr wrap_var{ suf::BVar{ -1 - static_cast<int>(wrap_idx_offset) } };
+  suf::BoolExpr wrap_var{ suf::BVar{ -1 - static_cast<int>(wrap_idx) } };
   suf::BoolExpr not_wrap{ suf::BNot{ std::make_unique<suf::BoolExpr>(wrap_var) } };
   suf::BoolExpr term0{ suf::BAnd{ std::make_unique<suf::BoolExpr>(not_wrap), std::make_unique<suf::BoolExpr>(and_expr) } };
   suf::BoolExpr term1{ suf::BAnd{ std::make_unique<suf::BoolExpr>(wrap_var), std::make_unique<suf::BoolExpr>(or_expr) } };
@@ -61,28 +61,28 @@ static suf::BoolExpr rewrite_pred(const suf::PrimitivePred& p,
       int b = add_query(RawPredQuery{RawPredKind::kLtU64, 64, rec.theta1}, queries, mp);
       size_t wrap_idx = wrap_bits.size();
       wrap_bits.push_back(rec.wrap);
-      return make_wrap_expr(queries.size() + wrap_idx, a, b);
+      return make_wrap_expr(wrap_idx, a, b);
     } else if constexpr (std::is_same_v<T, suf::Pred_X_mod2f_lt>) {
       auto rec = suf::rewrite_ltlow(r_in, n.f, n.gamma);
       int a = add_query(RawPredQuery{RawPredKind::kLtLow, static_cast<uint8_t>(rec.f), rec.theta0}, queries, mp);
       int b = add_query(RawPredQuery{RawPredKind::kLtLow, static_cast<uint8_t>(rec.f), rec.theta1}, queries, mp);
       size_t wrap_idx = wrap_bits.size();
       wrap_bits.push_back(rec.wrap);
-      return make_wrap_expr(queries.size() + wrap_idx, a, b);
+      return make_wrap_expr(wrap_idx, a, b);
     } else if constexpr (std::is_same_v<T, suf::Pred_MSB_x>) {
       auto rec = suf::rewrite_msb_add(r_in, 0);
       int a = add_query(RawPredQuery{RawPredKind::kLtU64, 64, rec.theta0}, queries, mp);
       int b = add_query(RawPredQuery{RawPredKind::kLtU64, 64, rec.theta1}, queries, mp);
       size_t wrap_idx = wrap_bits.size();
       wrap_bits.push_back(rec.wrap);
-      return make_wrap_expr(queries.size() + wrap_idx, a, b);
+      return make_wrap_expr(wrap_idx, a, b);
     } else { // MSB(x+c)
       auto rec = suf::rewrite_msb_add(r_in, n.c);
       int a = add_query(RawPredQuery{RawPredKind::kLtU64, 64, rec.theta0}, queries, mp);
       int b = add_query(RawPredQuery{RawPredKind::kLtU64, 64, rec.theta1}, queries, mp);
       size_t wrap_idx = wrap_bits.size();
       wrap_bits.push_back(rec.wrap);
-      return make_wrap_expr(queries.size() + wrap_idx, a, b);
+      return make_wrap_expr(wrap_idx, a, b);
     }
   }, p);
 }
@@ -163,7 +163,8 @@ CompiledSUFGate compile_suf_to_pfss_two_programs(
     const suf::SUF<uint64_t>& F,
     uint64_t r_in,
     const std::vector<uint64_t>& r_out,
-    CoeffMode coeff_mode) {
+    CoeffMode coeff_mode,
+    GateKind gate_kind) {
   validate_suf(F);
   CompiledSUFGate out;
   out.r_in = r_in;
@@ -182,6 +183,7 @@ CompiledSUFGate compile_suf_to_pfss_two_programs(
   }
   // Gate-specific extras: keep empty unless filled by a higher-level builder.
   out.extra_u64.clear();
+  out.gate_kind = gate_kind;
 
   std::vector<RawPredQuery> queries;
   std::unordered_map<QueryKey,int,QueryKeyHash> qmap;

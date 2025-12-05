@@ -5,12 +5,7 @@
 #include <functional>
 #include <random>
 #include <stdexcept>
-#if __has_include(<span>)
-  #include <span>
-#elif __has_include(<experimental/span>)
-  #include <experimental/span>
-  namespace std { using experimental::span; }
-#elif !defined(SUF_SPAN_FALLBACK_DEFINED)
+#if !defined(SUF_SPAN_FALLBACK_DEFINED)
   #define SUF_SPAN_FALLBACK_DEFINED
   namespace std {
     template<typename T>
@@ -41,6 +36,7 @@
 #include "proto/sigma_fast_backend_ext.hpp"
 #include "proto/pfss_backend.hpp"
 #include "proto/pfss_utils.hpp"
+#include "suf/trunc_suf_builders.hpp"
 #include "suf/ref_eval.hpp"
 #include "suf/validate.hpp"
 
@@ -70,7 +66,7 @@ struct CompositePartyKey {
   std::vector<proto::BeaverTriple64Share> triples; // for Bool DAG + Horner
   std::vector<proto::BeaverTripleBitShare> bit_triples; // for Bool DAG AND
 
-  compiler::CompiledSUFGate compiled;  // per-instance compiled SUF (masked)
+  compiler::CompiledSUFGate compiled;  // per-instance compiled new (masked)
 
   // Optional packed predicate key (SigmaFast)
   proto::FssKey packed_pred_key;
@@ -221,7 +217,7 @@ inline CompositeKeyPair composite_gen_backend(const suf::SUF<uint64_t>& F,
 
   // Pred keys: payload=1 byte (XOR bit). If backend is SigmaFast, also emit packed key.
   bool is_sigmafast = (dynamic_cast<proto::SigmaFastBackend*>(&backend) != nullptr);
-  if (is_sigmafast) {
+  if (is_sigmafast && !compiled.pred.queries.empty()) {
     auto* sb = dynamic_cast<proto::SigmaFastBackend*>(&backend);
     std::vector<uint64_t> thrs;
     for (const auto& q : compiled.pred.queries) thrs.push_back(q.theta);
@@ -317,6 +313,167 @@ inline CompositeKeyPair composite_gen_backend(const suf::SUF<uint64_t>& F,
     uint8_t c1 = static_cast<uint8_t>(c ^ c0);
     out.k0.bit_triples[i] = {a0, b0, c0};
     out.k1.bit_triples[i] = {a1, b1, c1};
+  }
+  return out;
+}
+
+// Specialized generator for truncation/ARS gates: fixes r_low used in predicates and
+// provides r_hi shares for postproc hooks.
+inline CompositeKeyPair composite_gen_trunc_gate(proto::PfssBackend& backend,
+                                                 std::mt19937_64& rng,
+                                                 int frac_bits,
+                                                 compiler::GateKind kind,
+                                                 size_t batch_N = 1,
+                                                 suf::SUF<uint64_t>* F_out = nullptr) {
+  if (kind != compiler::GateKind::FaithfulTR &&
+      kind != compiler::GateKind::FaithfulARS &&
+      kind != compiler::GateKind::GapARS) {
+    throw std::runtime_error("composite_gen_trunc_gate: unsupported GateKind");
+  }
+  uint64_t r_mask = (frac_bits <= 0) ? 0ull
+                                     : (frac_bits >= 64 ? ~uint64_t(0) : ((uint64_t(1) << frac_bits) - 1));
+  uint64_t r = rng();
+  uint64_t r_low = (frac_bits <= 0) ? 0ull : (r & r_mask);
+  uint64_t r_hi = (frac_bits >= 64) ? 0ull : (r >> frac_bits);
+  suf::SUF<uint64_t> F;
+  if (kind == compiler::GateKind::FaithfulTR) {
+    F = suf::build_trunc_faithful_suf(frac_bits, r_low);
+  } else if (kind == compiler::GateKind::FaithfulARS) {
+    F = suf::build_ars_faithful_suf(frac_bits, r_low);
+  } else {
+    F = suf::build_gapars_suf(frac_bits, r_low);
+  }
+  if (F_out) *F_out = F;
+  std::vector<uint64_t> r_out = {rng()};
+  auto compiled = compiler::compile_suf_to_pfss_two_programs(F, r, r_out, compiler::CoeffMode::kStepDcf, kind);
+  compiled.layout.arith_ports = {"y"};
+  compiled.layout.bool_ports.clear();
+  if (frac_bits > 0) compiled.layout.bool_ports.push_back("carry");
+  if (kind != compiler::GateKind::FaithfulTR) compiled.layout.bool_ports.push_back("sign");
+  compiled.extra_u64 = {static_cast<uint64_t>(frac_bits), r_low};
+
+  auto split_add = [&](uint64_t v) {
+    uint64_t s0 = rng();
+    uint64_t s1 = v - s0;
+    return std::make_pair(s0, s1);
+  };
+
+  CompositeKeyPair out;
+  out.k0.compiled = compiled;
+  out.k1.compiled = compiled;
+  auto [r0, r1] = split_add(r);
+  out.k0.r_in_share = r0;
+  out.k1.r_in_share = r1;
+  out.k0.r_out_share.resize(1);
+  out.k1.r_out_share.resize(1);
+  auto [rout0, rout1] = split_add(r_out[0]);
+  out.k0.r_out_share[0] = rout0;
+  out.k1.r_out_share[0] = rout1;
+
+  // Wrap shares
+  out.k0.wrap_share.resize(compiled.wrap_bits.size());
+  out.k1.wrap_share.resize(compiled.wrap_bits.size());
+  for (size_t i = 0; i < compiled.wrap_bits.size(); i++) {
+    auto [s0, s1] = split_add(compiled.wrap_bits[i]);
+    out.k0.wrap_share[i] = s0;
+    out.k1.wrap_share[i] = s1;
+  }
+
+  // Provide r_hi shares for postproc hook.
+  auto [rhi0, rhi1] = split_add(r_hi);
+  out.k0.r_hi_share = rhi0;
+  out.k1.r_hi_share = rhi1;
+  out.k0.wrap_sign_share = 0;
+  out.k1.wrap_sign_share = 0;
+  out.k0.extra_params = compiled.extra_u64;
+  out.k1.extra_params = compiled.extra_u64;
+
+  proto::BitOrder bit_order = backend.bit_order();
+  out.k0.pred_meta.bit_order = bit_order;
+  out.k1.pred_meta.bit_order = bit_order;
+  out.k0.pred_meta.sem = proto::ShareSemantics::XorBytes;
+  out.k1.pred_meta.sem = proto::ShareSemantics::XorBytes;
+  out.k0.pred_meta.out_bytes = 1;
+  out.k1.pred_meta.out_bytes = 1;
+  out.k0.cut_pred_meta = out.k0.pred_meta;
+  out.k1.cut_pred_meta = out.k1.pred_meta;
+  out.k0.coeff_meta.bit_order = bit_order;
+  out.k1.coeff_meta.bit_order = bit_order;
+  out.k0.coeff_meta.sem = proto::ShareSemantics::AddU64;
+  out.k1.coeff_meta.sem = proto::ShareSemantics::AddU64;
+
+  bool is_sigmafast = (dynamic_cast<proto::SigmaFastBackend*>(&backend) != nullptr);
+  if (is_sigmafast) {
+    auto* sb = dynamic_cast<proto::SigmaFastBackend*>(&backend);
+    std::vector<uint64_t> thrs;
+    for (const auto& q : compiled.pred.queries) thrs.push_back(q.theta);
+    auto kp = sb->gen_packed_lt(compiled.pred.n, thrs);
+    out.k0.packed_pred_key = kp.k0;
+    out.k1.packed_pred_key = kp.k1;
+    out.k0.use_packed_pred = out.k1.use_packed_pred = true;
+    out.k0.packed_pred_words = out.k1.packed_pred_words = static_cast<int>((thrs.size() + 63) / 64);
+  }
+  for (const auto& q : compiled.pred.queries) {
+    uint64_t thr = q.theta;
+    int bits = (q.kind == compiler::RawPredKind::kLtU64) ? compiled.pred.n : q.f;
+    auto thr_bits = backend.u64_to_bits_msb(thr, bits);
+    std::vector<proto::u8> payload{1u};
+    auto kp = backend.gen_dcf(bits, thr_bits, payload);
+    out.k0.pred_keys.push_back(kp.k0);
+    out.k1.pred_keys.push_back(kp.k1);
+  }
+
+  // No cutpoints for truncation new (single piece).
+
+  // Coeff step: party0 carries payload, party1 zeros (backend convention)
+  std::vector<uint64_t> base = compiled.coeff.base_payload_words;
+  if (base.empty()) base.resize(static_cast<size_t>(compiled.coeff.out_words), 0);
+  out.k0.base_coeff_share = base;
+  out.k1.base_coeff_share.assign(base.size(), 0ull);
+  std::vector<uint64_t> total_delta(base.size(), 0ull);
+  for (const auto& d : compiled.coeff.deltas_words) {
+    for (size_t j = 0; j < base.size() && j < d.size(); j++) {
+      total_delta[j] = proto::add_mod(total_delta[j], d[j]);
+    }
+  }
+  out.k0.total_delta_share = total_delta;
+  out.k1.total_delta_share.assign(total_delta.size(), 0ull);
+
+  // Beaver triples for Bool DAG (selectors/b2a). Count multiplicative nodes.
+  size_t bit_mul = 0;
+  for (const auto& piece : compiled.bool_per_piece) {
+    for (const auto& b : piece) bit_mul += count_bool_mul(b);
+  }
+  bit_mul = std::max(bit_mul, static_cast<size_t>(compiled.ell)); // at least one per bool output
+  size_t triple_need = bit_mul * std::max<size_t>(1, batch_N);
+
+  // selectors_from_cutbits uses (cuts + 1) multiplications when cuts>0; here cuts==0.
+  out.k0.triples.resize(triple_need);
+  out.k1.triples.resize(triple_need);
+  for (size_t i = 0; i < triple_need; i++) {
+    uint64_t a = rng(), b = rng(), c = proto::mul_mod(a, b);
+    auto [a0, a1] = split_add(a);
+    auto [b0, b1] = split_add(b);
+    auto [c0, c1] = split_add(c);
+    out.k0.triples[i] = proto::BeaverTriple64Share{a0, b0, c0};
+    out.k1.triples[i] = proto::BeaverTriple64Share{a1, b1, c1};
+  }
+
+  size_t bit_and = triple_need;  // reuse count for bit triples
+  out.k0.bit_triples.resize(bit_and);
+  out.k1.bit_triples.resize(bit_and);
+  for (size_t i = 0; i < bit_and; i++) {
+    uint8_t a = static_cast<uint8_t>(rng() & 1u);
+    uint8_t b = static_cast<uint8_t>(rng() & 1u);
+    uint8_t c = static_cast<uint8_t>(a & b);
+    uint8_t a0 = static_cast<uint8_t>(rng() & 1u);
+    uint8_t a1 = static_cast<uint8_t>(a ^ a0);
+    uint8_t b0 = static_cast<uint8_t>(rng() & 1u);
+    uint8_t b1 = static_cast<uint8_t>(b ^ b0);
+    uint8_t c0 = static_cast<uint8_t>(rng() & 1u);
+    uint8_t c1 = static_cast<uint8_t>(c ^ c0);
+    out.k0.bit_triples[i] = proto::BeaverTripleBitShare{a0, b0, c0};
+    out.k1.bit_triples[i] = proto::BeaverTripleBitShare{a1, b1, c1};
   }
   return out;
 }
@@ -527,7 +684,10 @@ inline std::vector<uint64_t> composite_eval_share_backend(int party,
 
   // Horner per output; fallback to public-x path for ClearBackend (payload only on party0).
   std::vector<uint64_t> ys(compiled.r, 0);
-  if (dynamic_cast<proto::ClearBackend*>(&backend) != nullptr) {
+  bool is_trunc_gate = (compiled.gate_kind == compiler::GateKind::FaithfulTR ||
+                        compiled.gate_kind == compiler::GateKind::FaithfulARS ||
+                        compiled.gate_kind == compiler::GateKind::GapARS);
+  if (!is_trunc_gate && dynamic_cast<proto::ClearBackend*>(&backend) != nullptr) {
     uint64_t x = proto::sub_mod(hatx, compiled.r_in);
     auto ref = suf::eval_suf_ref(F, x);
     int stride = compiled.degree + 1;
@@ -940,7 +1100,7 @@ inline CompositeTapePair composite_write_tapes(const CompositeKeyPair& kp) {
   return tp;
 }
 
-// Read tape and evaluate (single element) using an existing compiled SUF description.
+// Read tape and evaluate (single element) using an existing compiled new description.
 inline std::vector<uint64_t> composite_eval_share_from_tape(int party,
                                                             proto::PfssBackend& backend,
                                                             proto::IChannel& ch,
@@ -983,6 +1143,15 @@ inline CompositeBatchOutput composite_eval_batch_with_postproc(int party,
     if (relu->delta.empty() && !k.extra_params.empty()) {
       relu->delta = k.extra_params;
     }
+  } else if (auto* tr = dynamic_cast<gates::FaithfulTruncPostProc*>(&hook)) {
+    tr->r_hi_share = k.r_hi_share;
+    tr->r_in = k.compiled.r_in;
+  } else if (auto* ars = dynamic_cast<gates::FaithfulArsPostProc*>(&hook)) {
+    ars->r_hi_share = k.r_hi_share;
+    ars->r_in = k.compiled.r_in;
+  } else if (auto* gap = dynamic_cast<gates::GapArsPostProc*>(&hook)) {
+    gap->r_hi_share = k.r_hi_share;
+    gap->r_in = k.compiled.r_in;
   }
   hook.run_batch(party, ch, mul, in.hatx, out.haty_share.data(),
                  static_cast<size_t>(k.compiled.r),

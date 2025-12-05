@@ -5,34 +5,6 @@
 #include <cstring>
 #include <fstream>
 #include <memory>
-#if __has_include(<span>)
-  #include <span>
-#elif __has_include(<experimental/span>)
-  #include <experimental/span>
-  namespace std { using experimental::span; }
-#elif !defined(SUF_SPAN_FALLBACK_DEFINED)
-  #define SUF_SPAN_FALLBACK_DEFINED
-  namespace std {
-    template <typename T>
-    class span {
-     public:
-      span(T* ptr, std::size_t n) : data_(ptr), size_(n) {}
-      template <typename U>
-      span(std::vector<U>& v) : data_(v.data()), size_(v.size()) {}
-      template <typename U>
-      span(const std::vector<U>& v) : data_(const_cast<U*>(v.data())), size_(v.size()) {}
-      T* data() const { return data_; }
-      std::size_t size() const { return size_; }
-      bool empty() const { return size_ == 0; }
-      T* begin() const { return data_; }
-      T* end() const { return data_ + size_; }
-      T& operator[](std::size_t i) const { return data_[i]; }
-     private:
-      T* data_;
-      std::size_t size_;
-    };
-  }
-#endif
 #include <string>
 #include <vector>
 
@@ -53,21 +25,22 @@ struct Triple64Share { u64 a = 0, b = 0, c = 0; };
 // ------------------------------ sinks/sources ------------------------------
 struct ITapeSink {
   virtual ~ITapeSink() = default;
-  virtual void write(std::span<const u8> bytes) = 0;
+  virtual void write(const u8* data, size_t n) = 0;
   virtual void flush() {}
 };
 
 struct ITapeSource {
   virtual ~ITapeSource() = default;
-  virtual void read_exact(std::span<u8> out) = 0;
+  virtual void read_exact(u8* out, size_t n) = 0;
   virtual bool eof() const = 0;
 };
 
 class VecTapeSink final : public ITapeSink {
 public:
   std::vector<u8> buf;
-  void write(std::span<const u8> bytes) override {
-    buf.insert(buf.end(), bytes.begin(), bytes.end());
+  void write(const u8* data, size_t n) override {
+    if (n == 0) return;
+    buf.insert(buf.end(), data, data + n);
   }
 };
 
@@ -75,10 +48,10 @@ class VecTapeSource final : public ITapeSource {
 public:
   explicit VecTapeSource(const std::vector<u8>& b) : buf_(b) {}
 
-  void read_exact(std::span<u8> out) override {
-    if (off_ + out.size() > buf_.size()) throw std::runtime_error("tape: read past end");
-    std::memcpy(out.data(), buf_.data() + off_, out.size());
-    off_ += out.size();
+  void read_exact(u8* out, size_t n) override {
+    if (off_ + n > buf_.size()) throw std::runtime_error("tape: read past end");
+    std::memcpy(out, buf_.data() + off_, n);
+    off_ += n;
   }
 
   bool eof() const override { return off_ >= buf_.size(); }
@@ -96,9 +69,9 @@ public:
     if (!out_) throw std::runtime_error("tape: open output failed");
   }
 
-  void write(std::span<const u8> bytes) override {
-    out_.write(reinterpret_cast<const char*>(bytes.data()),
-               static_cast<std::streamsize>(bytes.size()));
+  void write(const u8* data, size_t n) override {
+    out_.write(reinterpret_cast<const char*>(data),
+               static_cast<std::streamsize>(n));
     if (!out_) throw std::runtime_error("tape: file write failed");
   }
 
@@ -118,9 +91,9 @@ public:
     if (!in_) throw std::runtime_error("tape: open input failed");
   }
 
-  void read_exact(std::span<u8> out) override {
-    in_.read(reinterpret_cast<char*>(out.data()),
-             static_cast<std::streamsize>(out.size()));
+  void read_exact(u8* out, size_t n) override {
+    in_.read(reinterpret_cast<char*>(out),
+             static_cast<std::streamsize>(n));
     if (!in_) throw std::runtime_error("tape: file read failed");
   }
 
@@ -138,24 +111,31 @@ public:
   TapeWriter() : owned_(std::make_unique<VecTapeSink>()), sink_(owned_.get()) {}
   explicit TapeWriter(ITapeSink& sink) : sink_(&sink) {}
 
-  void write_u64(u64 v) { write_record(TapeTag::kU64, std::span<const u8>(reinterpret_cast<const u8*>(&v), 8)); }
+  void write_u64(u64 v) { write_record(TapeTag::kU64, reinterpret_cast<const u8*>(&v), 8); }
 
-  void write_bytes(std::span<const u8> b) { write_record(TapeTag::kBytes, b); }
-  void write_bytes(const std::vector<u8>& b) { write_bytes(std::span<const u8>(b.data(), b.size())); }
+  void write_bytes(const std::vector<u8>& b) { write_record(TapeTag::kBytes, b.data(), b.size()); }
+  void write_bytes(std::span<const u8> b) { write_record(TapeTag::kBytes, b.data(), b.size()); }
 
-  void write_u64_vec(std::span<const u64> v) {
-    write_record(TapeTag::kU64Vec, std::span<const u8>(reinterpret_cast<const u8*>(v.data()), v.size() * sizeof(u64)));
+  void write_u64_vec(const std::vector<u64>& v) {
+    write_record(TapeTag::kU64Vec, reinterpret_cast<const u8*>(v.data()), v.size() * sizeof(u64));
   }
-  void write_u64_vec(const std::vector<u64>& v) { write_u64_vec(std::span<const u64>(v.data(), v.size())); }
+  void write_u64_vec(std::span<const u64> v) {
+    write_record(TapeTag::kU64Vec, reinterpret_cast<const u8*>(v.data()), v.size() * sizeof(u64));
+  }
 
   template<typename Triple>
   void write_triple64(const Triple& t) {
-    write_record(TapeTag::kTriple64, std::span<const u8>(reinterpret_cast<const u8*>(&t), sizeof(Triple)));
+    write_record(TapeTag::kTriple64, reinterpret_cast<const u8*>(&t), sizeof(Triple));
+  }
+
+  template<typename Triple>
+  void write_triple64_vec(const std::vector<Triple>& v) {
+    write_record(TapeTag::kTriple64, reinterpret_cast<const u8*>(v.data()), v.size() * sizeof(Triple));
   }
 
   template<typename Triple>
   void write_triple64_vec(std::span<const Triple> v) {
-    write_record(TapeTag::kTriple64, std::span<const u8>(reinterpret_cast<const u8*>(v.data()), v.size() * sizeof(Triple)));
+    write_record(TapeTag::kTriple64, reinterpret_cast<const u8*>(v.data()), v.size() * sizeof(Triple));
   }
 
   void flush() { sink_->flush(); }
@@ -169,14 +149,14 @@ private:
   std::unique_ptr<VecTapeSink> owned_;
   ITapeSink* sink_ = nullptr;
 
-  void write_record(TapeTag tag, std::span<const u8> payload) {
+  void write_record(TapeTag tag, const u8* payload, size_t payload_len) {
     u32 t = static_cast<u32>(tag);
-    u32 len = static_cast<u32>(payload.size());
+    u32 len = static_cast<u32>(payload_len);
     u8 header[8];
     std::memcpy(header, &t, 4);
     std::memcpy(header + 4, &len, 4);
-    sink_->write(std::span<const u8>(header, 8));
-    if (!payload.empty()) sink_->write(payload);
+    sink_->write(header, 8);
+    if (payload_len != 0) sink_->write(payload, payload_len);
   }
 };
 
@@ -240,13 +220,13 @@ private:
 
   std::vector<u8> read_record(TapeTag expect) {
     u8 header[8];
-    src_->read_exact(std::span<u8>(header, 8));
+    src_->read_exact(header, 8);
     u32 tag = 0, len = 0;
     std::memcpy(&tag, header, 4);
     std::memcpy(&len, header + 4, 4);
     if (tag != static_cast<u32>(expect)) throw std::runtime_error("tape: tag mismatch");
     std::vector<u8> payload(len);
-    if (len) src_->read_exact(std::span<u8>(payload.data(), payload.size()));
+    if (len) src_->read_exact(payload.data(), payload.size());
     return payload;
   }
 };

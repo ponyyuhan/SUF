@@ -56,7 +56,7 @@ static void test_exhaustive() {
     assert(out.bools[0] == b0);
     assert(out.bools[1] == b1);
   }
-  std::cout << "Exhaustive SUF ref-eval test passed (n=8)\n";
+  std::cout << "Exhaustive new ref-eval test passed (n=8)\n";
 }
 
 static void test_random() {
@@ -87,7 +87,7 @@ static void test_random() {
     bool msb = ((x >> 63) & 1u) != 0;
     assert(out.bools[0] == msb);
   }
-  std::cout << "Random SUF ref-eval test passed (n=64)\n";
+  std::cout << "Random new ref-eval test passed (n=64)\n";
 }
 
 int main() {

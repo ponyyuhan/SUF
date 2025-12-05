@@ -110,33 +110,41 @@ add_executable(test_mask_rewrite src/demo/test_mask_rewrite.cpp)
 target_include_directories(test_mask_rewrite PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_mask_rewrite PRIVATE suf_fss ${MYL7_LINK_LIBS})
 
-add_executable(test_compile_pfss src/demo/test_compile_pfss.cpp src/compiler/suf_to_pfss.cpp)
+add_executable(test_compile_pfss src/demo/test_compile_pfss.cpp)
 target_include_directories(test_compile_pfss PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_compile_pfss PRIVATE suf_fss ${MYL7_LINK_LIBS})
+target_link_libraries(test_compile_pfss PRIVATE compiler_passes suf_fss ${MYL7_LINK_LIBS})
+
+add_library(compiler_passes STATIC
+  src/compiler/truncation_pass.cpp
+  src/compiler/rescale_pass.cpp
+  src/compiler/layer_graph.cpp
+  src/compiler/suf_to_pfss.cpp)
+target_include_directories(compiler_passes PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(compiler_passes PUBLIC suf_fss ${MYL7_LINK_LIBS})
 
 add_executable(test_sigmafast src/demo/test_sigmafast.cpp)
 target_include_directories(test_sigmafast PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_sigmafast PRIVATE suf_fss ${MYL7_LINK_LIBS})
 
-add_executable(test_composite_runtime src/demo/test_composite_runtime.cpp src/compiler/suf_to_pfss.cpp)
+add_executable(test_composite_runtime src/demo/test_composite_runtime.cpp)
 target_include_directories(test_composite_runtime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_composite_runtime PRIVATE suf_fss ${MYL7_LINK_LIBS})
+target_link_libraries(test_composite_runtime PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
 
 add_executable(test_pred_semantics src/demo/test_pred_semantics.cpp)
 target_include_directories(test_pred_semantics PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_pred_semantics PRIVATE suf_fss ${MYL7_LINK_LIBS})
 
-add_executable(test_composite_equiv_proto src/demo/test_composite_equiv_proto.cpp src/compiler/suf_to_pfss.cpp)
+add_executable(test_composite_equiv_proto src/demo/test_composite_equiv_proto.cpp)
 target_include_directories(test_composite_equiv_proto PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_composite_equiv_proto PRIVATE suf_fss ${MYL7_LINK_LIBS})
+target_link_libraries(test_composite_equiv_proto PRIVATE compiler_passes suf_fss ${MYL7_LINK_LIBS})
 
-add_executable(test_composite_equiv_proto_myl7 src/demo/test_composite_equiv_proto_myl7.cpp src/compiler/suf_to_pfss.cpp)
+add_executable(test_composite_equiv_proto_myl7 src/demo/test_composite_equiv_proto_myl7.cpp)
 target_include_directories(test_composite_equiv_proto_myl7 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_composite_equiv_proto_myl7 PRIVATE suf_fss ${MYL7_LINK_LIBS})
+target_link_libraries(test_composite_equiv_proto_myl7 PRIVATE compiler_passes suf_fss ${MYL7_LINK_LIBS})
 
-add_executable(test_composite_equiv_proto_sigmafast src/demo/test_composite_equiv_proto_sigmafast.cpp src/compiler/suf_to_pfss.cpp)
+add_executable(test_composite_equiv_proto_sigmafast src/demo/test_composite_equiv_proto_sigmafast.cpp)
 target_include_directories(test_composite_equiv_proto_sigmafast PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_composite_equiv_proto_sigmafast PRIVATE suf_fss ${MYL7_LINK_LIBS})
+target_link_libraries(test_composite_equiv_proto_sigmafast PRIVATE compiler_passes suf_fss ${MYL7_LINK_LIBS})
 
 add_executable(test_postproc_hooks src/demo/test_postproc_hooks.cpp)
 target_include_directories(test_postproc_hooks PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -154,9 +162,9 @@ add_executable(bench_sigmafast_coeff src/bench/bench_sigmafast_coeff.cpp)
 target_include_directories(bench_sigmafast_coeff PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(bench_sigmafast_coeff PRIVATE suf_fss ${MYL7_LINK_LIBS})
 
-add_executable(bench_sigmafast_gates src/bench/bench_sigmafast_gates.cpp src/compiler/suf_to_pfss.cpp)
+add_executable(bench_sigmafast_gates src/bench/bench_sigmafast_gates.cpp)
 target_include_directories(bench_sigmafast_gates PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(bench_sigmafast_gates PRIVATE suf_fss ${MYL7_LINK_LIBS})
+target_link_libraries(bench_sigmafast_gates PRIVATE compiler_passes suf_fss ${MYL7_LINK_LIBS})
 
 add_library(nn_ops STATIC
   src/nn/linops.cpp
@@ -164,9 +172,11 @@ add_library(nn_ops STATIC
   src/nn/matmul_beaver.cpp
   src/nn/attention_block.cpp
   src/nn/mlp_block.cpp
-  src/nn/transformer_layer.cpp)
+  src/nn/transformer_layer.cpp
+  src/runtime/pfss_superbatch.cpp
+  src/runtime/phase_executor.cpp)
 target_include_directories(nn_ops PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(nn_ops PUBLIC suf_fss ${MYL7_LINK_LIBS})
+target_link_libraries(nn_ops PUBLIC suf_fss compiler_passes ${MYL7_LINK_LIBS})
 
 add_executable(bench_llm_gates src/bench/bench_llm_gates.cpp)
 target_include_directories(bench_llm_gates PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -182,11 +192,19 @@ target_link_libraries(test_matmul_and_attention PRIVATE nn_ops suf_fss ${MYL7_LI
 
 add_executable(test_matmul src/demo/test_matmul.cpp)
 target_include_directories(test_matmul PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_matmul PRIVATE nn_ops suf_fss ${MYL7_LINK_LIBS})
+target_link_libraries(test_matmul PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
+
+add_executable(test_truncation src/demo/test_truncation.cpp)
+target_include_directories(test_truncation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_truncation PRIVATE compiler_passes suf_fss ${MYL7_LINK_LIBS})
 
 add_executable(bench_gemm src/bench/bench_gemm.cpp)
 target_include_directories(bench_gemm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(bench_gemm PRIVATE nn_ops suf_fss ${MYL7_LINK_LIBS})
+
+add_executable(bench_truncation src/bench/bench_truncation.cpp)
+target_include_directories(bench_truncation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(bench_truncation PRIVATE suf_fss ${MYL7_LINK_LIBS})
 
 if(HAVE_MYL7_FSS)
 add_executable(test_myl7_bit_order src/demo/test_myl7_bit_order.cpp)

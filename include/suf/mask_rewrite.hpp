@@ -33,8 +33,8 @@ inline RotLowRecipe rewrite_ltlow(uint64_t r, int f, uint64_t gamma) {
 }
 
 inline RotCmp64Recipe rewrite_msb_add(uint64_t r, uint64_t c) {
-  // Interval length = 2^63 starting at start = r - c
-  uint64_t start = r - c;
+  // Interval length = 2^63 starting at start = r + (2^63 - c)
+  uint64_t start = r + (uint64_t(1) << 63) - c;
   uint64_t theta0 = start;
   uint64_t theta1 = theta0 + (uint64_t(1) << 63);
   uint8_t wrap = (theta1 < theta0) ? 1u : 0u;

@@ -5,7 +5,7 @@
 
 namespace suf {
 
-// Primitive predicates in the UNMASKED x-domain (your SUF definition)
+// Primitive predicates in the UNMASKED x-domain (your new definition)
 struct Pred_X_lt_const { uint64_t beta; };                 // 1[x < beta]
 struct Pred_X_mod2f_lt { int f; uint64_t gamma; };         // 1[x mod 2^f < gamma]
 struct Pred_MSB_x {};                                      // MSB(x)

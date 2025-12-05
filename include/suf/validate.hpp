@@ -62,7 +62,7 @@ inline void validate_poly(const Poly<RingT>& p, int max_deg) {
   ensure(static_cast<int>(p.coeffs.size()) - 1 <= max_deg, "validate: degree too large");
 }
 
-// Validate SUF IR invariants; throws on failure.
+// Validate new IR invariants; throws on failure.
 template<typename RingT>
 inline void validate_suf(const SUF<RingT>& s) {
   ensure(s.n_bits > 0 && s.n_bits <= 64, "validate: n_bits out of range");

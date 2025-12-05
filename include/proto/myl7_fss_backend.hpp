@@ -20,7 +20,7 @@
 namespace proto {
 
 // Adapter skeleton for myl7/fss (bits-in / bytes-out, 2-party).
-class Myl7FssBackend final : public PfssBackend {
+class Myl7FssBackend final : public PfssBackendBatch {
 public:
   struct Params {
     int lambda_bytes = 16;   // 128-bit security
@@ -68,6 +68,35 @@ public:
       }
     }
     return bytes;
+  }
+
+  void eval_dcf_many_u64(int in_bits,
+                         size_t key_bytes,
+                         const uint8_t* keys_flat,
+                         const std::vector<u64>& xs_u64,
+                         int out_bytes,
+                         uint8_t* outs_flat) const override {
+    // myl7 backend is already vectorized internally; reuse existing batch API.
+    (void)out_bytes;  // payload size is implied by keys in myl7_fss.
+    std::vector<FssKey> vec_keys;
+    vec_keys.reserve(xs_u64.size());
+    for (size_t i = 0; i < xs_u64.size(); ++i) {
+      FssKey k;
+      k.bytes.assign(keys_flat + i * key_bytes, keys_flat + (i + 1) * key_bytes);
+      vec_keys.push_back(std::move(k));
+    }
+    std::vector<u64> ys(xs_u64.size(), 0);
+    for (size_t i = 0; i < xs_u64.size(); ++i) {
+      auto bits = u64_to_bits_msb(xs_u64[i], in_bits);
+      auto out = eval_dcf(in_bits, vec_keys[i], bits);
+      u64 v = 0;
+      if (!out.empty()) v = static_cast<u64>(out[0] & 1u);
+      ys[i] = v;
+    }
+    // Payload is one byte per key (XOR bit), stored in outs_flat.
+    for (size_t i = 0; i < ys.size(); ++i) {
+      outs_flat[i] = static_cast<uint8_t>(ys[i] & 0xffu);
+    }
   }
 
 private:

@@ -7,6 +7,7 @@
 #include "nn/matmul_publicW.hpp"
 #include "nn/tensor_view.hpp"
 #include "mpc/net.hpp"
+#include "nn/layer_context.hpp"
 
 namespace nn {
 
@@ -25,6 +26,7 @@ void attention_forward(const AttentionConfig& cfg,
                        const TensorView<int64_t>& Wqkv_public,
                        const TensorView<int64_t>& Wout_public,
                        KVCache& cache,
-                       TensorView<uint64_t> Y_share);
+                       TensorView<uint64_t> Y_share,
+                       LayerContext* ctx = nullptr);
 
 }  // namespace nn

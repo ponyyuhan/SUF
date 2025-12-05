@@ -13,6 +13,7 @@ CompiledSUFGate compile_suf_to_pfss_two_programs(
     const suf::SUF<uint64_t>& F,
     uint64_t r_in,
     const std::vector<uint64_t>& r_out,
-    CoeffMode coeff_mode = CoeffMode::kStepDcf);
+    CoeffMode coeff_mode = CoeffMode::kStepDcf,
+    GateKind gate_kind = GateKind::SiLUSpline);
 
 }  // namespace compiler

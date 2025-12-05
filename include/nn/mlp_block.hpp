@@ -4,6 +4,7 @@
 #include "nn/matmul_publicW.hpp"
 #include "nn/tensor_view.hpp"
 #include "gates/silu_spline_gate.hpp"
+#include "nn/layer_context.hpp"
 
 namespace nn {
 
@@ -17,6 +18,7 @@ void mlp_forward(const MLPConfig& cfg,
                  const TensorView<uint64_t>& X_share,
                  const TensorView<int64_t>& W1_public,
                  const TensorView<int64_t>& W2_public,
-                 TensorView<uint64_t> Y_share);
+                 TensorView<uint64_t> Y_share,
+                 LayerContext* ctx = nullptr);
 
 }  // namespace nn

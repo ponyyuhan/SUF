@@ -81,7 +81,10 @@ enum class GateKind : uint8_t {
   Reciprocal,
   Rsqrt,
   SoftmaxBlock,
-  LayerNormBlock
+  LayerNormBlock,
+  FaithfulTR,
+  FaithfulARS,
+  GapARS
 };
 
 struct GateParams {

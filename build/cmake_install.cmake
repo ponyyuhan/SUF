@@ -1,4 +1,4 @@
-# Install script for directory: /home/yuhan/SUF/SUF
+# Install script for directory: /home/yuhan/new/new
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)

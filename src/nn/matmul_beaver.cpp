@@ -2,6 +2,12 @@
 
 #include <cassert>
 #include <cstdint>
+#include <cstring>
+#include <optional>
+#include <stdexcept>
+
+#include "gates/composite_fss.hpp"
+#include "runtime/pfss_superbatch.hpp"
 
 namespace nn {
 
@@ -109,6 +115,27 @@ static void open_vector(int party,
   }
 }
 
+static void open_public_hatx(int party,
+                             net::Chan& ch,
+                             const std::vector<uint64_t>& hatx_share,
+                             std::vector<uint64_t>& hatx_public) {
+  size_t n = hatx_share.size();
+  hatx_public.resize(n);
+  if (party == 0) {
+    for (auto v : hatx_share) ch.send_u64(v);
+    for (size_t i = 0; i < n; ++i) {
+      uint64_t other = ch.recv_u64();
+      hatx_public[i] = proto::add_mod(hatx_share[i], other);
+    }
+  } else {
+    for (size_t i = 0; i < n; ++i) {
+      uint64_t other = ch.recv_u64();
+      hatx_public[i] = proto::add_mod(hatx_share[i], other);
+    }
+    for (auto v : hatx_share) ch.send_u64(v);
+  }
+}
+
 static void matmul_beaver2d(const MatmulBeaverParams& params,
                             int party,
                             net::Chan& ch,
@@ -138,19 +165,88 @@ static void matmul_beaver2d(const MatmulBeaverParams& params,
   open_vector(party, ch, diff_X, E);
   open_vector(party, ch, diff_W, F);
 
-  for (size_t m = 0; m < M; ++m) {
-    for (size_t n = 0; n < N; ++n) {
-      __int128 acc = static_cast<__int128>(to_signed(t.C_share[m * N + n]));
-      for (size_t k = 0; k < K; ++k) {
-        size_t bidx = b_offset(k, n, K, N, params.w_transposed);
-        acc += static_cast<__int128>(E[m * K + k]) * static_cast<__int128>(to_signed(t.B_share[bidx]));
-        acc += static_cast<__int128>(to_signed(t.A_share[m * K + k])) * static_cast<__int128>(F[bidx]);
-        if (party == 0) {
-          acc += static_cast<__int128>(E[m * K + k]) * static_cast<__int128>(F[bidx]);
+  // Compute accumulator shares once.
+  size_t total = M * N;
+  std::vector<uint64_t> acc_share(total);
+  {
+    size_t idx = 0;
+    for (size_t m = 0; m < M; ++m) {
+      for (size_t n = 0; n < N; ++n) {
+        __int128 acc = static_cast<__int128>(to_signed(t.C_share[m * N + n]));
+        for (size_t k = 0; k < K; ++k) {
+          size_t bidx = b_offset(k, n, K, N, params.w_transposed);
+          acc += static_cast<__int128>(E[m * K + k]) *
+                 static_cast<__int128>(to_signed(t.B_share[bidx]));
+          acc += static_cast<__int128>(to_signed(t.A_share[m * K + k])) *
+                 static_cast<__int128>(F[bidx]);
+          if (party == 0) {
+            acc += static_cast<__int128>(E[m * K + k]) *
+                   static_cast<__int128>(F[bidx]);
+          }
         }
+        acc_share[idx++] = to_ring(static_cast<int64_t>(acc));
       }
-      Y_share.data[m * N + n] =
-          to_ring(static_cast<int64_t>(acc >> params.frac_bits));
+    }
+  }
+
+  bool trunc_requested = params.trunc_backend != nullptr;
+  const compiler::TruncationLoweringResult* bundle_ptr = params.trunc_bundle;
+  const compiler::MatmulTruncationPlan* plan_ptr = params.trunc_plan;
+  if (trunc_requested && !bundle_ptr && plan_ptr) {
+    bundle_ptr = &plan_ptr->bundle;
+  }
+
+  if (trunc_requested && !bundle_ptr) {
+    throw std::runtime_error("matmul_beaver: truncation backend set but no plan provided");
+  }
+
+  if (params.require_truncation && !trunc_requested) {
+    throw std::runtime_error("matmul_beaver: truncation required but no backend/plan provided");
+  }
+
+  if (!trunc_requested) {
+    for (size_t i = 0; i < total; ++i) {
+      Y_share.data[i] = to_ring(static_cast<int64_t>(to_signed(acc_share[i]) >> params.frac_bits));
+    }
+    return;
+  }
+
+  if (plan_ptr && plan_ptr->batch != total) {
+    throw std::runtime_error("matmul_beaver: truncation plan batch mismatch");
+  }
+  if (!bundle_ptr) {
+    throw std::runtime_error("matmul_beaver: truncation bundle missing");
+  }
+  const auto& bundle = *bundle_ptr;
+  const auto& key = (party == 0) ? bundle.keys.k0 : bundle.keys.k1;
+  if (key.triples.size() < total) {
+    throw std::runtime_error("matmul_beaver: truncation triples exhausted");
+  }
+
+  // Build masked hatx shares and open them to both parties.
+  std::vector<uint64_t> hatx_share(total);
+  for (size_t i = 0; i < total; ++i) {
+    hatx_share[i] = proto::add_mod(acc_share[i], key.r_in_share);
+  }
+  std::vector<uint64_t> hatx_public;
+  open_public_hatx(party, ch, hatx_share, hatx_public);
+
+  gates::PostProcHook* hook = (party == 0) ? bundle.hook0.get() : bundle.hook1.get();
+  if (!hook) throw std::runtime_error("matmul_beaver: truncation hook missing");
+
+  runtime::ProtoChanFromNet pch(ch);
+  if (params.pfss_batch) {
+    params.pfss_batch->enqueue_truncation(bundle, key, *hook, std::move(hatx_public), Y_share);
+    if (!params.defer_trunc_finalize) {
+      params.pfss_batch->flush_and_finalize(party, *params.trunc_backend, pch);
+    }
+  } else {
+    gates::CompositeBatchInput in{hatx_public.data(), total};
+    auto out = gates::composite_eval_batch_with_postproc(
+        party, *params.trunc_backend, pch, key, bundle.suf, in, *hook);
+    uint64_t r_out_share = key.r_out_share.empty() ? 0ull : key.r_out_share[0];
+    for (size_t i = 0; i < total; ++i) {
+      Y_share.data[i] = proto::sub_mod(out.haty_share[i], r_out_share);
     }
   }
 }

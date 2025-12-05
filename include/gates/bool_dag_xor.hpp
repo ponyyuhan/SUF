@@ -29,7 +29,10 @@ inline uint64_t eval_bool_xor_view(const suf::BoolExpr& e,
         return 0;
       }
     } else if constexpr (std::is_same_v<T, suf::BNot>) {
-      return 1ull ^ eval_bool_xor_view(*n.a, get_pred, wrap_bits_add, mul, bit_triples, bit_idx);
+      uint64_t v = eval_bool_xor_view(*n.a, get_pred, wrap_bits_add, mul, bit_triples, bit_idx) & 1ull;
+      // For XOR shares, flip a single party's share to negate the reconstructed bit.
+      if (mul.party == 0) v ^= 1ull;
+      return v;
     } else if constexpr (std::is_same_v<T, suf::BXor>) {
       return eval_bool_xor_view(*n.a, get_pred, wrap_bits_add, mul, bit_triples, bit_idx) ^
              eval_bool_xor_view(*n.b, get_pred, wrap_bits_add, mul, bit_triples, bit_idx);
@@ -67,8 +70,34 @@ inline uint64_t eval_bool_xor_view(const suf::BoolExpr& e,
     } else { // BOr
       uint64_t ax = eval_bool_xor_view(*n.a, get_pred, wrap_bits_add, mul, bit_triples, bit_idx) & 1ull;
       uint64_t ay = eval_bool_xor_view(*n.b, get_pred, wrap_bits_add, mul, bit_triples, bit_idx) & 1ull;
+      uint64_t andv = 0;
+      if (bit_triples && bit_idx) {
+        size_t idx_local = (*bit_idx)++;
+        const auto& t = bit_triples[idx_local];
+        uint8_t e_share = static_cast<uint8_t>(ax) ^ t.a;
+        uint8_t f_share = static_cast<uint8_t>(ay) ^ t.b;
+        uint8_t other_e = 0, other_f = 0;
+        mul.ch.send_bytes(&e_share, 1);
+        mul.ch.send_bytes(&f_share, 1);
+        mul.ch.recv_bytes(&other_e, 1);
+        mul.ch.recv_bytes(&other_f, 1);
+        uint8_t e = static_cast<uint8_t>(e_share ^ other_e);
+        uint8_t f = static_cast<uint8_t>(f_share ^ other_f);
+        uint8_t z = static_cast<uint8_t>(t.c ^ (e & t.b) ^ (f & t.a));
+        if (mul.party == 0) z ^= static_cast<uint8_t>(e & f);
+        andv = static_cast<uint64_t>(z & 1u);
+      } else {
+        uint64_t a_share = (mul.party == 0) ? ax : 0ull;
+        uint64_t b_share = (mul.party == 1) ? ax : 0ull;
+        uint64_t c_share = (mul.party == 0) ? ay : 0ull;
+        uint64_t d_share = (mul.party == 1) ? ay : 0ull;
+        uint64_t prod = mul.mul(a_share, c_share);
+        uint64_t two_prod = proto::add_mod(prod, prod);
+        uint64_t add_a = proto::sub_mod(proto::add_mod(a_share, b_share), two_prod);
+        uint64_t add_b = proto::sub_mod(proto::add_mod(c_share, d_share), two_prod);
+        andv = mul.mul(add_a, add_b) & 1ull;
+      }
       uint64_t xorv = ax ^ ay;
-      uint64_t andv = ax & ay;
       return xorv ^ andv;
     }
   }, e.node);

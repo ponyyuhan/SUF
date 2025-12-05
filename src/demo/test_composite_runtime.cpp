@@ -1,17 +1,18 @@
 #include <cassert>
-#include <iostream>
-#include <random>
+#include <condition_variable>
 #include <cstring>
+#include <iostream>
+#include <limits>
+#include <mutex>
+#include <queue>
+#include <random>
+#include <thread>
+#include "gates/composite_fss.hpp"
+#include "proto/channel.hpp"
+#include "proto/myl7_fss_backend.hpp"
+#include "runtime/pfss_superbatch.hpp"
 #include "suf/ref_eval.hpp"
 #include "suf/validate.hpp"
-#include "gates/composite_fss.hpp"
-#include "proto/myl7_fss_backend.hpp"
-#include "proto/channel.hpp"
-#include <condition_variable>
-#include <queue>
-#include <mutex>
-#include <thread>
-#include <limits>
 
 using namespace suf;
 
@@ -47,7 +48,7 @@ struct LocalChan : proto::IChannel {
   }
 };
 
-// Reuse sample SUF from previous tests.
+// Reuse sample new from previous tests.
 static SUF<uint64_t> make_sample_suf() {
   SUF<uint64_t> s;
   s.n_bits = 64;
@@ -73,40 +74,71 @@ static SUF<uint64_t> make_sample_suf() {
   return s;
 }
 
+static SUF<uint64_t> make_offset_suf(uint64_t c0) {
+  auto s = make_sample_suf();
+  for (auto& piece : s.pieces) {
+    if (!piece.polys.empty() && !piece.polys[0].coeffs.empty()) {
+      piece.polys[0].coeffs[0] = c0;
+    }
+  }
+  return s;
+}
+
 int main() {
-  auto suf = make_sample_suf();
-  validate_suf(suf);
+  auto suf1 = make_sample_suf();
+  auto suf2 = make_offset_suf(5);
+  validate_suf(suf1);
+  validate_suf(suf2);
 
   proto::Myl7FssBackend backend;
   std::mt19937_64 rng(2027);
 
   const size_t N = 128;
-  auto kp = gates::composite_gen_backend(suf, backend, rng, N);
+  auto kp1 = gates::composite_gen_backend(suf1, backend, rng, N);
+  auto kp2 = gates::composite_gen_backend(suf2, backend, rng, N);
 
-  LocalChan::Shared sh;
+  std::vector<uint64_t> hatx1, hatx2;
+  hatx1.reserve(N);
+  hatx2.reserve(N);
+  uint64_t mask1 = kp1.k0.r_in_share + kp1.k1.r_in_share;
+  uint64_t mask2 = kp2.k0.r_in_share + kp2.k1.r_in_share;
   for (size_t t = 0; t < N; t++) {
     uint64_t x = static_cast<uint64_t>(t);
-    uint64_t hatx = x + kp.k0.r_in_share + kp.k1.r_in_share;
+    hatx1.push_back(x + mask1);
+    hatx2.push_back(x + mask2);
+  }
 
-    uint64_t y0 = 0, y1 = 0;
-    std::thread th1([&](){
-      LocalChan ch{&sh, false};
-      auto out1 = gates::composite_eval_share_backend(1, backend, ch, kp.k1, suf, hatx);
-      y1 = out1[0];
-    });
-    LocalChan ch0{&sh, true};
-    auto out0 = gates::composite_eval_share_backend(0, backend, ch0, kp.k0, suf, hatx);
-    y0 = out0[0];
-    th1.join();
+  runtime::PfssSuperBatch batch0, batch1;
+  gates::NoopPostProc noop;
 
-    auto ref = eval_suf_ref(suf, x);
-    uint64_t y_expect = ref.arith[0] + kp.k0.r_out_share[0] + kp.k1.r_out_share[0];
-    if ((y0 + y1) != y_expect) {
-      std::cerr << "mismatch at x=" << x << " y0=" << y0 << " y1=" << y1 << " expect=" << y_expect << "\n";
+  LocalChan::Shared sh;
+  std::vector<uint64_t> out1_0(N), out1_1(N), out2_0(N), out2_1(N);
+  std::thread t1([&](){
+    LocalChan ch{&sh, false};
+    batch1.enqueue_composite({&suf1, &kp1.k1, &noop, hatx1, nn::TensorView<uint64_t>(out1_1.data(), {N})});
+    batch1.enqueue_composite({&suf2, &kp2.k1, &noop, hatx2, nn::TensorView<uint64_t>(out2_1.data(), {N})});
+    batch1.flush_and_finalize(1, backend, ch);
+  });
+  {
+    LocalChan ch{&sh, true};
+    batch0.enqueue_composite({&suf1, &kp1.k0, &noop, hatx1, nn::TensorView<uint64_t>(out1_0.data(), {N})});
+    batch0.enqueue_composite({&suf2, &kp2.k0, &noop, hatx2, nn::TensorView<uint64_t>(out2_0.data(), {N})});
+    batch0.flush_and_finalize(0, backend, ch);
+  }
+  t1.join();
+
+  for (size_t i = 0; i < N; ++i) {
+    auto ref1 = eval_suf_ref(suf1, static_cast<uint64_t>(i));
+    auto ref2 = eval_suf_ref(suf2, static_cast<uint64_t>(i));
+    uint64_t y1 = out1_0[i] + out1_1[i];
+    uint64_t y2 = out2_0[i] + out2_1[i];
+    if (y1 != ref1.arith[0] || y2 != ref2.arith[0]) {
+      std::cerr << "mismatch at i=" << i << " y1=" << y1 << " exp1=" << ref1.arith[0]
+                << " y2=" << y2 << " exp2=" << ref2.arith[0] << "\n";
       return 1;
     }
   }
 
-  std::cout << "Composite runtime (ClearBackend) equivalence passed\n";
+  std::cout << "Composite runtime batched flush passed\n";
   return 0;
 }

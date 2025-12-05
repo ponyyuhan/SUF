@@ -47,11 +47,11 @@ expand*.md, initial.md, milestone*.md, paper.md
   cmake -S . -B build
   cmake --build build
   ./build/sim_harness            # 断言式，两方模拟，ReluARS/GeLU 各 2000 轮
-  ./build/test_suf_ref_eval      # SUF 参考语义
+  ./build/test_suf_ref_eval      # new 参考语义
   ./build/test_mask_rewrite      # 掩码重写性质
-  ./build/test_compile_pfss      # SUF→PFSS 编译一致性
+  ./build/test_compile_pfss      # new→PFSS 编译一致性
   ./build/test_sigmafast         # SigmaFast packed compare + interval LUT
-  ./build/test_composite_runtime # 组合式 SUF 门运行时（Clear 后端，两方线程）
+  ./build/test_composite_runtime # 组合式 new 门运行时（Clear 后端，两方线程）
   ```
 - **接入真实 myl7/fss（自动 FetchContent，禁用 CUDA/样例/测试）**
   ```bash

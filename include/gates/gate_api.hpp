@@ -13,7 +13,7 @@ struct GateEvalResult {
   std::vector<mpc::AddShare<RingT>> y_hat_shares;  // one per arithmetic output
 };
 
-// Generic “compiled SUF gate evaluation”: 2 PFSS evals + Horner + add r_out.
+// Generic “compiled new gate evaluation”: 2 PFSS evals + Horner + add r_out.
 // triples should contain at least r_out * degree Beaver triples (degree per output).
 template<typename RingT, typename PredPayloadT, typename CoeffPayloadT>
 inline GateEvalResult<RingT> eval_compiled_suf_gate(

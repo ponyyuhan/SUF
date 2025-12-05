@@ -14,6 +14,23 @@ namespace {
 inline int64_t to_signed(uint64_t v) { return static_cast<int64_t>(v); }
 inline uint64_t to_ring(int64_t v) { return static_cast<uint64_t>(v); }
 
+static inline void rescale_buffer(std::vector<uint64_t>& buf, int frac_bits) {
+  if (frac_bits <= 0) return;
+  for (auto& v : buf) {
+    int64_t s = to_signed(v);
+    v = to_ring(s >> frac_bits);
+  }
+}
+
+static inline void rescale_view(const TensorView<uint64_t>& t, int frac_bits) {
+  if (frac_bits <= 0) return;
+  size_t n = t.numel();
+  for (size_t i = 0; i < n; ++i) {
+    int64_t s = to_signed(t.data[i]);
+    t.data[i] = to_ring(s >> frac_bits);
+  }
+}
+
 void open_to_plain(int party,
                    net::Chan& ch,
                    const uint64_t* local,
@@ -42,13 +59,74 @@ void attention_forward(const AttentionConfig& cfg,
                        const TensorView<int64_t>& Wqkv_public,
                        const TensorView<int64_t>& Wout_public,
                        KVCache& cache,
-                       TensorView<uint64_t> Y_share) {
+                       TensorView<uint64_t> Y_share,
+                       LayerContext* ctx) {
   size_t B = X_share.shape[0];
   size_t T = X_share.shape[1];
   size_t D = cfg.D;
   size_t H = cfg.H;
   size_t Dh = cfg.Dh;
   int fb = cfg.frac_bits;
+
+  std::vector<uint64_t> qkv(B * T * 3 * D, 0);
+
+  if (ctx) {
+    compiler::Scale q_scale = make_scale(fb, true);
+    compiler::RangeInterval x_range = compiler::RangeInterval::whole(true);
+    SecretTensor x_t = make_secret_tensor(ctx, X_share, q_scale, x_range);
+
+    compiler::MatmulAttrs qkv_attrs;
+    qkv_attrs.M = B * T;
+    qkv_attrs.K = D;
+    qkv_attrs.N = 3 * D;
+    qkv_attrs.w_transposed = false;
+    qkv_attrs.params = nullptr;
+    qkv_attrs.frac_bits = fb;
+    qkv_attrs.x_range = x_range;
+    qkv_attrs.row_l1_max = row_l1_max(Wqkv_public, qkv_attrs.w_transposed);
+    qkv_attrs.w_range = range_from_public_weights(Wqkv_public);
+    auto qkv_acc = record_matmul(
+        ctx, x_t, qkv_attrs, make_scale(2 * fb, true),
+        qkv_attrs.row_l1_max > 0
+            ? compiler::propagate_matmul_accum_rowl1(x_range, qkv_attrs.row_l1_max)
+            : compiler::propagate_matmul_accum(x_range, qkv_attrs.w_range, qkv_attrs.K),
+        view2(qkv.data(), B * T, 3 * D));
+
+    compiler::RescaleAttrs qkv_rescale_attrs;
+    qkv_rescale_attrs.matmul_op = qkv_acc.producer_op;
+    qkv_rescale_attrs.from_frac = 2 * fb;
+    qkv_rescale_attrs.to_frac = fb;
+    compiler::RangeInterval qkv_range =
+        compiler::propagate_matmul_out(x_range, qkv_attrs.w_range, qkv_attrs.K, fb);
+    SecretTensor qkv_t =
+        record_rescale(ctx, qkv_acc, qkv_rescale_attrs, q_scale, qkv_range,
+                       view2(qkv.data(), B * T, 3 * D));
+
+    compiler::MatmulAttrs out_attrs;
+    out_attrs.M = B * T;
+    out_attrs.K = D;
+    out_attrs.N = D;
+    out_attrs.w_transposed = false;
+    out_attrs.params = nullptr;
+    out_attrs.frac_bits = fb;
+    out_attrs.x_range = qkv_t.range;  // conservative; attention stack clamps internally.
+    out_attrs.row_l1_max = row_l1_max(Wout_public, out_attrs.w_transposed);
+    out_attrs.w_range = range_from_public_weights(Wout_public);
+    auto out_acc = record_matmul(
+        ctx, qkv_t, out_attrs, make_scale(2 * fb, true),
+        out_attrs.row_l1_max > 0
+            ? compiler::propagate_matmul_accum_rowl1(qkv_t.range, out_attrs.row_l1_max)
+            : compiler::propagate_matmul_accum(qkv_t.range, out_attrs.w_range, out_attrs.K),
+        Y_share);
+
+    compiler::RescaleAttrs out_rescale_attrs;
+    out_rescale_attrs.matmul_op = out_acc.producer_op;
+    out_rescale_attrs.from_frac = 2 * fb;
+    out_rescale_attrs.to_frac = fb;
+    compiler::RangeInterval out_range =
+        compiler::propagate_matmul_out(qkv_t.range, out_attrs.w_range, out_attrs.K, fb);
+    (void)record_rescale(ctx, out_acc, out_rescale_attrs, q_scale, out_range, Y_share);
+  }
 
   assert(D == H * Dh);
   assert(Wqkv_public.shape[0] == D && Wqkv_public.shape[1] == 3 * D);
@@ -57,13 +135,13 @@ void attention_forward(const AttentionConfig& cfg,
   MatmulParams mp;
   mp.frac_bits = fb;
   mp.w_transposed = false;
+  mp.local_rescale = (ctx == nullptr);
 
-  // [B*T, 3D]
-  std::vector<uint64_t> qkv(B * T * 3 * D, 0);
   matmul_publicW(view2(const_cast<uint64_t*>(X_share.data), B * T, D),
                  Wqkv_public,
                  view2(qkv.data(), B * T, 3 * D),
                  mp);
+  rescale_buffer(qkv, fb);
 
   std::vector<uint64_t> ctx_shares(B * T * H * Dh, 0);
   size_t init_len = cache.cur_len;
@@ -168,6 +246,7 @@ void attention_forward(const AttentionConfig& cfg,
                  Wout_public,
                  Y_share,
                  mp);
+  rescale_view(Y_share, fb);
 }
 
 }  // namespace nn

@@ -24,7 +24,7 @@ static void matmul2d(const uint64_t* X,
         __int128 wv = static_cast<__int128>(W[widx]);
         acc += xv * wv;
       }
-      if (params.frac_bits > 0) acc >>= params.frac_bits;
+      if (params.local_rescale && params.frac_bits > 0) acc >>= params.frac_bits;
       if (params.bias && n < params.bias->size()) acc += static_cast<__int128>((*params.bias)[n]);
       Y[m * N + n] = to_ring(static_cast<int64_t>(acc));
     }

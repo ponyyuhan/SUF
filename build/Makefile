@@ -182,6 +182,19 @@ test_compile_pfss/fast:
 .PHONY : test_compile_pfss/fast
 
 #=============================================================================
+# Target rules for targets named compiler_passes
+
+# Build rule for target.
+compiler_passes: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 compiler_passes
+.PHONY : compiler_passes
+
+# fast build rule for target.
+compiler_passes/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/compiler_passes.dir/build.make CMakeFiles/compiler_passes.dir/build
+.PHONY : compiler_passes/fast
+
+#=============================================================================
 # Target rules for targets named test_sigmafast
 
 # Build rule for target.
@@ -390,6 +403,19 @@ test_matmul/fast:
 .PHONY : test_matmul/fast
 
 #=============================================================================
+# Target rules for targets named test_truncation
+
+# Build rule for target.
+test_truncation: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_truncation
+.PHONY : test_truncation
+
+# fast build rule for target.
+test_truncation/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_truncation.dir/build.make CMakeFiles/test_truncation.dir/build
+.PHONY : test_truncation/fast
+
+#=============================================================================
 # Target rules for targets named bench_gemm
 
 # Build rule for target.
@@ -401,6 +427,19 @@ bench_gemm: cmake_check_build_system
 bench_gemm/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_gemm.dir/build.make CMakeFiles/bench_gemm.dir/build
 .PHONY : bench_gemm/fast
+
+#=============================================================================
+# Target rules for targets named bench_truncation
+
+# Build rule for target.
+bench_truncation: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 bench_truncation
+.PHONY : bench_truncation
+
+# fast build rule for target.
+bench_truncation/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_truncation.dir/build.make CMakeFiles/bench_truncation.dir/build
+.PHONY : bench_truncation/fast
 
 #=============================================================================
 # Target rules for targets named test_myl7_bit_order
@@ -559,17 +598,84 @@ src/bench/bench_sigmafast_pred.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_sigmafast_pred.dir/build.make CMakeFiles/bench_sigmafast_pred.dir/src/bench/bench_sigmafast_pred.cpp.s
 .PHONY : src/bench/bench_sigmafast_pred.cpp.s
 
+src/bench/bench_truncation.o: src/bench/bench_truncation.cpp.o
+.PHONY : src/bench/bench_truncation.o
+
+# target to build an object file
+src/bench/bench_truncation.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_truncation.dir/build.make CMakeFiles/bench_truncation.dir/src/bench/bench_truncation.cpp.o
+.PHONY : src/bench/bench_truncation.cpp.o
+
+src/bench/bench_truncation.i: src/bench/bench_truncation.cpp.i
+.PHONY : src/bench/bench_truncation.i
+
+# target to preprocess a source file
+src/bench/bench_truncation.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_truncation.dir/build.make CMakeFiles/bench_truncation.dir/src/bench/bench_truncation.cpp.i
+.PHONY : src/bench/bench_truncation.cpp.i
+
+src/bench/bench_truncation.s: src/bench/bench_truncation.cpp.s
+.PHONY : src/bench/bench_truncation.s
+
+# target to generate assembly for a file
+src/bench/bench_truncation.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_truncation.dir/build.make CMakeFiles/bench_truncation.dir/src/bench/bench_truncation.cpp.s
+.PHONY : src/bench/bench_truncation.cpp.s
+
+src/compiler/layer_graph.o: src/compiler/layer_graph.cpp.o
+.PHONY : src/compiler/layer_graph.o
+
+# target to build an object file
+src/compiler/layer_graph.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/compiler_passes.dir/build.make CMakeFiles/compiler_passes.dir/src/compiler/layer_graph.cpp.o
+.PHONY : src/compiler/layer_graph.cpp.o
+
+src/compiler/layer_graph.i: src/compiler/layer_graph.cpp.i
+.PHONY : src/compiler/layer_graph.i
+
+# target to preprocess a source file
+src/compiler/layer_graph.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/compiler_passes.dir/build.make CMakeFiles/compiler_passes.dir/src/compiler/layer_graph.cpp.i
+.PHONY : src/compiler/layer_graph.cpp.i
+
+src/compiler/layer_graph.s: src/compiler/layer_graph.cpp.s
+.PHONY : src/compiler/layer_graph.s
+
+# target to generate assembly for a file
+src/compiler/layer_graph.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/compiler_passes.dir/build.make CMakeFiles/compiler_passes.dir/src/compiler/layer_graph.cpp.s
+.PHONY : src/compiler/layer_graph.cpp.s
+
+src/compiler/rescale_pass.o: src/compiler/rescale_pass.cpp.o
+.PHONY : src/compiler/rescale_pass.o
+
+# target to build an object file
+src/compiler/rescale_pass.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/compiler_passes.dir/build.make CMakeFiles/compiler_passes.dir/src/compiler/rescale_pass.cpp.o
+.PHONY : src/compiler/rescale_pass.cpp.o
+
+src/compiler/rescale_pass.i: src/compiler/rescale_pass.cpp.i
+.PHONY : src/compiler/rescale_pass.i
+
+# target to preprocess a source file
+src/compiler/rescale_pass.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/compiler_passes.dir/build.make CMakeFiles/compiler_passes.dir/src/compiler/rescale_pass.cpp.i
+.PHONY : src/compiler/rescale_pass.cpp.i
+
+src/compiler/rescale_pass.s: src/compiler/rescale_pass.cpp.s
+.PHONY : src/compiler/rescale_pass.s
+
+# target to generate assembly for a file
+src/compiler/rescale_pass.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/compiler_passes.dir/build.make CMakeFiles/compiler_passes.dir/src/compiler/rescale_pass.cpp.s
+.PHONY : src/compiler/rescale_pass.cpp.s
+
 src/compiler/suf_to_pfss.o: src/compiler/suf_to_pfss.cpp.o
 .PHONY : src/compiler/suf_to_pfss.o
 
 # target to build an object file
 src/compiler/suf_to_pfss.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_compile_pfss.dir/build.make CMakeFiles/test_compile_pfss.dir/src/compiler/suf_to_pfss.cpp.o
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_runtime.dir/build.make CMakeFiles/test_composite_runtime.dir/src/compiler/suf_to_pfss.cpp.o
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto.dir/build.make CMakeFiles/test_composite_equiv_proto.dir/src/compiler/suf_to_pfss.cpp.o
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_myl7.dir/build.make CMakeFiles/test_composite_equiv_proto_myl7.dir/src/compiler/suf_to_pfss.cpp.o
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_sigmafast.dir/build.make CMakeFiles/test_composite_equiv_proto_sigmafast.dir/src/compiler/suf_to_pfss.cpp.o
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_sigmafast_gates.dir/build.make CMakeFiles/bench_sigmafast_gates.dir/src/compiler/suf_to_pfss.cpp.o
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/compiler_passes.dir/build.make CMakeFiles/compiler_passes.dir/src/compiler/suf_to_pfss.cpp.o
 .PHONY : src/compiler/suf_to_pfss.cpp.o
 
 src/compiler/suf_to_pfss.i: src/compiler/suf_to_pfss.cpp.i
@@ -577,12 +683,7 @@ src/compiler/suf_to_pfss.i: src/compiler/suf_to_pfss.cpp.i
 
 # target to preprocess a source file
 src/compiler/suf_to_pfss.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_compile_pfss.dir/build.make CMakeFiles/test_compile_pfss.dir/src/compiler/suf_to_pfss.cpp.i
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_runtime.dir/build.make CMakeFiles/test_composite_runtime.dir/src/compiler/suf_to_pfss.cpp.i
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto.dir/build.make CMakeFiles/test_composite_equiv_proto.dir/src/compiler/suf_to_pfss.cpp.i
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_myl7.dir/build.make CMakeFiles/test_composite_equiv_proto_myl7.dir/src/compiler/suf_to_pfss.cpp.i
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_sigmafast.dir/build.make CMakeFiles/test_composite_equiv_proto_sigmafast.dir/src/compiler/suf_to_pfss.cpp.i
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_sigmafast_gates.dir/build.make CMakeFiles/bench_sigmafast_gates.dir/src/compiler/suf_to_pfss.cpp.i
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/compiler_passes.dir/build.make CMakeFiles/compiler_passes.dir/src/compiler/suf_to_pfss.cpp.i
 .PHONY : src/compiler/suf_to_pfss.cpp.i
 
 src/compiler/suf_to_pfss.s: src/compiler/suf_to_pfss.cpp.s
@@ -590,13 +691,32 @@ src/compiler/suf_to_pfss.s: src/compiler/suf_to_pfss.cpp.s
 
 # target to generate assembly for a file
 src/compiler/suf_to_pfss.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_compile_pfss.dir/build.make CMakeFiles/test_compile_pfss.dir/src/compiler/suf_to_pfss.cpp.s
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_runtime.dir/build.make CMakeFiles/test_composite_runtime.dir/src/compiler/suf_to_pfss.cpp.s
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto.dir/build.make CMakeFiles/test_composite_equiv_proto.dir/src/compiler/suf_to_pfss.cpp.s
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_myl7.dir/build.make CMakeFiles/test_composite_equiv_proto_myl7.dir/src/compiler/suf_to_pfss.cpp.s
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_sigmafast.dir/build.make CMakeFiles/test_composite_equiv_proto_sigmafast.dir/src/compiler/suf_to_pfss.cpp.s
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_sigmafast_gates.dir/build.make CMakeFiles/bench_sigmafast_gates.dir/src/compiler/suf_to_pfss.cpp.s
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/compiler_passes.dir/build.make CMakeFiles/compiler_passes.dir/src/compiler/suf_to_pfss.cpp.s
 .PHONY : src/compiler/suf_to_pfss.cpp.s
+
+src/compiler/truncation_pass.o: src/compiler/truncation_pass.cpp.o
+.PHONY : src/compiler/truncation_pass.o
+
+# target to build an object file
+src/compiler/truncation_pass.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/compiler_passes.dir/build.make CMakeFiles/compiler_passes.dir/src/compiler/truncation_pass.cpp.o
+.PHONY : src/compiler/truncation_pass.cpp.o
+
+src/compiler/truncation_pass.i: src/compiler/truncation_pass.cpp.i
+.PHONY : src/compiler/truncation_pass.i
+
+# target to preprocess a source file
+src/compiler/truncation_pass.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/compiler_passes.dir/build.make CMakeFiles/compiler_passes.dir/src/compiler/truncation_pass.cpp.i
+.PHONY : src/compiler/truncation_pass.cpp.i
+
+src/compiler/truncation_pass.s: src/compiler/truncation_pass.cpp.s
+.PHONY : src/compiler/truncation_pass.s
+
+# target to generate assembly for a file
+src/compiler/truncation_pass.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/compiler_passes.dir/build.make CMakeFiles/compiler_passes.dir/src/compiler/truncation_pass.cpp.s
+.PHONY : src/compiler/truncation_pass.cpp.s
 
 src/demo/sim_harness.o: src/demo/sim_harness.cpp.o
 .PHONY : src/demo/sim_harness.o
@@ -958,6 +1078,30 @@ src/demo/test_suf_ref_eval.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_suf_ref_eval.dir/build.make CMakeFiles/test_suf_ref_eval.dir/src/demo/test_suf_ref_eval.cpp.s
 .PHONY : src/demo/test_suf_ref_eval.cpp.s
 
+src/demo/test_truncation.o: src/demo/test_truncation.cpp.o
+.PHONY : src/demo/test_truncation.o
+
+# target to build an object file
+src/demo/test_truncation.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_truncation.dir/build.make CMakeFiles/test_truncation.dir/src/demo/test_truncation.cpp.o
+.PHONY : src/demo/test_truncation.cpp.o
+
+src/demo/test_truncation.i: src/demo/test_truncation.cpp.i
+.PHONY : src/demo/test_truncation.i
+
+# target to preprocess a source file
+src/demo/test_truncation.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_truncation.dir/build.make CMakeFiles/test_truncation.dir/src/demo/test_truncation.cpp.i
+.PHONY : src/demo/test_truncation.cpp.i
+
+src/demo/test_truncation.s: src/demo/test_truncation.cpp.s
+.PHONY : src/demo/test_truncation.s
+
+# target to generate assembly for a file
+src/demo/test_truncation.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_truncation.dir/build.make CMakeFiles/test_truncation.dir/src/demo/test_truncation.cpp.s
+.PHONY : src/demo/test_truncation.cpp.s
+
 src/nn/attention_block.o: src/nn/attention_block.cpp.o
 .PHONY : src/nn/attention_block.o
 
@@ -1102,6 +1246,30 @@ src/nn/transformer_layer.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/transformer_layer.cpp.s
 .PHONY : src/nn/transformer_layer.cpp.s
 
+src/runtime/pfss_superbatch.o: src/runtime/pfss_superbatch.cpp.o
+.PHONY : src/runtime/pfss_superbatch.o
+
+# target to build an object file
+src/runtime/pfss_superbatch.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/runtime/pfss_superbatch.cpp.o
+.PHONY : src/runtime/pfss_superbatch.cpp.o
+
+src/runtime/pfss_superbatch.i: src/runtime/pfss_superbatch.cpp.i
+.PHONY : src/runtime/pfss_superbatch.i
+
+# target to preprocess a source file
+src/runtime/pfss_superbatch.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/runtime/pfss_superbatch.cpp.i
+.PHONY : src/runtime/pfss_superbatch.cpp.i
+
+src/runtime/pfss_superbatch.s: src/runtime/pfss_superbatch.cpp.s
+.PHONY : src/runtime/pfss_superbatch.s
+
+# target to generate assembly for a file
+src/runtime/pfss_superbatch.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/runtime/pfss_superbatch.cpp.s
+.PHONY : src/runtime/pfss_superbatch.cpp.s
+
 third_party/myl7_fss/src/group/bytes.o: third_party/myl7_fss/src/group/bytes.c.o
 .PHONY : third_party/myl7_fss/src/group/bytes.o
 
@@ -1188,6 +1356,8 @@ help:
 	@echo "... bench_sigmafast_coeff"
 	@echo "... bench_sigmafast_gates"
 	@echo "... bench_sigmafast_pred"
+	@echo "... bench_truncation"
+	@echo "... compiler_passes"
 	@echo "... myl7_core"
 	@echo "... nn_ops"
 	@echo "... sim_harness"
@@ -1205,6 +1375,7 @@ help:
 	@echo "... test_pred_semantics"
 	@echo "... test_sigmafast"
 	@echo "... test_suf_ref_eval"
+	@echo "... test_truncation"
 	@echo "... src/bench/bench_attention.o"
 	@echo "... src/bench/bench_attention.i"
 	@echo "... src/bench/bench_attention.s"
@@ -1223,9 +1394,21 @@ help:
 	@echo "... src/bench/bench_sigmafast_pred.o"
 	@echo "... src/bench/bench_sigmafast_pred.i"
 	@echo "... src/bench/bench_sigmafast_pred.s"
+	@echo "... src/bench/bench_truncation.o"
+	@echo "... src/bench/bench_truncation.i"
+	@echo "... src/bench/bench_truncation.s"
+	@echo "... src/compiler/layer_graph.o"
+	@echo "... src/compiler/layer_graph.i"
+	@echo "... src/compiler/layer_graph.s"
+	@echo "... src/compiler/rescale_pass.o"
+	@echo "... src/compiler/rescale_pass.i"
+	@echo "... src/compiler/rescale_pass.s"
 	@echo "... src/compiler/suf_to_pfss.o"
 	@echo "... src/compiler/suf_to_pfss.i"
 	@echo "... src/compiler/suf_to_pfss.s"
+	@echo "... src/compiler/truncation_pass.o"
+	@echo "... src/compiler/truncation_pass.i"
+	@echo "... src/compiler/truncation_pass.s"
 	@echo "... src/demo/sim_harness.o"
 	@echo "... src/demo/sim_harness.i"
 	@echo "... src/demo/sim_harness.s"
@@ -1271,6 +1454,9 @@ help:
 	@echo "... src/demo/test_suf_ref_eval.o"
 	@echo "... src/demo/test_suf_ref_eval.i"
 	@echo "... src/demo/test_suf_ref_eval.s"
+	@echo "... src/demo/test_truncation.o"
+	@echo "... src/demo/test_truncation.i"
+	@echo "... src/demo/test_truncation.s"
 	@echo "... src/nn/attention_block.o"
 	@echo "... src/nn/attention_block.i"
 	@echo "... src/nn/attention_block.s"
@@ -1289,6 +1475,9 @@ help:
 	@echo "... src/nn/transformer_layer.o"
 	@echo "... src/nn/transformer_layer.i"
 	@echo "... src/nn/transformer_layer.s"
+	@echo "... src/runtime/pfss_superbatch.o"
+	@echo "... src/runtime/pfss_superbatch.i"
+	@echo "... src/runtime/pfss_superbatch.s"
 	@echo "... third_party/myl7_fss/src/group/bytes.o"
 	@echo "... third_party/myl7_fss/src/group/bytes.i"
 	@echo "... third_party/myl7_fss/src/group/bytes.s"

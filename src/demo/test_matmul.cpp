@@ -1,4 +1,5 @@
 #include <cassert>
+#include <algorithm>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
@@ -9,9 +10,15 @@
 #include <thread>
 #include <vector>
 
+#include "compiler/layer_graph.hpp"
+#include "compiler/matmul_truncation.hpp"
+#include "compiler/range_analysis.hpp"
+#include "compiler/truncation_pass_runner.hpp"
 #include "nn/matmul_beaver.hpp"
 #include "nn/matmul_publicW.hpp"
 #include "mpc/net.hpp"
+#include "proto/reference_backend.hpp"
+#include "runtime/pfss_superbatch.hpp"
 
 using namespace nn;
 
@@ -117,7 +124,8 @@ static void test_matmul_beaver_case(size_t B,
                                     size_t N,
                                     bool w_transposed,
                                     int frac_bits,
-                                    uint64_t seed) {
+                                    uint64_t seed,
+                                    bool use_truncation = false) {
   std::mt19937_64 rng(seed);
   std::uniform_int_distribution<int64_t> dist(-200, 200);
   const uint64_t mask = (uint64_t(1) << frac_bits) - 1;
@@ -153,10 +161,63 @@ static void test_matmul_beaver_case(size_t B,
   MatmulBeaverParams params;
   params.frac_bits = frac_bits;
   params.w_transposed = w_transposed;
+  proto::ReferenceBackend trunc_backend;
+  compiler::TruncationPassContext pass_ctx(trunc_backend, seed + 12345);
+  if (use_truncation) {
+    auto range_of = [](const std::vector<int64_t>& vec) {
+      int64_t lo = vec.empty() ? 0 : vec[0];
+      int64_t hi = vec.empty() ? 0 : vec[0];
+      for (auto v : vec) {
+        lo = std::min(lo, v);
+        hi = std::max(hi, v);
+      }
+      compiler::RangeInterval r;
+      r.lo = lo;
+      r.hi = hi;
+      r.is_signed = true;
+      return r;
+    };
+    auto xr = range_of(X);
+    auto wr = range_of(W);
+    params.trunc_backend = &trunc_backend;
+    compiler::Scale input_scale{64, frac_bits, true};
+    compiler::LayerGraph g;
+    int x_id = g.add_tensor(input_scale, xr);
+    compiler::MatmulAttrs matmul_attrs;
+    matmul_attrs.params = &params;
+    matmul_attrs.M = M;
+    matmul_attrs.K = K;
+    matmul_attrs.N = N;
+    matmul_attrs.w_transposed = w_transposed;
+    matmul_attrs.frac_bits = frac_bits;
+    matmul_attrs.x_range = xr;
+    matmul_attrs.w_range = wr;
+    compiler::Scale accum_scale{64, 2 * frac_bits, true};
+    int matmul_out = g.add_matmul_beaver(x_id, matmul_attrs, accum_scale);
+    compiler::RescaleAttrs rattrs;
+    rattrs.matmul_op = g.ops().size() - 1;
+    rattrs.from_frac = accum_scale.frac_bits;
+    rattrs.to_frac = frac_bits;
+    compiler::Scale out_scale{64, frac_bits, true};
+    g.add_rescale(matmul_out, rattrs, out_scale);
+    g.lower_truncations(pass_ctx);
+  }
+
+  MatmulBeaverParams params0 = params;
+  MatmulBeaverParams params1 = params;
+  runtime::PfssSuperBatch batch0, batch1;
+  if (use_truncation) {
+    params0.pfss_batch = &batch0;
+    params1.pfss_batch = &batch1;
+    params0.defer_trunc_finalize = true;
+    params1.defer_trunc_finalize = true;
+    params0.require_truncation = true;
+    params1.require_truncation = true;
+  }
 
   std::vector<uint64_t> Y0(B * M * N), Y1(B * M * N);
   std::thread th1([&] {
-    matmul_beaver(params,
+    matmul_beaver(params1,
                   1,
                   c1,
                   view3(X1.data(), B, M, K),
@@ -164,7 +225,7 @@ static void test_matmul_beaver_case(size_t B,
                   view3(Y1.data(), B, M, N),
                   tr1);
   });
-  matmul_beaver(params,
+  matmul_beaver(params0,
                 0,
                 c0,
                 view3(X0.data(), B, M, K),
@@ -173,21 +234,34 @@ static void test_matmul_beaver_case(size_t B,
                 tr0);
   th1.join();
 
+  if (use_truncation) {
+    runtime::ProtoChanFromNet pch0(c0), pch1(c1);
+    std::thread flush1([&]{ batch1.flush_and_finalize(1, trunc_backend, pch1); });
+    batch0.flush_and_finalize(0, trunc_backend, pch0);
+    flush1.join();
+  }
+
   const int64_t tol = 1;
   int64_t max_diff = 0;
+  int64_t worst = 0;
   for (size_t i = 0; i < ref.size(); ++i) {
     int64_t got = to_signed(Y0[i]) + to_signed(Y1[i]);
     int64_t diff = std::llabs(got - ref[i]);
     if (diff > max_diff) max_diff = diff;
-    assert(diff <= tol);
+    if (diff > worst) worst = diff;
   }
   std::cout << "beaver max diff " << max_diff << "\n";
+  if (worst > tol) {
+    std::cerr << "worst diff " << worst << " exceeds tol " << tol << "\n";
+  }
+  assert(worst <= tol);
 }
 
 int main() {
   test_matmul_public_basic();
   test_matmul_beaver_case(/*B=*/1, /*M=*/2, /*K=*/3, /*N=*/4, /*w_transposed=*/false, /*frac_bits=*/8, /*seed=*/7);
   test_matmul_beaver_case(/*B=*/2, /*M=*/2, /*K=*/2, /*N=*/3, /*w_transposed=*/true, /*frac_bits=*/6, /*seed=*/9);
+  test_matmul_beaver_case(/*B=*/1, /*M=*/2, /*K=*/3, /*N=*/4, /*w_transposed=*/false, /*frac_bits=*/8, /*seed=*/13, /*use_truncation=*/true);
   std::cout << "Matmul public/private tests passed\n";
   return 0;
 }

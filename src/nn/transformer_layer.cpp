@@ -74,7 +74,12 @@ void transformer_layer_forward(const TransformerConfig& cfg,
                                const TensorView<int64_t>& W1_public,
                                const TensorView<int64_t>& W2_public,
                                KVCache& cache,
-                               TensorView<uint64_t> Y_share) {
+                               TensorView<uint64_t> Y_share,
+                               LayerContext* ctx) {
+  runtime::PfssSuperBatch local_batch;
+  if (ctx && ctx->pfss_batch == nullptr) {
+    ctx->pfss_batch = &local_batch;
+  }
   size_t B = X_share.shape[0];
   size_t T = X_share.shape[1];
   size_t D = cfg.attn.D;
@@ -108,7 +113,8 @@ void transformer_layer_forward(const TransformerConfig& cfg,
                     Wqkv_public,
                     Wout_public,
                     cache,
-                    view3(attn_out.data(), B, T, D));
+                    view3(attn_out.data(), B, T, D),
+                    ctx);
 
   // Residual add
   for (size_t i = 0; i < attn_out.size(); ++i) {
@@ -130,13 +136,25 @@ void transformer_layer_forward(const TransformerConfig& cfg,
               view3(ln2.data(), B, T, D),
               W1_public,
               W2_public,
-              Y_share);
+              Y_share,
+              ctx);
 
   // Residual add
   for (size_t i = 0; i < Y_share.numel(); ++i) {
     Y_share.data[i] = to_ring(to_signed(Y_share.data[i]) + to_signed(attn_out[i]));
   }
+
+  if (ctx) {
+    // Provide a local PFSS batch surface if caller did not supply one.
+    runtime::PfssSuperBatch local_batch;
+    if (ctx->pfss_batch == nullptr) {
+      ctx->pfss_batch = &local_batch;
+    }
+    auto* backend = ctx->trunc_ctx ? &ctx->trunc_ctx->backend() : nullptr;
+    if (backend) {
+      finalize_layer(*ctx, party, ch, *backend);
+    }
+  }
 }
 
 }  // namespace nn
-

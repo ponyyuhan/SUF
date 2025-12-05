@@ -93,7 +93,7 @@ static std::vector<uint64_t> eval_poly_vec(const std::vector<uint64_t>& coeff_fl
   return out;
 }
 
-// Build a small SUF: intervals [0,100),(100,200),(200,2^64), r_out=1, l_out=1, degree=1, y = (piece_idx+1) + x
+// Build a small new: intervals [0,100),(100,200),(200,2^64), r_out=1, l_out=1, degree=1, y = (piece_idx+1) + x
 static SUF<uint64_t> make_sample_suf() {
   SUF<uint64_t> s;
   s.n_bits = 64;
