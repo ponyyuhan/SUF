@@ -65,18 +65,17 @@ inline std::vector<uint64_t> expand_to_x_coeffs(const gates::CoeffPack& pack, in
 }
 
 // Build a SUF for SiLU from an existing piecewise spline table. The resulting
-// SUF has a single arithmetic output (r_out=1) and no boolean outputs.
+// SUF emits per-interval polynomial coefficients (c0..c3) as additive shares,
+// with degree=0 so runtime hooks can perform Horner + truncation explicitly.
 inline SUF<uint64_t> build_silu_suf_from_piecewise(const gates::PiecewisePolySpec& spec) {
   SUF<uint64_t> F;
   F.n_bits = 64;
-  F.r_out = 1;
+  // Emit 4 coeff words (c0..c3) as separate outputs.
+  F.r_out = 4;
   F.l_out = 0;
 
-  int degree = 0;
-  for (const auto& iv : spec.intervals) {
-    degree = std::max(degree, static_cast<int>(iv.pack.coeffs.size()) - 1);
-  }
-  F.degree = degree;
+  // Coeff payload only; Horner happens in postproc hook.
+  F.degree = 0;
 
   std::vector<gates::PiecewiseInterval> intervals = spec.intervals;
   std::sort(intervals.begin(), intervals.end(),
@@ -92,18 +91,24 @@ inline SUF<uint64_t> build_silu_suf_from_piecewise(const gates::PiecewisePolySpe
   // Ensure coverage starts at 0; if not, prepend a zero poly interval.
   if (F.alpha.front() != 0) {
     suf::SufPiece<uint64_t> zero_piece;
-    suf::Poly<uint64_t> zero_poly;
-    zero_poly.coeffs.assign(static_cast<size_t>(degree + 1), 0);
-    zero_piece.polys.push_back(std::move(zero_poly));
+    for (int i = 0; i < F.r_out; ++i) {
+      suf::Poly<uint64_t> zero_poly;
+      zero_poly.coeffs.assign(1, 0);
+      zero_piece.polys.push_back(std::move(zero_poly));
+    }
     F.pieces.push_back(std::move(zero_piece));
     F.alpha.insert(F.alpha.begin(), 0ull);
   }
 
   for (const auto& iv : intervals) {
     suf::SufPiece<uint64_t> piece;
-    suf::Poly<uint64_t> poly;
-    poly.coeffs = expand_to_x_coeffs(iv.pack, degree);
-    piece.polys.push_back(std::move(poly));
+    auto coeffs = expand_to_x_coeffs(iv.pack, 3);  // up to cubic
+    coeffs.resize(static_cast<size_t>(F.r_out), 0);
+    for (int i = 0; i < F.r_out; ++i) {
+      suf::Poly<uint64_t> poly;
+      poly.coeffs = {coeffs[static_cast<size_t>(i)]};  // degree 0 payload
+      piece.polys.push_back(std::move(poly));
+    }
     F.pieces.push_back(std::move(piece));
     F.alpha.push_back(iv.end);
   }

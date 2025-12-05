@@ -1,9 +1,44 @@
 #pragma once
 
 #include <cstddef>
-#include <memory>
-#include <vector>
 #include <cstring>
+#include <memory>
+#include <type_traits>
+#include <vector>
+#if __has_include(<span>)
+  #include <span>
+#else
+  #if !defined(SUF_SPAN_FALLBACK_DEFINED)
+    #define SUF_SPAN_FALLBACK_DEFINED
+    namespace std {
+      template<typename T>
+      class span {
+       public:
+        span() : data_(nullptr), size_(0) {}
+        span(const T* ptr, std::size_t n) : data_(ptr), size_(n) {}
+        template <typename U, typename = std::enable_if_t<std::is_same_v<std::remove_const_t<T>, U>>>
+        span(const std::vector<U>& v) : data_(v.data()), size_(v.size()) {}
+        std::size_t size() const { return size_; }
+        const T* data() const { return data_; }
+        const T& operator[](std::size_t i) const { return data_[i]; }
+        span subspan(std::size_t off, std::size_t n) const {
+          if (off > size_) return span();
+          std::size_t len = (off + n > size_) ? (size_ - off) : n;
+          return span(data_ + off, len);
+        }
+        const T* begin() const { return data_; }
+        const T* end() const { return data_ + size_; }
+      private:
+        const T* data_;
+        std::size_t size_;
+      };
+      template <typename T>
+      const T* begin(span<T> s) { return s.data(); }
+      template <typename T>
+      const T* end(span<T> s) { return s.data() + s.size(); }
+    }
+  #endif
+#endif
 
 #include "compiler/truncation_lowering.hpp"
 #include "gates/composite_fss.hpp"
@@ -62,6 +97,16 @@ struct PfssResultView {
   size_t bool_words = 0;
   size_t r = 0;
   size_t ell = 0;
+
+  // Convenience: interpret arithmetic payload as SoA blocks. Caller ensures
+  // arith_words == rows * cols.
+  std::span<const uint64_t> soa_col(size_t col, size_t rows) const {
+    if (arith == nullptr) return {};
+    size_t off = col * rows;
+    if (off >= arith_words) return {};
+    size_t len = std::min(rows, arith_words - off);
+    return std::span<const uint64_t>(arith + off, len);
+  }
 };
 
 // Generic composite job so non-trunc gates can reuse the same batching surface.
@@ -76,18 +121,28 @@ struct PreparedCompositeJob {
 
 class PfssSuperBatch {
  public:
+  // Enqueue a composite job; no implicit finalize is performed. Caller should
+  // flush(), then read view() to consume outputs.
+  PfssHandle enqueue_composite(PreparedCompositeJob job);
+  // Legacy helper: enqueue truncation gate with postproc; kept for compatibility.
   PfssHandle enqueue_truncation(const compiler::TruncationLoweringResult& bundle,
                                 const gates::CompositePartyKey& key,
                                 gates::PostProcHook& hook,
                                 std::vector<uint64_t> hatx_public,
                                 nn::TensorView<uint64_t> out);
 
-  PfssHandle enqueue_composite(PreparedCompositeJob job);
-
   bool empty() const { return jobs_.empty(); }
+  bool has_pending() const { return !jobs_.empty() && !flushed_; }
+  // Ready check for callers using multi-wave task scheduling.
+  bool ready(const PfssHandle& h) const;
 
-  // Evaluate all queued composite jobs, store PFSS outputs for later viewing,
-  // and run any attached postproc hooks to populate destination views.
+  // Evaluate all queued composite jobs and store PFSS outputs.
+  void flush(int party, proto::PfssBackendBatch& backend, proto::IChannel& ch);
+
+  // Legacy finalize that applies hooks and writes masked outputs.
+  void finalize(int party, proto::IChannel& ch);
+
+  // Convenience wrapper that performs flush() followed by finalize().
   void flush_and_finalize(int party, proto::PfssBackendBatch& backend, proto::IChannel& ch);
 
   // Drop all pending jobs and stored results.
@@ -111,10 +166,17 @@ class PfssSuperBatch {
     std::vector<uint64_t> arith;  // postproc + unmask
     std::vector<uint64_t> bools;  // raw PFSS bool slice for this job
   };
+  struct JobSlice {
+    size_t group_result = static_cast<size_t>(-1);
+    size_t start = 0;
+    size_t len = 0;
+  };
 
   std::vector<PreparedCompositeJob> jobs_;
   std::vector<GroupResult> group_results_;
   std::vector<CompletedJob> completed_;
+  std::vector<JobSlice> slices_;
+  bool flushed_ = false;
 };
 
 // Convenience: run a truncation bundle immediately on a flat vector of shares.

@@ -19,6 +19,7 @@ struct AttentionConfig {
   size_t Dh = 0;
   size_t S_max = 0;
   int frac_bits = 16;
+  bool legacy_softmax = false;  // allow cleartext softmax when true; otherwise expect composite path
 };
 
 void attention_forward(const AttentionConfig& cfg,

@@ -173,7 +173,9 @@ add_library(nn_ops STATIC
   src/nn/attention_block.cpp
   src/nn/mlp_block.cpp
   src/nn/transformer_layer.cpp
+  src/gates/postproc_hooks.cpp
   src/runtime/pfss_superbatch.cpp
+  src/runtime/open_collector.cpp
   src/runtime/phase_executor.cpp)
 target_include_directories(nn_ops PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(nn_ops PUBLIC suf_fss compiler_passes ${MYL7_LINK_LIBS})

@@ -3,9 +3,27 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include <cstring>
+#include <memory>
+#include <stdexcept>
 #include "proto/beaver_mul64.hpp"
 #include "proto/channel.hpp"
 #include "compiler/compiled_suf_gate.hpp"
+#include "proto/bit_ring_ops.hpp"
+
+namespace compiler { struct TruncationLoweringResult; }
+
+namespace runtime {
+class PfssSuperBatch;
+}
+
+namespace proto {
+struct PfssBackendBatch;
+}
+
+namespace compiler {
+struct TruncationLoweringResult;
+}
 
 namespace gates {
 
@@ -31,15 +49,18 @@ struct NoopPostProc final : public PostProcHook {
                  proto::IChannel&,
                  proto::BeaverMul64&,
                  const uint64_t*,
-                 const uint64_t*,
-                 size_t,
+                 const uint64_t* arith_share_in,
+                 size_t arith_stride,
                  const uint64_t*,
                  size_t,
                  size_t N,
                  uint64_t* haty_share_out) const override {
-    // Pass through; caller should have filled haty_share_out already.
-    (void)N;
-    (void)haty_share_out;
+    // Pass-through: copy arithmetic inputs to outputs.
+    for (size_t i = 0; i < N; i++) {
+      const uint64_t* row = arith_share_in + i * arith_stride;
+      uint64_t* dst = haty_share_out + i * arith_stride;
+      std::memcpy(dst, row, arith_stride * sizeof(uint64_t));
+    }
   }
 };
 
@@ -269,5 +290,40 @@ struct FaithfulArsPostProc : public PostProcHook {
 
 // GapARS fast-path hook: currently same as faithful ARS.
 using GapArsPostProc = FaithfulArsPostProc;
+
+// Horner eval for cubic polynomial using public x̂ and secret-shared coeffs.
+// Intended for SiLU/nExp payloads where PFSS returns coeffs (c0..c3) and
+// runtime handles the Q32→Q16 rescale explicitly (currently via local shift).
+struct HornerCubicHook : public PostProcHook {
+  int frac_bits = 0;
+  uint64_t r_in_share = 0;  // to recover x share from public x̂
+  proto::PfssBackendBatch* backend = nullptr;
+  mutable compiler::TruncationLoweringResult* trunc_bundle = nullptr;
+  int trunc_frac_bits = 0;
+  mutable std::mt19937_64 rng{0};
+
+  HornerCubicHook() = default;
+  HornerCubicHook(int fb, uint64_t r_in) : frac_bits(fb), r_in_share(r_in), trunc_frac_bits(fb) {}
+  ~HornerCubicHook();
+
+  void configure(const compiler::PortLayout& layout) override {
+    (void)layout;
+    // arith ports are positional payload coeffs; nothing to configure.
+  }
+
+  void run_batch(int party,
+                 proto::IChannel&,
+                 proto::BeaverMul64& mul,
+                 const uint64_t* hatx_public,
+                 const uint64_t* arith_share_in,
+                 size_t arith_stride,
+                 const uint64_t*,
+                 size_t,
+                 size_t N,
+                 uint64_t* haty_share_out) const override;
+
+ private:
+  const compiler::TruncationLoweringResult& ensure_trunc_bundle() const;
+};
 
 }  // namespace gates

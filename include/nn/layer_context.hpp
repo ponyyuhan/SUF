@@ -9,6 +9,7 @@
 #include "compiler/truncation_pass_runner.hpp"
 #include "nn/tensor_view.hpp"
 #include "runtime/pfss_superbatch.hpp"
+#include "runtime/open_collector.hpp"
 
 namespace nn {
 
@@ -18,6 +19,7 @@ struct LayerContext {
   compiler::LayerGraph graph;
   compiler::TruncationPassContext* trunc_ctx = nullptr;  // owned externally
   runtime::PfssSuperBatch* pfss_batch = nullptr;         // optional runtime batching surface
+  runtime::OpenCollector* open_collector = nullptr;      // optional batched opens surface
   int frac_bits = 16;
   bool enable_hoist = false;  // enable conservative rescale hoisting when finalizing
   std::optional<compiler::TruncationPassResult> last_trunc;
@@ -74,6 +76,8 @@ inline SecretTensor record_matmul(LayerContext* ctx,
     attrs.params->pfss_batch = ctx->pfss_batch;
     attrs.params->defer_trunc_finalize = true;  // allow batching; caller flushes
     attrs.params->require_truncation = true;
+    attrs.params->open_collector = ctx->open_collector;
+    attrs.params->defer_open_flush = true;
   }
   attrs.x_range = x.range;
   size_t op_idx = ctx->graph.current_op_index();
@@ -95,7 +99,10 @@ inline SecretTensor record_rescale(LayerContext* ctx,
   t.range = out_range;
   t.ctx = ctx;
   if (!ctx || !input.valid()) return t;
-  t.tid = ctx->graph.add_rescale(input.tid, attrs, out_scale, out_range);
+  compiler::RescaleAttrs attrs_copy = attrs;
+  auto kind = compiler::select_trunc_kind(input.range, attrs.to_frac);
+  attrs_copy.prefer_gapars = attrs_copy.prefer_gapars || (kind == compiler::GateKind::GapARS);
+  t.tid = ctx->graph.add_rescale(input.tid, attrs_copy, out_scale, out_range);
   return t;
 }
 

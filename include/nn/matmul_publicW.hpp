@@ -11,6 +11,7 @@ struct MatmulParams {
   bool w_transposed = false;
   const std::vector<int64_t>* bias = nullptr;
   bool local_rescale = true;  // legacy shift; set false when explicit Rescale nodes are used.
+  bool allow_legacy_shift = true;  // set false when LayerContext present; kept for debug path.
 };
 
 void matmul_publicW(const TensorView<uint64_t>& X_share,

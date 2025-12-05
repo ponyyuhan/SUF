@@ -77,13 +77,13 @@ void hadamard(const LinOpsContext& ctx,
               int frac_bits,
               bool apply_rescale) {
   size_t n = x.numel();
+  bool do_shift_inline = apply_rescale && (ctx.graph == nullptr);
   for (size_t i = 0; i < n; ++i) {
     auto t = triples[triple_offset + i];
     mpc::AddShare<core::Z2n<64>> xs{core::Z2n<64>(x.data[i])};
     mpc::AddShare<core::Z2n<64>> ys{core::Z2n<64>(y.data[i])};
     auto z = mpc::mul_share(ctx.party, *ctx.ch, xs, ys, t);
     int64_t res = static_cast<int64_t>(z.s.v);
-    bool do_shift_inline = apply_rescale && (ctx.graph == nullptr);
     if (do_shift_inline && frac_bits > 0) res >>= frac_bits;
     out.data[i] = to_ring(res);
   }

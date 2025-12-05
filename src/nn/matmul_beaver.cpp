@@ -15,12 +15,65 @@ namespace {
 
 inline int64_t to_signed(uint64_t v) { return static_cast<int64_t>(v); }
 inline uint64_t to_ring(int64_t v) { return static_cast<uint64_t>(v); }
-
 inline size_t b_offset(size_t k, size_t n, size_t K, size_t N, bool w_transposed) {
   return w_transposed ? (n * K + k) : (k * N + n);
 }
 
 }  // namespace
+
+static runtime::OpenHandle enqueue_open(runtime::OpenCollector* collector,
+                                        const std::vector<uint64_t>& diff,
+                                        std::vector<int64_t>& opened) {
+  if (!collector) {
+    opened.resize(diff.size());
+    return {};
+  }
+  return collector->enqueue(diff);
+}
+
+static void materialize_open(int party,
+                             net::Chan& ch,
+                             runtime::OpenCollector* collector,
+                             const runtime::OpenHandle& handle,
+                             const std::vector<uint64_t>& diff,
+                             std::vector<int64_t>& opened) {
+  size_t n = diff.size();
+  opened.resize(n);
+  if (collector) {
+    auto v = collector->view(handle);
+    if (v.size() != n) throw std::runtime_error("OpenCollector: length mismatch");
+    for (size_t i = 0; i < n; ++i) opened[i] = v[i];
+    return;
+  }
+  if (party == 0) {
+    for (auto v : diff) ch.send_u64(v);
+    for (size_t i = 0; i < n; ++i) opened[i] = to_signed(diff[i] + ch.recv_u64());
+  } else {
+    for (size_t i = 0; i < n; ++i) opened[i] = to_signed(diff[i] + ch.recv_u64());
+    for (auto v : diff) ch.send_u64(v);
+  }
+}
+
+static void open_public_hatx(int party,
+                             net::Chan& ch,
+                             const std::vector<uint64_t>& hatx_share,
+                             std::vector<uint64_t>& hatx_public) {
+  size_t n = hatx_share.size();
+  hatx_public.resize(n);
+  if (party == 0) {
+    for (auto v : hatx_share) ch.send_u64(v);
+    for (size_t i = 0; i < n; ++i) {
+      uint64_t other = ch.recv_u64();
+      hatx_public[i] = proto::add_mod(hatx_share[i], other);
+    }
+  } else {
+    for (size_t i = 0; i < n; ++i) {
+      uint64_t other = ch.recv_u64();
+      hatx_public[i] = proto::add_mod(hatx_share[i], other);
+    }
+    for (auto v : hatx_share) ch.send_u64(v);
+  }
+}
 
 PreparedMatmulBeaver matmul_beaver_prepare(const MatmulBeaverParams& params,
                                            int party,
@@ -245,60 +298,6 @@ MatmulBeaverTriple read_matmul_triple(proto::TapeReader& r) {
   t.B_share = r.read_u64_vec();
   t.C_share = r.read_u64_vec();
   return t;
-}
-
-static runtime::OpenHandle enqueue_open(runtime::OpenCollector* collector,
-                                        const std::vector<uint64_t>& diff,
-                                        std::vector<int64_t>& opened) {
-  if (!collector) {
-    opened.resize(diff.size());
-    return {};
-  }
-  return collector->enqueue(diff);
-}
-
-static void materialize_open(int party,
-                             net::Chan& ch,
-                             runtime::OpenCollector* collector,
-                             const runtime::OpenHandle& handle,
-                             const std::vector<uint64_t>& diff,
-                             std::vector<int64_t>& opened) {
-  size_t n = diff.size();
-  opened.resize(n);
-  if (collector) {
-    auto v = collector->view(handle);
-    if (v.len != n) throw std::runtime_error("OpenCollector: length mismatch");
-    for (size_t i = 0; i < n; ++i) opened[i] = v.data[i];
-    return;
-  }
-  if (party == 0) {
-    for (auto v : diff) ch.send_u64(v);
-    for (size_t i = 0; i < n; ++i) opened[i] = to_signed(diff[i] + ch.recv_u64());
-  } else {
-    for (size_t i = 0; i < n; ++i) opened[i] = to_signed(diff[i] + ch.recv_u64());
-    for (auto v : diff) ch.send_u64(v);
-  }
-}
-
-static void open_public_hatx(int party,
-                             net::Chan& ch,
-                             const std::vector<uint64_t>& hatx_share,
-                             std::vector<uint64_t>& hatx_public) {
-  size_t n = hatx_share.size();
-  hatx_public.resize(n);
-  if (party == 0) {
-    for (auto v : hatx_share) ch.send_u64(v);
-    for (size_t i = 0; i < n; ++i) {
-      uint64_t other = ch.recv_u64();
-      hatx_public[i] = proto::add_mod(hatx_share[i], other);
-    }
-  } else {
-    for (size_t i = 0; i < n; ++i) {
-      uint64_t other = ch.recv_u64();
-      hatx_public[i] = proto::add_mod(hatx_share[i], other);
-    }
-    for (auto v : hatx_share) ch.send_u64(v);
-  }
 }
 
 static void matmul_beaver2d(const MatmulBeaverParams& params,

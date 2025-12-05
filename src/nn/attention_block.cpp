@@ -3,12 +3,16 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <optional>
+#include <random>
 #include <vector>
 #include "gates/nexp_gate.hpp"
 #include "gates/reciprocal_gate.hpp"
+#include "gates/reciprocal_composite.hpp"
 #include "gates/nexp_composite.hpp"
 #include "gates/softmax_composite.hpp"
 #include "runtime/pfss_superbatch.hpp"
+#include "runtime/phase_tasks.hpp"
 
 namespace nn {
 
@@ -16,6 +20,73 @@ namespace {
 
 inline int64_t to_signed(uint64_t v) { return static_cast<int64_t>(v); }
 inline uint64_t to_ring(int64_t v) { return static_cast<uint64_t>(v); }
+
+// Lightweight reciprocal task: opens a scalar (or small vector) and produces
+// public reciprocal shares (party0 gets value, party1 gets 0). Uses PhaseExecutor
+// waves so the open can batch with other tasks.
+class ReciprocalTask : public runtime::detail::PhaseTask {
+ public:
+  ReciprocalTask(std::span<const uint64_t> in_share,
+                 std::span<uint64_t> out_share,
+                 const gates::PiecewisePolySpec* init_spec,
+                 int frac_bits,
+                 int nr_iters)
+      : in_(in_share), out_(out_share), spec_(init_spec), frac_bits_(frac_bits), iters_(nr_iters) {
+    if (in_.size() != out_.size()) throw std::runtime_error("ReciprocalTask: size mismatch");
+    if (!spec_) throw std::runtime_error("ReciprocalTask: init spec null");
+  }
+
+  bool done() const override { return st_ == St::Done; }
+
+  runtime::detail::Need step(runtime::PhaseResources& R) override {
+    switch (st_) {
+      case St::Open: {
+        if (!R.net_chan) throw std::runtime_error("ReciprocalTask: net channel missing");
+        if (R.opens) {
+          h_ = R.opens->enqueue(std::vector<uint64_t>(in_.begin(), in_.end()));
+          st_ = St::WaitOpen;
+          return runtime::detail::Need::Open;
+        }
+        opened_.assign(in_.begin(), in_.end());
+        st_ = St::Compute;
+        [[fallthrough]];
+      }
+      case St::WaitOpen: {
+        if (st_ == St::WaitOpen) {
+          if (!R.opens) throw std::runtime_error("ReciprocalTask: no OpenCollector");
+          if (!R.opens->ready(h_)) return runtime::detail::Need::Open;
+          auto v = R.opens->view(h_);
+          opened_.assign(v.begin(), v.end());
+          st_ = St::Compute;
+        }
+        [[fallthrough]];
+      }
+      case St::Compute: {
+        for (size_t i = 0; i < opened_.size(); ++i) {
+          int64_t x = to_signed(static_cast<uint64_t>(opened_[i]));
+          int64_t inv = gates::ref_reciprocal_fixed(*spec_, x, frac_bits_, iters_);
+          // public result: party0 takes inv, party1 takes 0.
+          out_[i] = (R.party == 0) ? to_ring(inv) : 0ull;
+        }
+        st_ = St::Done;
+        return runtime::detail::Need::None;
+      }
+      case St::Done:
+        return runtime::detail::Need::None;
+    }
+    return runtime::detail::Need::None;
+  }
+
+ private:
+  enum class St { Open, WaitOpen, Compute, Done } st_ = St::Open;
+  std::span<const uint64_t> in_;
+  std::span<uint64_t> out_;
+  const gates::PiecewisePolySpec* spec_ = nullptr;
+  int frac_bits_ = 0;
+  int iters_ = 1;
+  std::vector<int64_t> opened_;
+  runtime::OpenHandle h_{};
+};
 
 static inline void rescale_buffer(std::vector<uint64_t>& buf, int frac_bits) {
   if (frac_bits <= 0) return;
@@ -72,6 +143,8 @@ void attention_forward(const AttentionConfig& cfg,
   size_t Dh = cfg.Dh;
   int fb = cfg.frac_bits;
   runtime::OpenCollector* opens = pe ? &pe->open_collector() : nullptr;
+  bool use_legacy_softmax = cfg.legacy_softmax || (ctx == nullptr);
+  bool use_phase_softmax = !use_legacy_softmax && pe && ctx && ctx->trunc_ctx;
 
   std::vector<uint64_t> qkv(B * T * 3 * D, 0);
 
@@ -141,12 +214,13 @@ void attention_forward(const AttentionConfig& cfg,
   mp.frac_bits = fb;
   mp.w_transposed = false;
   mp.local_rescale = (ctx == nullptr);
+  mp.allow_legacy_shift = (ctx == nullptr);
 
   matmul_publicW(view2(const_cast<uint64_t*>(X_share.data), B * T, D),
                  Wqkv_public,
                  view2(qkv.data(), B * T, 3 * D),
                  mp);
-  if (!ctx) {
+  if (!ctx && !mp.local_rescale) {
     rescale_buffer(qkv, fb);
   }
 
@@ -159,6 +233,21 @@ void attention_forward(const AttentionConfig& cfg,
   auto nexp_spec = gates::make_nexp_spec(nexp_params);
   auto recip_spec =
       gates::make_recip_affine_init_spec(fb, static_cast<double>(std::max(cache.S_max, T + init_len)));
+  std::optional<gates::NexpTaskMaterial> nexp_mat;
+  runtime::CubicPolyBundle nexp_bundle{};
+  std::optional<gates::RecipTaskMaterial> recip_mat;
+  runtime::RecipTaskBundle recip_bundle{};
+  if (use_phase_softmax) {
+    std::mt19937_64 rng(123);
+    size_t triple_need = 3 * cache.S_max * B * H;
+    nexp_mat = gates::dealer_make_nexp_task_material(ctx->trunc_ctx->backend(),
+                                                     nexp_params,
+                                                     rng,
+                                                     triple_need);
+    nexp_bundle = gates::make_nexp_cubic_bundle(*nexp_mat, fb);
+    recip_mat = gates::dealer_make_recip_task_material(ctx->trunc_ctx->backend(), fb, /*nr_iters=*/1, rng);
+    recip_bundle = gates::make_recip_bundle(*recip_mat);
+  }
 
   int64_t inv_sqrt = static_cast<int64_t>(
       std::llround((1.0 / std::sqrt(static_cast<double>(Dh))) * std::ldexp(1.0, fb)));
@@ -183,6 +272,24 @@ void attention_forward(const AttentionConfig& cfg,
     kv_append_token(cache, view3(stepK.data(), B, H, Dh), view3(stepV.data(), B, H, Dh));
     size_t cur_len = cache.cur_len;
 
+    struct HeadState {
+      size_t b = 0;
+      size_t h = 0;
+      size_t cur_len = 0;
+      std::vector<int64_t> q_plain;
+      std::vector<int64_t> k_plain;
+      std::vector<int64_t> v_plain;
+      std::vector<int64_t> scores;
+      int64_t max_sc = 0;
+      std::vector<uint64_t> diff_share;
+      std::vector<uint64_t> exp_share;
+      std::vector<int64_t> expv;
+    };
+    std::vector<HeadState> heads;
+    if (use_phase_softmax) {
+      pe->begin_phase(runtime::PhaseExecutor::Phase::kSoftmax);
+    }
+
     for (size_t b = 0; b < B; ++b) {
       size_t q_base = (b * T + t) * 3 * D;
       const uint64_t* q_ptr = qkv.data() + q_base;
@@ -190,48 +297,149 @@ void attention_forward(const AttentionConfig& cfg,
         const uint64_t* k_head = kv_head_ptr(cache, b, h);
         const uint64_t* v_head = kv_head_ptr_v(cache, b, h);
 
-        std::vector<int64_t> q_plain, k_plain, v_plain;
-        open_to_plain(party, ch, q_ptr + h * Dh, Dh, q_plain);
-        open_to_plain(party, ch, k_head, cur_len * Dh, k_plain);
-        open_to_plain(party, ch, v_head, cur_len * Dh, v_plain);
+        HeadState st;
+        st.b = b;
+        st.h = h;
+        st.cur_len = cur_len;
+        open_to_plain(party, ch, q_ptr + h * Dh, Dh, st.q_plain);
+        open_to_plain(party, ch, k_head, cur_len * Dh, st.k_plain);
+        open_to_plain(party, ch, v_head, cur_len * Dh, st.v_plain);
 
-        std::vector<int64_t> scores(cur_len, 0);
+        st.scores.resize(cur_len, 0);
         for (size_t s = 0; s < cur_len; ++s) {
           __int128 acc = 0;
           for (size_t d = 0; d < Dh; ++d) {
-            acc += static_cast<__int128>(q_plain[d]) * static_cast<__int128>(k_plain[s * Dh + d]);
+            acc += static_cast<__int128>(st.q_plain[d]) * static_cast<__int128>(st.k_plain[s * Dh + d]);
           }
           acc >>= fb;
           acc = (acc * static_cast<__int128>(inv_sqrt)) >> fb;
-          scores[s] = static_cast<int64_t>(acc);
+          st.scores[s] = static_cast<int64_t>(acc);
         }
+        st.max_sc = st.scores.empty() ? 0 : *std::max_element(st.scores.begin(), st.scores.end());
 
-        int64_t max_sc = scores.empty() ? 0 : *std::max_element(scores.begin(), scores.end());
-        std::vector<int64_t> expv(cur_len, 0);
-        int64_t sum = 0;
-        for (size_t s = 0; s < cur_len; ++s) {
-          int64_t diff = max_sc - scores[s];
-          expv[s] = gates::ref_nexp_fixed(nexp_spec, diff);
-          sum += expv[s];
+        st.expv.resize(cur_len, 0);
+        if (use_phase_softmax) {
+          st.diff_share.resize(cur_len, 0);
+          st.exp_share.resize(cur_len, 0);
+          for (size_t i = 0; i < cur_len; ++i) {
+            int64_t diff = st.max_sc - st.scores[i];
+            st.diff_share[i] = (party == 0) ? to_ring(diff) : 0ull;
+          }
+          pe->add_task(std::make_unique<runtime::CubicPolyTask>(
+              nexp_bundle,
+              std::span<const uint64_t>(st.diff_share.data(), st.diff_share.size()),
+              std::span<uint64_t>(st.exp_share.data(), st.exp_share.size())));
         }
-        if (sum == 0) sum = 1;
-        int64_t inv = gates::ref_reciprocal_fixed(recip_spec, sum, fb, 1);
+        heads.push_back(std::move(st));
+      }
+    }
 
-        std::vector<int64_t> prob(cur_len, 0);
-        for (size_t s = 0; s < cur_len; ++s) {
-          __int128 p = static_cast<__int128>(expv[s]) * static_cast<__int128>(inv);
+    if (use_phase_softmax && !heads.empty()) {
+      runtime::PhaseResources R;
+      runtime::ProtoChanFromNet pch(ch);
+      R.party = party;
+      R.pfss_backend = &ctx->trunc_ctx->backend();
+      R.pfss_chan = &pch;
+      R.net_chan = &ch;
+      R.pfss = &pe->pfss_batch();
+      R.opens = &pe->open_collector();
+      pe->run(R);
+      pe->pfss_batch().clear();
+      pe->open_collector().clear();
+    }
+
+    // Second wave: sum and reciprocal on shares (scalar) with PFSS/Open batching.
+    std::vector<uint64_t> sum_shares;
+    std::vector<uint64_t> inv_shares;
+    if (use_phase_softmax && !heads.empty()) {
+      pe->begin_phase(runtime::PhaseExecutor::Phase::kSoftmax);
+      sum_shares.resize(heads.size(), 0);
+      inv_shares.resize(heads.size(), 0);
+      for (size_t idx = 0; idx < heads.size(); ++idx) {
+        uint64_t acc = 0;
+        for (auto v : heads[idx].exp_share) acc = proto::add_mod(acc, v);
+        sum_shares[idx] = acc;
+        pe->add_task(std::make_unique<runtime::RecipTask>(
+            recip_bundle,
+            std::span<const uint64_t>(&sum_shares[idx], 1),
+            std::span<uint64_t>(&inv_shares[idx], 1)));
+      }
+      runtime::PhaseResources R;
+      runtime::ProtoChanFromNet pch(ch);
+      R.party = party;
+      R.pfss_backend = &ctx->trunc_ctx->backend();
+      R.pfss_chan = &pch;
+      R.net_chan = &ch;
+      R.pfss = &pe->pfss_batch();
+      R.opens = &pe->open_collector();
+      pe->run(R);
+      pe->pfss_batch().clear();
+      pe->open_collector().clear();
+    }
+
+    for (size_t idx = 0; idx < heads.size(); ++idx) {
+      auto& st = heads[idx];
+      uint64_t sum_share = 0;
+      if (use_phase_softmax) {
+        sum_share = sum_shares[idx];
+      } else {
+        for (size_t s = 0; s < st.cur_len; ++s) {
+          int64_t diff = st.max_sc - st.scores[s];
+          st.expv[s] = gates::ref_nexp_fixed(nexp_spec, diff);
+          sum_share = proto::add_mod(sum_share, to_ring(st.expv[s]));
+        }
+        if (sum_share == 0) sum_share = 1;
+      }
+
+      uint64_t inv_share = 0;
+      if (use_phase_softmax) {
+        inv_share = inv_shares[idx];
+      } else {
+        int64_t inv = gates::ref_reciprocal_fixed(recip_spec, to_signed(sum_share), fb, 1);
+        inv_share = (party == 0) ? to_ring(inv) : 0ull;
+      }
+
+      std::vector<int64_t> prob(st.cur_len, 0);
+      if (use_phase_softmax) {
+        // secret (exp_share) * public (inv_share) => local mul then faithful trunc.
+        std::vector<uint64_t> prod(st.cur_len, 0);
+        for (size_t s = 0; s < st.cur_len; ++s) {
+          __int128 p = static_cast<__int128>(to_signed(st.exp_share[s])) * static_cast<__int128>(to_signed(inv_share));
+          prod[s] = to_ring(p);
+        }
+        // Truncate Q2f -> Qf via TruncTask (GapARS bundle).
+        runtime::PhaseResources R;
+        runtime::ProtoChanFromNet pch(ch);
+        R.party = party;
+        R.pfss_backend = &ctx->trunc_ctx->backend();
+        R.pfss_chan = &pch;
+        R.net_chan = &ch;
+        R.pfss = &pe->pfss_batch();
+        R.opens = &pe->open_collector();
+        pe->begin_phase(runtime::PhaseExecutor::Phase::kSoftmax);
+        pe->add_task(std::make_unique<runtime::TruncTask>(
+            recip_bundle.trunc_fb,
+            std::span<const uint64_t>(prod.data(), prod.size()),
+            std::span<uint64_t>(prod.data(), prod.size())));
+        pe->run(R);
+        pe->pfss_batch().clear();
+        pe->open_collector().clear();
+        for (size_t s = 0; s < st.cur_len; ++s) prob[s] = to_signed(prod[s]);
+      } else {
+        for (size_t s = 0; s < st.cur_len; ++s) {
+          __int128 p = static_cast<__int128>(st.expv[s]) * static_cast<__int128>(to_signed(inv_share));
           prob[s] = static_cast<int64_t>(p >> fb);
         }
+      }
 
-        for (size_t d = 0; d < Dh; ++d) {
-          __int128 acc = 0;
-          for (size_t s = 0; s < cur_len; ++s) {
-            acc += static_cast<__int128>(prob[s]) * static_cast<__int128>(v_plain[s * Dh + d]);
-          }
-          int64_t ctx_val = static_cast<int64_t>(acc >> fb);
-          size_t ctx_idx = ((b * T + t) * H + h) * Dh + d;
-          ctx_shares[ctx_idx] = to_ring((party == 0) ? ctx_val : 0);
+      for (size_t d = 0; d < Dh; ++d) {
+        __int128 acc = 0;
+        for (size_t s = 0; s < st.cur_len; ++s) {
+          acc += static_cast<__int128>(prob[s]) * static_cast<__int128>(st.v_plain[s * Dh + d]);
         }
+        int64_t ctx_val = static_cast<int64_t>(acc >> fb);
+        size_t ctx_idx = ((st.b * T + t) * H + st.h) * Dh + d;
+        ctx_shares[ctx_idx] = to_ring((party == 0) ? ctx_val : 0);
       }
     }
   }
@@ -253,7 +461,7 @@ void attention_forward(const AttentionConfig& cfg,
                  Wout_public,
                  Y_share,
                  mp);
-  rescale_view(Y_share, fb);
+  if (!mp.local_rescale) rescale_view(Y_share, fb);
 }
 
 }  // namespace nn

@@ -35,6 +35,9 @@ void matmul_publicW(const TensorView<uint64_t>& X_share,
                     const TensorView<int64_t>& W_public,
                     TensorView<uint64_t> Y_share,
                     const MatmulParams& params) {
+  if (!params.allow_legacy_shift && params.local_rescale) {
+    throw std::runtime_error("matmul_publicW: legacy local_rescale not allowed");
+  }
   if (X_share.dims == 2) {
     size_t M = X_share.shape[0];
     size_t K = X_share.shape[1];

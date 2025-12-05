@@ -84,6 +84,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   runtime::PhaseExecutor local_pe;
   if (pe == nullptr) pe = &local_pe;
   proto::PfssBackendBatch* backend = (ctx && ctx->trunc_ctx) ? &ctx->trunc_ctx->backend() : nullptr;
+  if (ctx) ctx->open_collector = &pe->open_collector();
   runtime::OpenCollector* opens = (pe) ? &pe->open_collector() : nullptr;
   size_t B = X_share.shape[0];
   size_t T = X_share.shape[1];
@@ -111,7 +112,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   }
   if (backend) {
     runtime::ProtoChanFromNet pch(ch);
-    pe->flush_phase(party, *backend, pch);
+    pe->flush_phase(party, *backend, pch, ch);
   }
 
   // Attention
@@ -129,7 +130,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
                     pe);
   if (backend) {
     runtime::ProtoChanFromNet pch(ch);
-    pe->flush_phase(party, *backend, pch);
+    pe->flush_phase(party, *backend, pch, ch);
   }
 
   // Residual add
@@ -160,7 +161,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
               pe);
   if (backend) {
     runtime::ProtoChanFromNet pch(ch);
-    pe->flush_phase(party, *backend, pch);
+    pe->flush_phase(party, *backend, pch, ch);
   }
 
   // Residual add

@@ -5,22 +5,39 @@
 #include <functional>
 #include <random>
 #include <stdexcept>
+#include <type_traits>
+#include <cstddef>
 #if !defined(SUF_SPAN_FALLBACK_DEFINED)
   #define SUF_SPAN_FALLBACK_DEFINED
   namespace std {
     template<typename T>
     class span {
      public:
+      span() : data_(nullptr), size_(0) {}
       span(const T* ptr, std::size_t n) : data_(ptr), size_(n) {}
-      span(const std::vector<T>& v) : data_(v.data()), size_(v.size()) {}
+      template <typename U, typename = std::enable_if_t<std::is_same_v<std::remove_const_t<T>, U>>>
+      span(const std::vector<U>& v) : data_(v.data()), size_(v.size()) {}
       span(std::initializer_list<T> il) : data_(il.begin()), size_(il.size()) {}
       std::size_t size() const { return size_; }
       const T* data() const { return data_; }
+      T* data() { return const_cast<T*>(data_); }
       const T& operator[](std::size_t i) const { return data_[i]; }
+      T& operator[](std::size_t i) { return const_cast<T&>(data_[i]); }
+      span subspan(std::size_t off, std::size_t n) const {
+        if (off > size_) return span();
+        std::size_t len = (off + n > size_) ? (size_ - off) : n;
+        return span(data_ + off, len);
+      }
+      const T* begin() const { return data_; }
+      const T* end() const { return data_ + size_; }
      private:
       const T* data_;
       std::size_t size_;
     };
+    template <typename T>
+    const T* begin(span<T> s) { return s.data(); }
+    template <typename T>
+    const T* end(span<T> s) { return s.data() + s.size(); }
   }
 #endif
 #include <vector>

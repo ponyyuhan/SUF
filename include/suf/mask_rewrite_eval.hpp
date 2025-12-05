@@ -24,8 +24,8 @@ inline bool eval_rot_low_recipe(const RotLowRecipe& r, uint64_t hatx) {
 }
 
 inline bool eval_msb_add_recipe(const RotCmp64Recipe& r, uint64_t hatx) {
-  // Recipe encodes membership in length-2^63 interval; MSB(x+c)=1-h
-  return !eval_rot_recipe(r, hatx);
+  // Recipe encodes membership in length-2^63 interval where MSB(x+c)==1.
+  return eval_rot_recipe(r, hatx);
 }
 
 }  // namespace suf
