@@ -13,6 +13,7 @@
 #include "mpc/net.hpp"
 #include "nn/tensor_view.hpp"
 #include "proto/tape.hpp"
+#include "runtime/open_collector.hpp"
 
 namespace runtime {
 class PfssSuperBatch;
@@ -44,7 +45,39 @@ struct MatmulBeaverParams {
   // evaluating immediately so callers can flush across a phase.
   runtime::PfssSuperBatch* pfss_batch = nullptr;
   bool defer_trunc_finalize = false;  // true: leave results enqueued for caller to flush.
+  // Optional open collector for batched Beaver openings.
+  runtime::OpenCollector* open_collector = nullptr;
+  bool defer_open_flush = false;  // when true, caller flushes collector/opens per phase.
 };
+
+// Prepared matmul object for two-phase execution (open enqueue -> finalize).
+struct PreparedMatmulBeaver {
+  MatmulBeaverParams params;
+  MatmulBeaverTriple triple;
+  TensorView<uint64_t> X_share;
+  TensorView<uint64_t> W_share;
+  TensorView<uint64_t> Y_share;
+  size_t M = 0, K = 0, N = 0;
+  std::vector<uint64_t> diff_X;
+  std::vector<uint64_t> diff_W;
+  runtime::OpenHandle hE;
+  runtime::OpenHandle hF;
+  std::vector<int64_t> opened_E;
+  std::vector<int64_t> opened_F;
+  bool opened_immediate = false;
+};
+
+PreparedMatmulBeaver matmul_beaver_prepare(const MatmulBeaverParams& params,
+                                           int party,
+                                           net::Chan& ch,
+                                           const TensorView<uint64_t>& X_share,
+                                           const TensorView<uint64_t>& W_share,
+                                           TensorView<uint64_t> Y_share,
+                                           proto::TapeReader& triple_reader);
+
+void matmul_beaver_finalize(PreparedMatmulBeaver& prep,
+                            int party,
+                            net::Chan& ch);
 
 std::pair<MatmulBeaverTriple, MatmulBeaverTriple> dealer_gen_matmul_triple(
     size_t M,

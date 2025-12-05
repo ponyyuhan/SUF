@@ -5,6 +5,8 @@
 #include "nn/tensor_view.hpp"
 #include "gates/silu_spline_gate.hpp"
 #include "nn/layer_context.hpp"
+#include "runtime/phase_executor.hpp"
+#include "mpc/net.hpp"
 
 namespace nn {
 
@@ -19,6 +21,9 @@ void mlp_forward(const MLPConfig& cfg,
                  const TensorView<int64_t>& W1_public,
                  const TensorView<int64_t>& W2_public,
                  TensorView<uint64_t> Y_share,
-                 LayerContext* ctx = nullptr);
+                 int party,
+                 net::Chan& ch,
+                 LayerContext* ctx = nullptr,
+                 runtime::PhaseExecutor* pe = nullptr);
 
 }  // namespace nn

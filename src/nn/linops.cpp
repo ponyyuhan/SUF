@@ -45,7 +45,7 @@ void mul_const(const TensorView<uint64_t>& x,
     if (do_shift_inline && frac_bits > 0) res >>= frac_bits;
     out.data[i] = to_ring(res);
   }
-  if (use_ctx) rescale_view(out, frac_bits);
+  if (use_ctx && do_shift_inline) rescale_view(out, frac_bits);
 }
 
 void axpy(const TensorView<uint64_t>& x,
@@ -65,7 +65,7 @@ void axpy(const TensorView<uint64_t>& x,
     res += to_signed(x.data[i]);
     out.data[i] = to_ring(res);
   }
-  if (use_ctx) rescale_view(out, frac_bits);
+  if (use_ctx && do_shift_inline) rescale_view(out, frac_bits);
 }
 
 void hadamard(const LinOpsContext& ctx,
@@ -87,7 +87,7 @@ void hadamard(const LinOpsContext& ctx,
     if (do_shift_inline && frac_bits > 0) res >>= frac_bits;
     out.data[i] = to_ring(res);
   }
-  if (ctx.graph) rescale_view(out, frac_bits);
+  if (ctx.graph && do_shift_inline) rescale_view(out, frac_bits);
 }
 
 void sum_lastdim(const LinOpsContext& ctx,

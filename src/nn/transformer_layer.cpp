@@ -75,11 +75,16 @@ void transformer_layer_forward(const TransformerConfig& cfg,
                                const TensorView<int64_t>& W2_public,
                                KVCache& cache,
                                TensorView<uint64_t> Y_share,
-                               LayerContext* ctx) {
+                               LayerContext* ctx,
+                               runtime::PhaseExecutor* pe) {
   runtime::PfssSuperBatch local_batch;
   if (ctx && ctx->pfss_batch == nullptr) {
-    ctx->pfss_batch = &local_batch;
+    ctx->pfss_batch = &pe->pfss_batch();
   }
+  runtime::PhaseExecutor local_pe;
+  if (pe == nullptr) pe = &local_pe;
+  proto::PfssBackendBatch* backend = (ctx && ctx->trunc_ctx) ? &ctx->trunc_ctx->backend() : nullptr;
+  runtime::OpenCollector* opens = (pe) ? &pe->open_collector() : nullptr;
   size_t B = X_share.shape[0];
   size_t T = X_share.shape[1];
   size_t D = cfg.attn.D;
@@ -95,6 +100,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   int rsqrt_iters = 1;
 
   // LayerNorm 1
+  pe->begin_phase(runtime::PhaseExecutor::Phase::kLN1);
   std::vector<uint64_t> ln1(B * T * D, 0);
   for (size_t b = 0; b < B; ++b) {
     for (size_t t = 0; t < T; ++t) {
@@ -103,8 +109,13 @@ void transformer_layer_forward(const TransformerConfig& cfg,
       layernorm_forward(party, ch, x_ptr, D, cfg.frac_bits, rsqrt_spec, rsqrt_iters, out_ptr);
     }
   }
+  if (backend) {
+    runtime::ProtoChanFromNet pch(ch);
+    pe->flush_phase(party, *backend, pch);
+  }
 
   // Attention
+  pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
   std::vector<uint64_t> attn_out(B * T * D, 0);
   attention_forward(cfg.attn,
                     party,
@@ -114,14 +125,20 @@ void transformer_layer_forward(const TransformerConfig& cfg,
                     Wout_public,
                     cache,
                     view3(attn_out.data(), B, T, D),
-                    ctx);
+                    ctx,
+                    pe);
+  if (backend) {
+    runtime::ProtoChanFromNet pch(ch);
+    pe->flush_phase(party, *backend, pch);
+  }
 
   // Residual add
   for (size_t i = 0; i < attn_out.size(); ++i) {
     attn_out[i] = to_ring(to_signed(attn_out[i]) + to_signed(X_share.data[i]));
   }
 
-  // LayerNorm 2
+  // LayerNorm 2 + MLP
+  pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
   std::vector<uint64_t> ln2(attn_out.size(), 0);
   for (size_t b = 0; b < B; ++b) {
     for (size_t t = 0; t < T; ++t) {
@@ -137,23 +154,22 @@ void transformer_layer_forward(const TransformerConfig& cfg,
               W1_public,
               W2_public,
               Y_share,
-              ctx);
+              party,
+              ch,
+              ctx,
+              pe);
+  if (backend) {
+    runtime::ProtoChanFromNet pch(ch);
+    pe->flush_phase(party, *backend, pch);
+  }
 
   // Residual add
   for (size_t i = 0; i < Y_share.numel(); ++i) {
     Y_share.data[i] = to_ring(to_signed(Y_share.data[i]) + to_signed(attn_out[i]));
   }
 
-  if (ctx) {
-    // Provide a local PFSS batch surface if caller did not supply one.
-    runtime::PfssSuperBatch local_batch;
-    if (ctx->pfss_batch == nullptr) {
-      ctx->pfss_batch = &local_batch;
-    }
-    auto* backend = ctx->trunc_ctx ? &ctx->trunc_ctx->backend() : nullptr;
-    if (backend) {
-      finalize_layer(*ctx, party, ch, *backend);
-    }
+  if (ctx && backend) {
+    finalize_layer(*ctx, party, ch, *backend);
   }
 }
 

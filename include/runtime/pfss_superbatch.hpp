@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <memory>
 #include <vector>
 #include <cstring>
@@ -47,44 +48,73 @@ class ProtoChanFromNet final : public proto::IChannel {
   net::Chan& ch_;
 };
 
-// Handle to batched truncation work; intended to be extended to support
-// predicate/coeff coalescing. Generic composite job so non-trunc gates can
-// reuse the same batching surface.
+// Handle returned to callers so they can look up PFSS outputs after a flush.
+struct PfssHandle {
+  size_t token = static_cast<size_t>(-1);
+};
+
+// View into stored PFSS results (arith + bool shares). Pointers remain valid
+// until clear() is called.
+struct PfssResultView {
+  const uint64_t* arith = nullptr;
+  size_t arith_words = 0;
+  const uint64_t* bools = nullptr;
+  size_t bool_words = 0;
+  size_t r = 0;
+  size_t ell = 0;
+};
+
+// Generic composite job so non-trunc gates can reuse the same batching surface.
 struct PreparedCompositeJob {
   const suf::SUF<uint64_t>* suf = nullptr;
   const gates::CompositePartyKey* key = nullptr;
   gates::PostProcHook* hook = nullptr;
   std::vector<uint64_t> hatx_public;
   nn::TensorView<uint64_t> out;  // destination for masked output share
+  size_t token = static_cast<size_t>(-1);  // filled by PfssSuperBatch
 };
 
 class PfssSuperBatch {
  public:
-  void enqueue_truncation(const compiler::TruncationLoweringResult& bundle,
-                          const gates::CompositePartyKey& key,
-                          gates::PostProcHook& hook,
-                          std::vector<uint64_t> hatx_public,
-                          nn::TensorView<uint64_t> out) {
-    PreparedCompositeJob job;
-    job.suf = &bundle.suf;
-    job.key = &key;
-    job.hook = &hook;
-    job.hatx_public = std::move(hatx_public);
-    job.out = out;
-    jobs_.push_back(std::move(job));
-  }
+  PfssHandle enqueue_truncation(const compiler::TruncationLoweringResult& bundle,
+                                const gates::CompositePartyKey& key,
+                                gates::PostProcHook& hook,
+                                std::vector<uint64_t> hatx_public,
+                                nn::TensorView<uint64_t> out);
 
-  void enqueue_composite(PreparedCompositeJob job) { jobs_.push_back(std::move(job)); }
+  PfssHandle enqueue_composite(PreparedCompositeJob job);
 
   bool empty() const { return jobs_.empty(); }
 
-  // Evaluate all queued truncation jobs and write their outputs.
+  // Evaluate all queued composite jobs, store PFSS outputs for later viewing,
+  // and run any attached postproc hooks to populate destination views.
   void flush_and_finalize(int party, proto::PfssBackendBatch& backend, proto::IChannel& ch);
 
-  void clear() { jobs_.clear(); }
+  // Drop all pending jobs and stored results.
+  void clear();
+
+  // Access raw PFSS outputs (arith/bool shares) for a completed handle.
+  PfssResultView view(const PfssHandle& h) const;
 
  private:
+  struct GroupResult {
+    const suf::SUF<uint64_t>* suf = nullptr;
+    const gates::CompositePartyKey* key = nullptr;
+    size_t r = 0;
+    size_t ell = 0;
+    std::vector<uint64_t> arith;  // [N * r]
+    std::vector<uint64_t> bools;  // [N * ell]
+  };
+  struct CompletedJob {
+    size_t r = 0;
+    size_t ell = 0;
+    std::vector<uint64_t> arith;  // postproc + unmask
+    std::vector<uint64_t> bools;  // raw PFSS bool slice for this job
+  };
+
   std::vector<PreparedCompositeJob> jobs_;
+  std::vector<GroupResult> group_results_;
+  std::vector<CompletedJob> completed_;
 };
 
 // Convenience: run a truncation bundle immediately on a flat vector of shares.

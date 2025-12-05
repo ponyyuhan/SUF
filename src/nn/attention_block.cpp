@@ -6,6 +6,9 @@
 #include <vector>
 #include "gates/nexp_gate.hpp"
 #include "gates/reciprocal_gate.hpp"
+#include "gates/nexp_composite.hpp"
+#include "gates/softmax_composite.hpp"
+#include "runtime/pfss_superbatch.hpp"
 
 namespace nn {
 
@@ -60,13 +63,15 @@ void attention_forward(const AttentionConfig& cfg,
                        const TensorView<int64_t>& Wout_public,
                        KVCache& cache,
                        TensorView<uint64_t> Y_share,
-                       LayerContext* ctx) {
+                       LayerContext* ctx,
+                       runtime::PhaseExecutor* pe) {
   size_t B = X_share.shape[0];
   size_t T = X_share.shape[1];
   size_t D = cfg.D;
   size_t H = cfg.H;
   size_t Dh = cfg.Dh;
   int fb = cfg.frac_bits;
+  runtime::OpenCollector* opens = pe ? &pe->open_collector() : nullptr;
 
   std::vector<uint64_t> qkv(B * T * 3 * D, 0);
 
@@ -141,7 +146,9 @@ void attention_forward(const AttentionConfig& cfg,
                  Wqkv_public,
                  view2(qkv.data(), B * T, 3 * D),
                  mp);
-  rescale_buffer(qkv, fb);
+  if (!ctx) {
+    rescale_buffer(qkv, fb);
+  }
 
   std::vector<uint64_t> ctx_shares(B * T * H * Dh, 0);
   size_t init_len = cache.cur_len;

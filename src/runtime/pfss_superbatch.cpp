@@ -1,20 +1,54 @@
 #include "runtime/pfss_superbatch.hpp"
 
 #include <stdexcept>
-#include <tuple>
 #include <unordered_map>
 
 namespace runtime {
 
+PfssHandle PfssSuperBatch::enqueue_truncation(const compiler::TruncationLoweringResult& bundle,
+                                              const gates::CompositePartyKey& key,
+                                              gates::PostProcHook& hook,
+                                              std::vector<uint64_t> hatx_public,
+                                              nn::TensorView<uint64_t> out) {
+  PreparedCompositeJob job;
+  job.suf = &bundle.suf;
+  job.key = &key;
+  job.hook = &hook;
+  job.hatx_public = std::move(hatx_public);
+  job.out = out;
+  job.token = completed_.size();
+  completed_.push_back(CompletedJob{});
+  jobs_.push_back(std::move(job));
+  return PfssHandle{job.token};
+}
+
+PfssHandle PfssSuperBatch::enqueue_composite(PreparedCompositeJob job) {
+  if (job.token == static_cast<size_t>(-1)) {
+    job.token = completed_.size();
+  }
+  if (completed_.size() <= job.token) {
+    completed_.resize(job.token + 1);
+  }
+  jobs_.push_back(std::move(job));
+  return PfssHandle{jobs_.back().token};
+}
+
 void PfssSuperBatch::flush_and_finalize(int party,
                                         proto::PfssBackendBatch& backend,
                                         proto::IChannel& ch) {
-  using Key = std::tuple<const suf::SUF<uint64_t>*, const gates::CompositePartyKey*, const gates::PostProcHook*>;
+  struct Key {
+    const suf::SUF<uint64_t>* suf;
+    const gates::CompositePartyKey* key;
+    size_t r;
+    size_t ell;
+    bool operator==(const Key& o) const {
+      return suf == o.suf && key == o.key && r == o.r && ell == o.ell;
+    }
+  };
   struct KeyHash {
     size_t operator()(const Key& k) const {
-      return std::hash<const void*>{}(std::get<0>(k)) ^
-             (std::hash<const void*>{}(std::get<1>(k)) << 1) ^
-             (std::hash<const void*>{}(std::get<2>(k)) << 2);
+      return std::hash<const void*>{}(k.suf) ^ (std::hash<const void*>{}(k.key) << 1) ^
+             (std::hash<size_t>{}(k.r) << 2) ^ (std::hash<size_t>{}(k.ell) << 3);
     }
   };
   struct Slice {
@@ -28,10 +62,12 @@ void PfssSuperBatch::flush_and_finalize(int party,
 
   for (size_t idx = 0; idx < jobs_.size(); ++idx) {
     auto& job = jobs_[idx];
-    if (!job.suf || !job.key || !job.hook) {
+    if (!job.suf || !job.key) {
       throw std::runtime_error("PfssSuperBatch: incomplete composite job");
     }
-    Key k{job.suf, job.key, job.hook};
+    size_t r = static_cast<size_t>(job.key->compiled.r);
+    size_t ell = static_cast<size_t>(job.key->compiled.ell);
+    Key k{job.suf, job.key, r, ell};
     size_t g;
     auto it = group_index.find(k);
     if (it == group_index.end()) {
@@ -47,31 +83,94 @@ void PfssSuperBatch::flush_and_finalize(int party,
     grouped_slices[g].push_back(Slice{idx, start, job.hatx_public.size()});
   }
 
+  group_results_.clear();
+  group_results_.reserve(group_index.size());
+
   for (auto& kv : group_index) {
     const auto& ktuple = kv.first;
     size_t g = kv.second;
-    const auto* suf = std::get<0>(ktuple);
-    const auto* key = std::get<1>(ktuple);
-    auto* hook = const_cast<gates::PostProcHook*>(std::get<2>(ktuple));
+    const auto* suf = ktuple.suf;
+    const auto* key = ktuple.key;
     gates::CompositeBatchInput in{grouped_hatx[g].data(), grouped_hatx[g].size()};
-    auto out = gates::composite_eval_batch_with_postproc(
-        party, backend, ch, *key, *suf, in, *hook);
-    size_t r = static_cast<size_t>(key->compiled.r);
-    uint64_t r_out_share = key->r_out_share.empty() ? 0ull : key->r_out_share[0];
+    auto out = gates::composite_eval_batch_backend(party, backend, ch, *key, *suf, in);
+    GroupResult& gr = group_results_.emplace_back();
+    gr.suf = suf;
+    gr.key = key;
+    gr.r = ktuple.r;
+    gr.ell = ktuple.ell;
+    gr.arith = std::move(out.haty_share);
+    gr.bools = std::move(out.bool_share);
+
+    size_t r = gr.r;
+    size_t ell = gr.ell;
     for (const auto& sl : grouped_slices[g]) {
-      auto& job = jobs_[sl.job_idx];
+      const auto& job = jobs_[sl.job_idx];
+      if (job.token >= completed_.size()) continue;
+      CompletedJob& cj = completed_[job.token];
+      cj.r = r;
+      cj.ell = ell;
+
+      // Slice out this job's portion of the batch outputs.
+      size_t arith_words = sl.len * r;
+      size_t bool_words = sl.len * ell;
+      const uint64_t* arith_base = gr.arith.data() + sl.start * r;
+      const uint64_t* bool_base = ell > 0 ? (gr.bools.data() + sl.start * ell) : nullptr;
+
+      std::vector<uint64_t> arith_slice(arith_base, arith_base + arith_words);
+      std::vector<uint64_t> bool_slice;
+      if (bool_base && bool_words > 0) {
+        bool_slice.assign(bool_base, bool_base + bool_words);
+      }
+
+      if (job.hook) {
+        proto::BeaverMul64 mul{party, ch, job.key->triples, 0};
+        job.hook->configure(job.key->compiled.layout);
+        std::vector<uint64_t> hooked(arith_words, 0);
+        job.hook->run_batch(party, ch, mul,
+                            job.hatx_public.data(),
+                            arith_slice.data(), r,
+                            bool_slice.data(), ell,
+                            sl.len,
+                            hooked.data());
+        arith_slice.swap(hooked);
+      }
+
+      // Remove output masks and write to destination view if provided.
+      cj.arith.resize(arith_slice.size());
       for (size_t i = 0; i < sl.len; ++i) {
-        size_t global_idx = sl.start + i;
         for (size_t rr = 0; rr < r; ++rr) {
-          size_t out_idx = global_idx * r + rr;
-          size_t dst = i * r + rr;
-          if (dst >= job.out.numel()) continue;
-          job.out.data[dst] = proto::sub_mod(out.haty_share[out_idx], r_out_share);
+          size_t idx = i * r + rr;
+          uint64_t rout = (rr < job.key->r_out_share.size()) ? job.key->r_out_share[rr] : 0ull;
+          uint64_t val = proto::sub_mod(arith_slice[idx], rout);
+          cj.arith[idx] = val;
+          if (idx < job.out.numel()) {
+            job.out.data[idx] = val;
+          }
         }
       }
+      cj.bools = std::move(bool_slice);
     }
   }
   jobs_.clear();
+}
+
+PfssResultView PfssSuperBatch::view(const PfssHandle& h) const {
+  if (h.token >= completed_.size()) return PfssResultView{};
+  const auto& cj = completed_[h.token];
+  PfssResultView v;
+  v.arith = cj.arith.data();
+  v.arith_words = cj.arith.size();
+  v.bools = cj.bools.data();
+  v.bool_words = cj.bools.size();
+  v.r = cj.r;
+  v.ell = cj.ell;
+  return v;
+}
+
+void PfssSuperBatch::clear() {
+  jobs_.clear();
+  group_results_.clear();
+  completed_.clear();
 }
 
 void run_truncation_now(int party,

@@ -22,6 +22,153 @@ inline size_t b_offset(size_t k, size_t n, size_t K, size_t N, bool w_transposed
 
 }  // namespace
 
+PreparedMatmulBeaver matmul_beaver_prepare(const MatmulBeaverParams& params,
+                                           int party,
+                                           net::Chan& ch,
+                                           const TensorView<uint64_t>& X_share,
+                                           const TensorView<uint64_t>& W_share,
+                                           TensorView<uint64_t> Y_share,
+                                           proto::TapeReader& triple_reader) {
+  PreparedMatmulBeaver prep;
+  prep.params = params;
+  prep.X_share = X_share;
+  prep.W_share = W_share;
+  prep.Y_share = Y_share;
+  if (X_share.dims != 2) {
+    throw std::runtime_error("matmul_beaver_prepare: only 2D supported in prepare path");
+  }
+  prep.M = X_share.shape[0];
+  prep.K = X_share.shape[1];
+  prep.N = params.w_transposed ? W_share.shape[0] : W_share.shape[1];
+  prep.triple = read_matmul_triple(triple_reader);
+  if (prep.triple.M != prep.M || prep.triple.K != prep.K || prep.triple.N != prep.N ||
+      prep.triple.w_transposed != params.w_transposed) {
+    throw std::runtime_error("matmul_beaver_prepare: triple shape mismatch");
+  }
+
+  prep.diff_X.resize(prep.M * prep.K);
+  prep.diff_W.resize(prep.K * prep.N);
+  for (size_t i = 0; i < prep.M * prep.K; ++i) {
+    prep.diff_X[i] = to_ring(to_signed(X_share.data[i]) - to_signed(prep.triple.A_share[i]));
+  }
+  for (size_t idx = 0; idx < prep.K * prep.N; ++idx) {
+    prep.diff_W[idx] = to_ring(to_signed(W_share.data[idx]) - to_signed(prep.triple.B_share[idx]));
+  }
+
+  prep.hE = enqueue_open(params.open_collector, prep.diff_X, prep.opened_E);
+  prep.hF = enqueue_open(params.open_collector, prep.diff_W, prep.opened_F);
+  if (!params.open_collector) {
+    materialize_open(party, ch, nullptr, prep.hE, prep.diff_X, prep.opened_E);
+    materialize_open(party, ch, nullptr, prep.hF, prep.diff_W, prep.opened_F);
+    prep.opened_immediate = true;
+  }
+  return prep;
+}
+
+void matmul_beaver_finalize(PreparedMatmulBeaver& prep,
+                            int party,
+                            net::Chan& ch) {
+  auto params = prep.params;  // copy for convenience
+  if (prep.X_share.dims != 2) {
+    throw std::runtime_error("matmul_beaver_finalize: only 2D supported");
+  }
+  if (params.open_collector && !prep.opened_immediate) {
+    materialize_open(party, ch, params.open_collector, prep.hE, prep.diff_X, prep.opened_E);
+    materialize_open(party, ch, params.open_collector, prep.hF, prep.diff_W, prep.opened_F);
+  }
+  const auto& E = prep.opened_E;
+  const auto& F = prep.opened_F;
+
+  size_t M = prep.M;
+  size_t K = prep.K;
+  size_t N = prep.N;
+
+  // Compute accumulator shares once.
+  size_t total = M * N;
+  std::vector<uint64_t> acc_share(total);
+  {
+    size_t idx = 0;
+    for (size_t m = 0; m < M; ++m) {
+      for (size_t n = 0; n < N; ++n) {
+        __int128 acc = static_cast<__int128>(to_signed(prep.triple.C_share[m * N + n]));
+        for (size_t k = 0; k < K; ++k) {
+          size_t bidx = b_offset(k, n, K, N, params.w_transposed);
+          acc += static_cast<__int128>(E[m * K + k]) *
+                 static_cast<__int128>(to_signed(prep.triple.B_share[bidx]));
+          acc += static_cast<__int128>(to_signed(prep.triple.A_share[m * K + k])) *
+                 static_cast<__int128>(F[bidx]);
+          if (party == 0) {
+            acc += static_cast<__int128>(E[m * K + k]) *
+                   static_cast<__int128>(F[bidx]);
+          }
+        }
+        acc_share[idx++] = to_ring(static_cast<int64_t>(acc));
+      }
+    }
+  }
+
+  bool trunc_requested = params.trunc_backend != nullptr;
+  const compiler::TruncationLoweringResult* bundle_ptr = params.trunc_bundle;
+  const compiler::MatmulTruncationPlan* plan_ptr = params.trunc_plan;
+  if (trunc_requested && !bundle_ptr && plan_ptr) {
+    bundle_ptr = &plan_ptr->bundle;
+  }
+
+  if (trunc_requested && !bundle_ptr) {
+    throw std::runtime_error("matmul_beaver_finalize: truncation backend set but no plan provided");
+  }
+
+  if (params.require_truncation && !trunc_requested) {
+    throw std::runtime_error("matmul_beaver_finalize: truncation required but no backend/plan provided");
+  }
+
+  if (!trunc_requested) {
+    for (size_t i = 0; i < total; ++i) {
+      prep.Y_share.data[i] = to_ring(static_cast<int64_t>(to_signed(acc_share[i]) >> params.frac_bits));
+    }
+    return;
+  }
+
+  if (plan_ptr && plan_ptr->batch != total) {
+    throw std::runtime_error("matmul_beaver_finalize: truncation plan batch mismatch");
+  }
+  if (!bundle_ptr) {
+    throw std::runtime_error("matmul_beaver_finalize: truncation bundle missing");
+  }
+  const auto& bundle = *bundle_ptr;
+  const auto& key = (party == 0) ? bundle.keys.k0 : bundle.keys.k1;
+  if (key.triples.size() < total) {
+    throw std::runtime_error("matmul_beaver_finalize: truncation triples exhausted");
+  }
+
+  // Build masked hatx shares and open them to both parties.
+  std::vector<uint64_t> hatx_share(total);
+  for (size_t i = 0; i < total; ++i) {
+    hatx_share[i] = proto::add_mod(acc_share[i], key.r_in_share);
+  }
+  std::vector<uint64_t> hatx_public;
+  open_public_hatx(party, ch, hatx_share, hatx_public);
+
+  gates::PostProcHook* hook = (party == 0) ? bundle.hook0.get() : bundle.hook1.get();
+  if (!hook) throw std::runtime_error("matmul_beaver_finalize: truncation hook missing");
+
+  runtime::ProtoChanFromNet pch(ch);
+  if (params.pfss_batch) {
+    params.pfss_batch->enqueue_truncation(bundle, key, *hook, std::move(hatx_public), prep.Y_share);
+    if (!params.defer_trunc_finalize) {
+      params.pfss_batch->flush_and_finalize(party, *params.trunc_backend, pch);
+    }
+  } else {
+    gates::CompositeBatchInput in{hatx_public.data(), total};
+    auto out = gates::composite_eval_batch_with_postproc(
+        party, *params.trunc_backend, pch, key, bundle.suf, in, *hook);
+    uint64_t r_out_share = key.r_out_share.empty() ? 0ull : key.r_out_share[0];
+    for (size_t i = 0; i < total; ++i) {
+      prep.Y_share.data[i] = proto::sub_mod(out.haty_share[i], r_out_share);
+    }
+  }
+}
+
 std::pair<MatmulBeaverTriple, MatmulBeaverTriple> dealer_gen_matmul_triple(
     size_t M,
     size_t K,
@@ -100,12 +247,30 @@ MatmulBeaverTriple read_matmul_triple(proto::TapeReader& r) {
   return t;
 }
 
-static void open_vector(int party,
-                        net::Chan& ch,
-                        const std::vector<uint64_t>& diff,
-                        std::vector<int64_t>& opened) {
+static runtime::OpenHandle enqueue_open(runtime::OpenCollector* collector,
+                                        const std::vector<uint64_t>& diff,
+                                        std::vector<int64_t>& opened) {
+  if (!collector) {
+    opened.resize(diff.size());
+    return {};
+  }
+  return collector->enqueue(diff);
+}
+
+static void materialize_open(int party,
+                             net::Chan& ch,
+                             runtime::OpenCollector* collector,
+                             const runtime::OpenHandle& handle,
+                             const std::vector<uint64_t>& diff,
+                             std::vector<int64_t>& opened) {
   size_t n = diff.size();
   opened.resize(n);
+  if (collector) {
+    auto v = collector->view(handle);
+    if (v.len != n) throw std::runtime_error("OpenCollector: length mismatch");
+    for (size_t i = 0; i < n; ++i) opened[i] = v.data[i];
+    return;
+  }
   if (party == 0) {
     for (auto v : diff) ch.send_u64(v);
     for (size_t i = 0; i < n; ++i) opened[i] = to_signed(diff[i] + ch.recv_u64());
@@ -162,8 +327,13 @@ static void matmul_beaver2d(const MatmulBeaverParams& params,
   }
 
   std::vector<int64_t> E, F;
-  open_vector(party, ch, diff_X, E);
-  open_vector(party, ch, diff_W, F);
+  runtime::OpenHandle hE = enqueue_open(params.open_collector, diff_X, E);
+  runtime::OpenHandle hF = enqueue_open(params.open_collector, diff_W, F);
+  if (params.open_collector) {
+    params.open_collector->flush(party, ch);
+  }
+  materialize_open(party, ch, params.open_collector, hE, diff_X, E);
+  materialize_open(party, ch, params.open_collector, hF, diff_W, F);
 
   // Compute accumulator shares once.
   size_t total = M * N;
@@ -264,18 +434,20 @@ void matmul_beaver(const MatmulBeaverParams& params,
     size_t K = X_share.shape[2];
     size_t N = params.w_transposed ? W_share.shape[0] : W_share.shape[1];
     for (size_t b = 0; b < B; ++b) {
-      MatmulBeaverTriple t = read_matmul_triple(triple_reader);
       TensorView<uint64_t> Xb = view2(const_cast<uint64_t*>(X_share.data + b * M * K), M, K);
       TensorView<uint64_t> Yb = view2(Y_share.data + b * M * N, M, N);
       TensorView<uint64_t> Wv =
           view2(const_cast<uint64_t*>(W_share.data), W_share.shape[0], W_share.shape[1]);
-      matmul_beaver2d(params, party, ch, Xb, Wv, Yb, t);
+      auto prep = matmul_beaver_prepare(params, party, ch, Xb, Wv, Yb, triple_reader);
+      if (params.open_collector && !params.defer_open_flush) params.open_collector->flush(party, ch);
+      matmul_beaver_finalize(prep, party, ch);
     }
     return;
   }
 
-  MatmulBeaverTriple t = read_matmul_triple(triple_reader);
-  matmul_beaver2d(params, party, ch, X_share, W_share, Y_share, t);
+  auto prep = matmul_beaver_prepare(params, party, ch, X_share, W_share, Y_share, triple_reader);
+  if (params.open_collector && !params.defer_open_flush) params.open_collector->flush(party, ch);
+  matmul_beaver_finalize(prep, party, ch);
 }
 
 }  // namespace nn

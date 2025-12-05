@@ -24,6 +24,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
                                const TensorView<int64_t>& W2_public,
                                KVCache& cache,
                                TensorView<uint64_t> Y_share,
-                               LayerContext* ctx = nullptr);
+                               LayerContext* ctx = nullptr,
+                               runtime::PhaseExecutor* pe = nullptr);
 
 }  // namespace nn

@@ -8,6 +8,8 @@
 #include "nn/tensor_view.hpp"
 #include "mpc/net.hpp"
 #include "nn/layer_context.hpp"
+#include "runtime/phase_executor.hpp"
+#include "runtime/pfss_superbatch.hpp"
 
 namespace nn {
 
@@ -27,6 +29,7 @@ void attention_forward(const AttentionConfig& cfg,
                        const TensorView<int64_t>& Wout_public,
                        KVCache& cache,
                        TensorView<uint64_t> Y_share,
-                       LayerContext* ctx = nullptr);
+                       LayerContext* ctx = nullptr,
+                       runtime::PhaseExecutor* pe = nullptr);
 
 }  // namespace nn
