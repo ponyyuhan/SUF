@@ -255,6 +255,62 @@ void LayerGraph::hoist_rescales() {
     // Mark child as a no-op so lowering will skip it.
     op.rescale.from_frac = op.rescale.to_frac;
   }
+
+  // Hoist identical rescales over add/sub when safe: if both inputs are rescale
+  // outputs with the same from/to frac and signedness, replace with one rescale
+  // after the add/sub.
+  for (auto& op : ops_) {
+    if (op.kind != OpKind::kAdd && op.kind != OpKind::kSub) continue;
+    if (op.inputs.size() != 2) continue;
+    int a_tid = op.inputs[0];
+    int b_tid = op.inputs[1];
+    if (a_tid < 0 || b_tid < 0) continue;
+    if (static_cast<size_t>(a_tid) >= producer.size() ||
+        static_cast<size_t>(b_tid) >= producer.size()) continue;
+    int a_prod_idx = producer[static_cast<size_t>(a_tid)];
+    int b_prod_idx = producer[static_cast<size_t>(b_tid)];
+    if (a_prod_idx < 0 || b_prod_idx < 0) continue;
+    auto& a_prod = ops_[static_cast<size_t>(a_prod_idx)];
+    auto& b_prod = ops_[static_cast<size_t>(b_prod_idx)];
+    if (a_prod.kind != OpKind::kRescale || b_prod.kind != OpKind::kRescale) continue;
+    const auto& ar = a_prod.rescale;
+    const auto& br = b_prod.rescale;
+    bool same_shift = (ar.from_frac == br.from_frac) && (ar.to_frac == br.to_frac);
+    bool same_sign = (tensors_[static_cast<size_t>(a_prod.outputs[0])].scale.is_signed ==
+                      tensors_[static_cast<size_t>(b_prod.outputs[0])].scale.is_signed);
+    if (!same_shift || !same_sign) continue;
+
+    // Fuse: treat inputs as pre-rescale values and rescale the add/sub result instead.
+    int from_frac = ar.from_frac ? ar.from_frac
+                                 : tensors_[static_cast<size_t>(a_prod.inputs[0])].scale.frac_bits;
+    int to_frac = ar.to_frac ? ar.to_frac
+                             : tensors_[static_cast<size_t>(op.outputs[0])].scale.frac_bits;
+    op.inputs[0] = a_prod.inputs[0];
+    op.inputs[1] = b_prod.inputs[0];
+    // Update output scale/range to high-precision before rescale.
+    tensors_[static_cast<size_t>(op.outputs[0])].scale.frac_bits = from_frac;
+    tensors_[static_cast<size_t>(op.outputs[0])].scale.is_signed =
+        tensors_[static_cast<size_t>(a_prod.inputs[0])].scale.is_signed ||
+        tensors_[static_cast<size_t>(b_prod.inputs[0])].scale.is_signed;
+    RangeInterval ra = tensors_[static_cast<size_t>(op.inputs[0])].range;
+    RangeInterval rb = tensors_[static_cast<size_t>(op.inputs[1])].range;
+    RangeInterval sum_range = (op.kind == OpKind::kAdd) ? add_range(ra, rb) : sub_range(ra, rb);
+    tensors_[static_cast<size_t>(op.outputs[0])].range = sum_range;
+
+    // Insert a new rescale op after the add/sub to restore expected frac_bits.
+    OpNode new_rescale;
+    new_rescale.kind = OpKind::kRescale;
+    new_rescale.inputs = {op.outputs[0]};
+    new_rescale.outputs = {add_tensor(tensors_[static_cast<size_t>(op.outputs[0])].scale,
+                                      shift_down(sum_range, from_frac - to_frac))};
+    new_rescale.rescale.from_frac = from_frac;
+    new_rescale.rescale.to_frac = to_frac;
+    new_rescale.rescale.signed_ars = ar.signed_ars;
+    new_rescale.rescale.prefer_gapars = ar.prefer_gapars || br.prefer_gapars;
+    ops_.push_back(new_rescale);
+    // Redirect the original consumer output to the new rescale output.
+    op.outputs[0] = new_rescale.outputs[0];
+  }
 }
 
 TruncationPassResult LayerGraph::lower_truncations(TruncationPassContext& ctx,
