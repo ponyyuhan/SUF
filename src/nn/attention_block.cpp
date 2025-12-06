@@ -317,8 +317,11 @@ void attention_forward(const AttentionConfig& cfg,
   nexp_params.frac_bits = fb;
   nexp_params.segments = 16;
   auto nexp_spec = gates::make_nexp_spec(nexp_params);
+  compiler::RangeInterval nexp_range = clamp_nexp_range(fb);
   auto recip_spec =
       gates::make_recip_affine_init_spec(fb, static_cast<double>(std::max(cache.S_max, T + init_len)));
+  compiler::RangeInterval recip_range = clamp_recip_range(
+      fb, static_cast<double>(std::max(cache.S_max, T + init_len)));
   std::optional<gates::NexpTaskMaterial> nexp_mat;
   runtime::CubicPolyBundle nexp_bundle{};
   std::optional<gates::RecipTaskMaterial> recip_mat;
@@ -513,7 +516,8 @@ void attention_forward(const AttentionConfig& cfg,
     score_trunc_p.frac_bits = fb;
     compiler::RangeInterval score_acc_range =
         compiler::matmul_accum_range(q_range, q_range, Dh);
-    score_trunc_p.kind = compiler::select_trunc_kind(score_acc_range, fb);
+    score_trunc_p.kind = compiler::GateKind::AutoTrunc;
+    score_trunc_p.range_hint = score_acc_range;
     std::mt19937_64 rng_score(0x73636f72u);
     auto score_trunc_bundle =
         compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng_score, score_trunc_p, score_share.size());
@@ -598,11 +602,17 @@ void attention_forward(const AttentionConfig& cfg,
       prob_range.hi = static_cast<int64_t>(1) << fb;
       prob_range.is_signed = false;
       plan.prob_range = prob_range;
+      // Clamp softmax prob range for downstream uses.
+      prob_range = clamp_softmax_range(fb);
+      // Clamp reciprocal init/output range based on max sum bound if provided.
+      compiler::RangeInterval recip_range = clamp_recip_range(fb, cfg.recip_max_sum);
+      (void)recip_range;  // clamp available for future range-aware selection
 
       // Build faithful trunc bundle for prob*V (Q2f -> Qf).
-      compiler::GateParams ctx_trunc_p;
-      ctx_trunc_p.kind = compiler::GateKind::FaithfulTR;
-      ctx_trunc_p.frac_bits = fb;
+    compiler::GateParams ctx_trunc_p;
+    ctx_trunc_p.kind = compiler::GateKind::AutoTrunc;
+    ctx_trunc_p.frac_bits = fb;
+    ctx_trunc_p.range_hint = compiler::RangeInterval{0, static_cast<int64_t>(1ll << fb), false};
       std::mt19937_64 rng_ctx(77);
       auto ctx_trunc = compiler::lower_truncation_gate(
           ctx->trunc_ctx->backend(), rng_ctx, ctx_trunc_p, rows * Dh);

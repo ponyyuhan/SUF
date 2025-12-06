@@ -152,9 +152,10 @@ void mlp_forward(const MLPConfig& cfg,
       }
       compiler::GateParams p;
       p.frac_bits = cfg.frac_bits;
-      p.kind = compiler::select_trunc_kind(accum, cfg.frac_bits);
+      p.kind = compiler::GateKind::AutoTrunc;
+      p.range_hint = accum;
       compiler::MatmulTruncationPlan plan;
-      plan.kind = p.kind;
+      plan.kind = compiler::select_trunc_kind(accum, cfg.frac_bits);
       plan.accum_range = accum;
       plan.batch = M * N;
       plan.bundle = compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng, p, plan.batch);
@@ -180,6 +181,9 @@ void mlp_forward(const MLPConfig& cfg,
         bundle,
         std::span<const uint64_t>(hidden_scaled.data(), hidden_scaled.size()),
         std::span<uint64_t>(hidden_scaled.data(), hidden_scaled.size()));
+    // Update hidden range to the clamped SiLU range for downstream matmul planning.
+    compiler::RangeInterval silu_range = clamp_silu_range(cfg.frac_bits);
+    mat2_x_range = silu_range;
 
     // First wave: trunc hidden matmul accum to Qf.
     pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);

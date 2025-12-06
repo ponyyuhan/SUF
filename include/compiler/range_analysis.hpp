@@ -9,23 +9,6 @@
 
 namespace compiler {
 
-// Conservative interval for a value in Z2^64 (interpretable as signed or unsigned).
-struct RangeInterval {
-  int64_t lo = std::numeric_limits<int64_t>::min();
-  int64_t hi = std::numeric_limits<int64_t>::max();
-  bool is_signed = true;
-
-  static RangeInterval whole(bool signed_flag = true) {
-    RangeInterval r;
-    r.is_signed = signed_flag;
-    if (!signed_flag) {
-      r.lo = 0;
-      r.hi = std::numeric_limits<int64_t>::max();
-    }
-    return r;
-  }
-};
-
 inline RangeInterval intersect(const RangeInterval& a, const RangeInterval& b) {
   RangeInterval out;
   out.is_signed = a.is_signed || b.is_signed;

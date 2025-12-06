@@ -4,6 +4,7 @@
 #include <random>
 
 #include "compiler/pfss_program_desc.hpp"
+#include "compiler/range_analysis.hpp"
 #include "gates/composite_fss.hpp"
 #include "gates/postproc_hooks.hpp"
 
@@ -24,16 +25,20 @@ inline TruncationLoweringResult lower_truncation_gate(proto::PfssBackend& backen
                                                       std::mt19937_64& rng,
                                                       const GateParams& params,
                                                       size_t batch_N = 1) {
-  if (params.kind != GateKind::FaithfulTR &&
-      params.kind != GateKind::FaithfulARS &&
-      params.kind != GateKind::GapARS) {
-    throw std::runtime_error("lower_truncation_gate: GateKind must be TR/ARS/GapARS");
+  GateKind kind = params.kind;
+  if (kind == GateKind::AutoTrunc) {
+    kind = select_trunc_kind(params.range_hint, params.frac_bits);
+  }
+  if (kind != GateKind::FaithfulTR &&
+      kind != GateKind::FaithfulARS &&
+      kind != GateKind::GapARS) {
+    throw std::runtime_error("lower_truncation_gate: GateKind must be TR/ARS/GapARS/AutoTrunc");
   }
   TruncationLoweringResult res;
-  res.keys = gates::composite_gen_trunc_gate(backend, rng, params.frac_bits, params.kind, batch_N, &res.suf);
+  res.keys = gates::composite_gen_trunc_gate(backend, rng, params.frac_bits, kind, batch_N, &res.suf);
 
   // Build postproc hooks wired with layout + masks.
-  if (params.kind == GateKind::FaithfulTR) {
+  if (kind == GateKind::FaithfulTR) {
     auto h0 = std::make_unique<gates::FaithfulTruncPostProc>();
     auto h1 = std::make_unique<gates::FaithfulTruncPostProc>();
     h0->f = h1->f = params.frac_bits;
@@ -43,7 +48,7 @@ inline TruncationLoweringResult lower_truncation_gate(proto::PfssBackend& backen
     h1->r_in = res.keys.k1.compiled.r_in;
     res.hook0 = std::move(h0);
     res.hook1 = std::move(h1);
-  } else if (params.kind == GateKind::FaithfulARS || params.kind == GateKind::GapARS) {
+  } else if (kind == GateKind::FaithfulARS || kind == GateKind::GapARS) {
     auto h0 = std::make_unique<gates::FaithfulArsPostProc>();
     auto h1 = std::make_unique<gates::FaithfulArsPostProc>();
     h0->f = h1->f = params.frac_bits;

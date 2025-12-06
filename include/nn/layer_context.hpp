@@ -53,6 +53,45 @@ struct SecretTensor {
   bool valid() const { return tid >= 0; }
 };
 
+inline compiler::RangeInterval clamp_silu_range(int frac_bits) {
+  // SiLU is bounded in [-6,6] input in typical LUT; output in roughly [-6,6].
+  int64_t bound = static_cast<int64_t>(6ll << frac_bits);
+  compiler::RangeInterval r;
+  r.is_signed = true;
+  r.lo = -bound;
+  r.hi = bound;
+  return r;
+}
+
+inline compiler::RangeInterval clamp_nexp_range(int frac_bits) {
+  // nExp output in (0, 1]; represent as [0, 1<<frac_bits].
+  compiler::RangeInterval r;
+  r.is_signed = false;
+  r.lo = 0;
+  r.hi = static_cast<int64_t>(1ll << frac_bits);
+  return r;
+}
+
+inline compiler::RangeInterval clamp_recip_range(int frac_bits, double max_in) {
+  // Reciprocal of [1, max_in] lies in [1/max_in, 1].
+  compiler::RangeInterval r;
+  r.is_signed = false;
+  int64_t hi = static_cast<int64_t>(1ll << frac_bits);
+  int64_t lo = static_cast<int64_t>(std::llround((1.0 / std::max(max_in, 1.0)) * std::ldexp(1.0, frac_bits)));
+  r.lo = lo;
+  r.hi = hi;
+  return r;
+}
+
+inline compiler::RangeInterval clamp_softmax_range(int frac_bits) {
+  // Softmax probabilities in [0,1].
+  compiler::RangeInterval r;
+  r.is_signed = false;
+  r.lo = 0;
+  r.hi = static_cast<int64_t>(1ll << frac_bits);
+  return r;
+}
+
 // Lightweight helpers to avoid boilerplate in layer builders.
 inline SecretTensor make_secret_tensor(LayerContext* ctx,
                                        const TensorView<uint64_t>& share,

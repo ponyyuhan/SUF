@@ -22,6 +22,7 @@ struct AttentionConfig {
   size_t S_max = 0;
   int frac_bits = 16;
   bool legacy_softmax = false;  // allow cleartext softmax when true; otherwise expect composite path
+  double recip_max_sum = 65536.0;  // bound on softmax denominator for reciprocal range
 };
 
 void attention_forward(const AttentionConfig& cfg,

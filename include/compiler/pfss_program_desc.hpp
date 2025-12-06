@@ -2,9 +2,27 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace compiler {
+
+// Conservative interval for a value in Z2^64 (interpretable as signed or unsigned).
+struct RangeInterval {
+  int64_t lo = std::numeric_limits<int64_t>::min();
+  int64_t hi = std::numeric_limits<int64_t>::max();
+  bool is_signed = true;
+
+  static RangeInterval whole(bool signed_flag = true) {
+    RangeInterval r;
+    r.is_signed = signed_flag;
+    if (!signed_flag) {
+      r.lo = 0;
+      r.hi = std::numeric_limits<int64_t>::max();
+    }
+    return r;
+  }
+};
 
 enum class RawPredKind : uint8_t {
   kLtU64,
@@ -84,7 +102,8 @@ enum class GateKind : uint8_t {
   LayerNormBlock,
   FaithfulTR,
   FaithfulARS,
-  GapARS
+  GapARS,
+  AutoTrunc
 };
 
 struct GateParams {
@@ -94,6 +113,7 @@ struct GateParams {
   int segments = 0;
   size_t L = 0;
   double eps = 0.0;
+  RangeInterval range_hint = RangeInterval::whole(true);
 };
 
 } // namespace compiler

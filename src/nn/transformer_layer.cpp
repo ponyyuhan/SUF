@@ -275,6 +275,17 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   ctx->enable_hoist = true;
   ctx->open_collector = &pe->open_collector();
   proto::PfssBackendBatch& backend = ctx->trunc_ctx->backend();
+  // Apply conservative limits to PFSS batches and opens to avoid runaway buffering.
+  runtime::PfssSuperBatch::Limits pfss_lim;
+  pfss_lim.max_pending_jobs = 1ull << 16;
+  pfss_lim.max_pending_hatx_words = 1ull << 24;
+  pfss_lim.max_flushes = 1ull << 12;
+  pe->pfss_coeff_batch().set_limits(pfss_lim);
+  pe->pfss_trunc_batch().set_limits(pfss_lim);
+  runtime::OpenCollector::Limits open_lim;
+  open_lim.max_pending_words = 1ull << 22;
+  pe->open_collector().set_limits(open_lim);
+  pe->set_max_flushes(1ull << 12);
 
   size_t B = X_share.shape[0];
   size_t T = X_share.shape[1];

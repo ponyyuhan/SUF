@@ -136,6 +136,16 @@ int LayerGraph::add_affine(int x, int gamma, int beta, int frac_bits, const Scal
   return op.outputs[0];
 }
 
+int LayerGraph::add_bias(int x, const std::vector<int64_t>& bias_qf, const Scale& out_scale) {
+  OpNode op;
+  op.kind = OpKind::kBiasAdd;
+  op.inputs = {x};
+  op.outputs = {add_tensor(out_scale, RangeInterval::whole(out_scale.is_signed))};
+  op.bias = bias_qf;
+  ops_.push_back(op);
+  return op.outputs[0];
+}
+
 void LayerGraph::propagate_ranges() {
   for (const auto& op : ops_) {
     auto get_range = [&](int tid) -> const RangeInterval& {
@@ -211,6 +221,21 @@ void LayerGraph::propagate_ranges() {
         tensors_[static_cast<size_t>(op.outputs[0])].range = get_range(op.inputs[0]);
         break;
       }
+      case OpKind::kBiasAdd: {
+        // Bias is public in Qf. Bound output by adding max_abs bias to input range.
+        RangeInterval xr = get_range(op.inputs[0]);
+        int64_t bias_max = 0;
+        for (auto v : op.bias) {
+          int64_t a = (v < 0) ? -v : v;
+          if (a > bias_max) bias_max = a;
+        }
+        RangeInterval br;
+        br.is_signed = true;
+        br.lo = -bias_max;
+        br.hi = bias_max;
+        tensors_[static_cast<size_t>(op.outputs[0])].range = add_range(xr, br);
+        break;
+      }
       default:
         break;
     }
@@ -219,14 +244,18 @@ void LayerGraph::propagate_ranges() {
 
 void LayerGraph::hoist_rescales() {
   // Map tensor id -> producing op index for quick lookups.
-  std::vector<int> producer(tensors_.size(), -1);
-  for (size_t i = 0; i < ops_.size(); ++i) {
-    for (int t : ops_[i].outputs) {
-      if (t >= 0 && static_cast<size_t>(t) < producer.size()) {
-        producer[static_cast<size_t>(t)] = static_cast<int>(i);
+  auto rebuild_producer = [&]() {
+    std::vector<int> prod(tensors_.size(), -1);
+    for (size_t i = 0; i < ops_.size(); ++i) {
+      for (int t : ops_[i].outputs) {
+        if (t >= 0 && static_cast<size_t>(t) < prod.size()) {
+          prod[static_cast<size_t>(t)] = static_cast<int>(i);
+        }
       }
     }
-  }
+    return prod;
+  };
+  std::vector<int> producer = rebuild_producer();
 
   for (auto& op : ops_) {
     if (op.kind != OpKind::kRescale || op.inputs.empty()) continue;
@@ -310,6 +339,8 @@ void LayerGraph::hoist_rescales() {
     ops_.push_back(new_rescale);
     // Redirect the original consumer output to the new rescale output.
     op.outputs[0] = new_rescale.outputs[0];
+    // Producer map is now stale; rebuild to keep further hoists consistent.
+    producer = rebuild_producer();
   }
 }
 
