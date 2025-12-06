@@ -8,6 +8,7 @@
 #include <vector>
 #include <unordered_map>
 #include "compiler/truncation_lowering.hpp"
+#include "compiler/range_analysis.hpp"
 #include "gates/nexp_gate.hpp"
 #include "gates/reciprocal_gate.hpp"
 #include "gates/reciprocal_composite.hpp"
@@ -159,6 +160,30 @@ class CachedRowBroadcastTripleProvider : public runtime::RowBroadcastTripleProvi
   std::unordered_map<uint64_t, RowBroadcastTripleMaterial> cache_;
 };
 
+// Simple deterministic triple cache keyed by triple count (separate per party and seed domain).
+static std::vector<proto::BeaverTriple64Share>& ensure_cached_triples(
+    std::unordered_map<uint64_t, std::vector<proto::BeaverTriple64Share>>& cache,
+    uint64_t seed_base,
+    size_t count,
+    int party) {
+  auto it = cache.find(count);
+  if (it != cache.end()) return it->second;
+  std::mt19937_64 rng(seed_base ^ static_cast<uint64_t>(count));
+  std::vector<proto::BeaverTriple64Share> triples(count);
+  for (auto& tri : triples) {
+    uint64_t a = rng();
+    uint64_t b = rng();
+    uint64_t c = proto::mul_mod(a, b);
+    uint64_t a0 = rng();
+    uint64_t b0 = rng();
+    uint64_t c0 = rng();
+    tri = (party == 0) ? proto::BeaverTriple64Share{a0, b0, c0}
+                       : proto::BeaverTriple64Share{a - a0, b - b0, c - c0};
+  }
+  auto [ins_it, _] = cache.emplace(count, std::move(triples));
+  return ins_it->second;
+}
+
 }  // namespace
 
 void attention_forward(const AttentionConfig& cfg,
@@ -308,7 +333,8 @@ void attention_forward(const AttentionConfig& cfg,
     prob_choice.signed_value = false;  // probabilities are non-negative
     phase_R.pfss_backend = &ctx->trunc_ctx->backend();
     phase_R.pfss_chan = &pch;
-    phase_R.pfss = &pe->pfss_batch();
+    phase_R.pfss_coeff = &pe->pfss_coeff_batch();
+    phase_R.pfss_trunc = &pe->pfss_trunc_batch();
     phase_R.opens = &pe->open_collector();
   }
 
@@ -444,20 +470,10 @@ void attention_forward(const AttentionConfig& cfg,
     }
 
     // Need Dh * (rows*cur_len) triples for the matmul products.
-    std::vector<proto::BeaverTriple64Share> score_triples(rows * cur_len * Dh);
-    {
-      std::mt19937_64 rng_local(42 + t);
-      for (auto& tri : score_triples) {
-        uint64_t a = rng_local();
-        uint64_t b = rng_local();
-        uint64_t c = proto::mul_mod(a, b);
-        uint64_t a0 = rng_local();
-        uint64_t b0 = rng_local();
-        uint64_t c0 = rng_local();
-        tri = (party == 0) ? proto::BeaverTriple64Share{a0, b0, c0}
-                           : proto::BeaverTriple64Share{a - a0, b - b0, c - c0};
-      }
-    }
+    static std::unordered_map<uint64_t, std::vector<proto::BeaverTriple64Share>> score_cache_p0;
+    static std::unordered_map<uint64_t, std::vector<proto::BeaverTriple64Share>> score_cache_p1;
+    auto& score_cache = (party == 0) ? score_cache_p0 : score_cache_p1;
+    auto& score_triples = ensure_cached_triples(score_cache, 0x73636f72u /*"scor"*/, rows * cur_len * Dh, party);
 
     pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
     auto score_task = std::make_unique<runtime::MatmulTask>(
@@ -468,7 +484,8 @@ void attention_forward(const AttentionConfig& cfg,
         std::span<const proto::BeaverTriple64Share>(score_triples.data(), score_triples.size()));
     pe->add_task(std::move(score_task));
     pe->run(phase_R);
-    pe->pfss_batch().clear();
+    pe->pfss_coeff_batch().clear();
+    pe->pfss_trunc_batch().clear();
     pe->open_collector().clear();
 
     // Scale scores by inv_sqrt (public scalar) and prepare softmax inputs.
@@ -513,18 +530,12 @@ void attention_forward(const AttentionConfig& cfg,
       plan.recip = recip_bundle;
       plan.prob_trunc = choice;
       plan.row_triples = &row_triples;
+      compiler::RangeInterval prob_range;
+      prob_range.lo = 0;
+      prob_range.hi = static_cast<int64_t>(1) << fb;
+      prob_range.is_signed = false;
+      plan.prob_range = prob_range;
 
-      pe->begin_phase(runtime::PhaseExecutor::Phase::kSoftmax);
-      pe->add_task(std::make_unique<nn::SoftmaxBlockTask>(
-          plan,
-          std::span<const uint64_t>(t_share.data(), t_share.size()),
-          std::span<uint64_t>(prob_shares.data(), prob_shares.size())));
-      pe->run(phase_R);
-      pe->pfss_batch().clear();
-      pe->open_collector().clear();
-    }
-
-    if (use_phase_softmax) {
       // Build faithful trunc bundle for prob*V (Q2f -> Qf).
       compiler::GateParams ctx_trunc_p;
       ctx_trunc_p.kind = compiler::GateKind::FaithfulTR;
@@ -532,25 +543,97 @@ void attention_forward(const AttentionConfig& cfg,
       std::mt19937_64 rng_ctx(77);
       auto ctx_trunc = compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng_ctx, ctx_trunc_p);
 
-      // Reuse SeqTask helper (trunc -> none) from MLP-style chaining.
-      class SeqTask final : public runtime::detail::PhaseTask {
+      // Prepare per-row V material ahead of time.
+      std::vector<std::vector<uint64_t>> v_mats(rows);
+      for (size_t row = 0; row < rows; ++row) {
+        size_t b = row / H;
+        size_t h = row % H;
+        const uint64_t* v_head = kv_head_ptr_v(cache, b, h);
+        v_mats[row].resize(cur_len * Dh);
+        for (size_t s = 0; s < cur_len; ++s) {
+          for (size_t d = 0; d < Dh; ++d) {
+            v_mats[row][s * Dh + d] = v_head[s * Dh + d];
+          }
+        }
+      }
+
+      // Matmul+trunc rows: drive after softmax inside one executor run.
+      class SoftmaxProbTask final : public runtime::detail::PhaseTask {
        public:
-        SeqTask(std::unique_ptr<runtime::detail::PhaseTask> first,
-                std::unique_ptr<runtime::detail::PhaseTask> second)
-            : first_(std::move(first)), second_(std::move(second)) {}
-        bool done() const override { return state_ == St::Done; }
+        SoftmaxProbTask(std::unique_ptr<nn::SoftmaxBlockTask> sm_task,
+                        runtime::TruncChoice trunc_choice,
+                        compiler::RangeInterval prob_range,
+                        size_t rows,
+                        size_t cols,
+                        size_t Dh,
+                        size_t cur_len,
+                        std::vector<uint64_t>& prob_shares,
+                        std::vector<std::vector<uint64_t>>& v_mats,
+                        std::vector<uint64_t>& ctx_shares,
+                        KVCache& cache,
+                        int H,
+                        size_t T,
+                        size_t t,
+                        int party,
+                        int fb)
+            : sm_task_(std::move(sm_task)),
+              trunc_choice_(trunc_choice),
+              prob_range_(prob_range),
+              rows_(rows),
+              cols_(cols),
+              Dh_(Dh),
+              cur_len_(cur_len),
+              prob_shares_(prob_shares),
+              v_mats_(v_mats),
+              ctx_shares_(ctx_shares),
+              cache_(cache),
+              H_(H),
+              T_(T),
+              t_(t),
+              party_(party),
+              fb_(fb) {}
+
+        bool done() const override { return st_ == St::Done; }
+
         runtime::detail::Need step(runtime::PhaseResources& R) override {
-          switch (state_) {
-            case St::First: {
-              auto need = first_->step(R);
-              if (!first_->done()) return need;
-              state_ = St::Second;
+          switch (st_) {
+            case St::Softmax: {
+              auto need = sm_task_->step(R);
+              if (!sm_task_->done()) return need;
+              st_ = St::Rows;
               return runtime::detail::Need::None;
             }
-            case St::Second: {
-              auto need = second_->step(R);
-              if (!second_->done()) return need;
-              state_ = St::Done;
+            case St::Rows: {
+              if (row_cursor_ >= rows_) {
+                st_ = St::Done;
+                return runtime::detail::Need::None;
+              }
+              if (!row_task_) {
+                size_t row = row_cursor_;
+                size_t b = row / static_cast<size_t>(H_);
+                size_t h = row % static_cast<size_t>(H_);
+                std::span<const uint64_t> prob_row(prob_shares_.data() + row * cols_, cols_);
+                static std::unordered_map<uint64_t, std::vector<proto::BeaverTriple64Share>> probv_cache_p0;
+                static std::unordered_map<uint64_t, std::vector<proto::BeaverTriple64Share>> probv_cache_p1;
+                auto& probv_cache = (party_ == 0) ? probv_cache_p0 : probv_cache_p1;
+                auto& triples = ensure_cached_triples(probv_cache, 0x70726f62u /*"prob"*/, cur_len_ * Dh_, party_);
+                size_t ctx_off = ((b * T_ + t_) * static_cast<size_t>(H_) + h) * Dh_;
+                std::span<uint64_t> ctx_row(ctx_shares_.data() + ctx_off, Dh_);
+                auto mm = std::make_unique<runtime::MatmulTask>(
+                    1, static_cast<int>(cur_len_), static_cast<int>(Dh_), prob_row,
+                    std::span<const uint64_t>(v_mats_[row].data(), v_mats_[row].size()), ctx_row,
+                    std::span<const proto::BeaverTriple64Share>(triples.data(), triples.size()));
+                const auto* trunc_bundle =
+                    select_trunc_bundle(trunc_choice_, prob_range_, static_cast<int>(fb_));
+                auto trunc = std::make_unique<runtime::TruncTask>(
+                    trunc_bundle ? trunc_bundle : trunc_choice_.faithful,
+                    std::span<const uint64_t>(ctx_row.data(), ctx_row.size()), ctx_row);
+                row_task_ = std::make_unique<SeqTask>(std::move(mm), std::move(trunc));
+              }
+              auto need = row_task_->step(R);
+              if (!row_task_->done()) return need;
+              row_task_.reset();
+              ++row_cursor_;
               return runtime::detail::Need::None;
             }
             case St::Done:
@@ -560,55 +643,83 @@ void attention_forward(const AttentionConfig& cfg,
         }
 
        private:
-        enum class St { First, Second, Done } state_ = St::First;
-        std::unique_ptr<runtime::detail::PhaseTask> first_;
-        std::unique_ptr<runtime::detail::PhaseTask> second_;
+        class SeqTask final : public runtime::detail::PhaseTask {
+         public:
+          SeqTask(std::unique_ptr<runtime::detail::PhaseTask> first,
+                  std::unique_ptr<runtime::detail::PhaseTask> second)
+              : first_(std::move(first)), second_(std::move(second)) {}
+          bool done() const override { return state_ == St::Done; }
+          runtime::detail::Need step(runtime::PhaseResources& R) override {
+            switch (state_) {
+              case St::First: {
+                auto need = first_->step(R);
+                if (!first_->done()) return need;
+                state_ = St::Second;
+                return runtime::detail::Need::None;
+              }
+              case St::Second: {
+                auto need = second_->step(R);
+                if (!second_->done()) return need;
+                state_ = St::Done;
+                return runtime::detail::Need::None;
+              }
+              case St::Done:
+                return runtime::detail::Need::None;
+            }
+            return runtime::detail::Need::None;
+          }
+
+         private:
+          enum class St { First, Second, Done } state_ = St::First;
+          std::unique_ptr<runtime::detail::PhaseTask> first_;
+          std::unique_ptr<runtime::detail::PhaseTask> second_;
+        };
+
+        enum class St { Softmax, Rows, Done } st_ = St::Softmax;
+        std::unique_ptr<nn::SoftmaxBlockTask> sm_task_;
+        runtime::TruncChoice trunc_choice_{};
+        compiler::RangeInterval prob_range_{};
+        size_t rows_ = 0;
+        size_t cols_ = 0;
+        size_t Dh_ = 0;
+        size_t cur_len_ = 0;
+        std::vector<uint64_t>& prob_shares_;
+        std::vector<std::vector<uint64_t>>& v_mats_;
+        std::vector<uint64_t>& ctx_shares_;
+        KVCache& cache_;
+        int H_ = 0;
+        size_t T_ = 0;
+        size_t t_ = 0;
+        int party_ = 0;
+        int fb_ = 0;
+        size_t row_cursor_ = 0;
+        std::unique_ptr<SeqTask> row_task_;
       };
 
       pe->begin_phase(runtime::PhaseExecutor::Phase::kSoftmax);
-      for (size_t row = 0; row < rows; ++row) {
-        size_t head_idx = row;
-        // prob row span
-        std::span<const uint64_t> prob_row(prob_shares.data() + row * cols, cols);
-        // V share for this head
-        size_t b = row / H;
-        size_t h = row % H;
-        const uint64_t* v_head = kv_head_ptr_v(cache, b, h);
-        std::vector<uint64_t> v_mat(cur_len * Dh, 0);
-        for (size_t s = 0; s < cur_len; ++s) {
-          for (size_t d = 0; d < Dh; ++d) {
-            v_mat[s * Dh + d] = v_head[s * Dh + d];
-          }
-        }
-        // Triples for this matmul
-        std::vector<proto::BeaverTriple64Share> triples(cur_len * Dh);
-        std::mt19937_64 rng_local(100 + head_idx);
-        for (auto& tri : triples) {
-          uint64_t a = rng_local();
-          uint64_t bval = rng_local();
-          uint64_t c = proto::mul_mod(a, bval);
-          uint64_t a0 = rng_local();
-          uint64_t b0 = rng_local();
-          uint64_t c0 = rng_local();
-          tri = (party == 0) ? proto::BeaverTriple64Share{a0, b0, c0}
-                             : proto::BeaverTriple64Share{a - a0, bval - b0, c - c0};
-        }
-        // Output buffer slice
-        size_t ctx_off = ((b * T + t) * H + h) * Dh;
-        std::span<uint64_t> ctx_row(ctx_shares.data() + ctx_off, Dh);
-        auto mm = std::make_unique<runtime::MatmulTask>(
-            1, static_cast<int>(cur_len), static_cast<int>(Dh), prob_row,
-            std::span<const uint64_t>(v_mat.data(), v_mat.size()), ctx_row,
-            std::span<const proto::BeaverTriple64Share>(triples.data(), triples.size()));
-        std::vector<uint64_t> trunc_buf(Dh, 0);
-        auto trunc = std::make_unique<runtime::TruncTask>(
-            &ctx_trunc, std::span<const uint64_t>(ctx_row.data(), ctx_row.size()),
-            std::span<uint64_t>(ctx_row.data(), ctx_row.size()));
-        pe->add_task(std::make_unique<SeqTask>(std::move(mm), std::move(trunc)));
-      }
-
+      auto sm_task = std::make_unique<nn::SoftmaxBlockTask>(
+          plan,
+          std::span<const uint64_t>(t_share.data(), t_share.size()),
+          std::span<uint64_t>(prob_shares.data(), prob_shares.size()));
+      pe->add_task(std::make_unique<SoftmaxProbTask>(std::move(sm_task),
+                                                     prob_choice,
+                                                     prob_range,
+                                                     rows,
+                                                     cols,
+                                                     Dh,
+                                                     cur_len,
+                                                     prob_shares,
+                                                     v_mats,
+                                                     ctx_shares,
+                                                     cache,
+                                                     static_cast<int>(H),
+                                                     T,
+                                                     t,
+                                                     party,
+                                                     fb));
       pe->run(phase_R);
-      pe->pfss_batch().clear();
+      pe->pfss_coeff_batch().clear();
+      pe->pfss_trunc_batch().clear();
       pe->open_collector().clear();
     }
   }

@@ -2,6 +2,7 @@
 
 #include <vector>
 #include <random>
+#include <limits>
 #include "gates/tables/silu_spline_table.hpp"
 #include "gates/silu_composite.hpp"
 #include "runtime/pfss_superbatch.hpp"
@@ -58,6 +59,8 @@ void mlp_forward(const MLPConfig& cfg,
   compiler::RangeInterval mat1_w_range;
   compiler::RangeInterval mat2_x_range;
   compiler::RangeInterval mat2_w_range;
+  int row_l1_max1 = 0;
+  int row_l1_max2 = 0;
   if (ctx) {
     compiler::Scale q_scale = make_scale(cfg.frac_bits, true);
     compiler::RangeInterval x_range = compiler::RangeInterval::whole(true);
@@ -71,6 +74,7 @@ void mlp_forward(const MLPConfig& cfg,
     mat1.params = nullptr;  // public W path; tracked for rescale only.
     mat1.frac_bits = cfg.frac_bits;
     mat1.row_l1_max = row_l1_max(W1_public, mp.w_transposed);
+    row_l1_max1 = mat1.row_l1_max;
     mat1.w_range = range_from_public_weights(W1_public);
     mat1.x_range = x_t.range;
     mat1_x_range = mat1.x_range;
@@ -99,6 +103,7 @@ void mlp_forward(const MLPConfig& cfg,
     mat2.params = nullptr;
     mat2.frac_bits = cfg.frac_bits;
     mat2.row_l1_max = row_l1_max(W2_public, mp.w_transposed);
+    row_l1_max2 = mat2.row_l1_max;
     mat2.w_range = range_from_public_weights(W2_public);
     mat2.x_range = hidden_t.range;
     mat2_x_range = mat2.x_range;
@@ -127,59 +132,47 @@ void mlp_forward(const MLPConfig& cfg,
   std::vector<uint64_t> hidden_scaled = hidden;
   runtime::PhaseResources R;
   runtime::ProtoChanFromNet pch(ch);
-  // Helper to run two dependent tasks in a single executor pass.
-  class SeqTask final : public runtime::detail::PhaseTask {
-   public:
-    SeqTask(std::unique_ptr<runtime::detail::PhaseTask> first,
-            std::unique_ptr<runtime::detail::PhaseTask> second)
-        : first_(std::move(first)), second_(std::move(second)) {}
-    bool done() const override { return state_ == St::Done; }
-    runtime::detail::Need step(runtime::PhaseResources& R) override {
-      switch (state_) {
-        case St::First: {
-          auto need = first_->step(R);
-          if (!first_->done()) return need;
-          state_ = St::Second;
-          return runtime::detail::Need::None;
-        }
-        case St::Second: {
-          auto need = second_->step(R);
-          if (!second_->done()) return need;
-          state_ = St::Done;
-          return runtime::detail::Need::None;
-        }
-        case St::Done:
-          return runtime::detail::Need::None;
-      }
-      return runtime::detail::Need::None;
-    }
-
-   private:
-    enum class St { First, Second, Done } state_ = St::First;
-    std::unique_ptr<runtime::detail::PhaseTask> first_;
-    std::unique_ptr<runtime::detail::PhaseTask> second_;
-  };
   if (use_phase) {
     R.party = party;
     R.pfss_backend = &ctx->trunc_ctx->backend();
     R.pfss_chan = &pch;
     R.net_chan = &ch;
-    R.pfss = &pe->pfss_batch();
+    R.pfss_coeff = &pe->pfss_coeff_batch();
+    R.pfss_trunc = &pe->pfss_trunc_batch();
     R.opens = &pe->open_collector();
   }
 
   if (use_phase) {
     // Faithful truncation via composite (no local shift) batched in phase executor.
     std::mt19937_64 rng(0);
-    auto plan1 = compiler::compile_matmul_truncation(ctx->trunc_ctx->backend(),
-                                                     rng,
-                                                     B * T,
-                                                     D,
-                                                     H,
-                                                     cfg.frac_bits,
-                                                     mat1_x_range,
-                                                     mat1_w_range);
-    auto trunc_task = std::make_unique<runtime::TruncTask>(
+    auto make_plan = [&](size_t M, size_t K, size_t N, const compiler::RangeInterval& x_range,
+                         const compiler::RangeInterval& w_range, int row_l1_max) {
+      compiler::RangeInterval accum;
+      if (row_l1_max > 0) {
+        int64_t max_abs_x = std::max(std::llabs(x_range.lo), std::llabs(x_range.hi));
+        __int128 prod = static_cast<__int128>(max_abs_x) * static_cast<__int128>(row_l1_max);
+        int64_t max_cap = std::numeric_limits<int64_t>::max();
+        if (prod > static_cast<__int128>(max_cap)) prod = max_cap;
+        int64_t max_abs_acc = static_cast<int64_t>(prod);
+        accum.lo = -max_abs_acc;
+        accum.hi = max_abs_acc;
+        accum.is_signed = true;
+      } else {
+        accum = compiler::matmul_accum_range(x_range, w_range, K);
+      }
+      compiler::GateParams p;
+      p.frac_bits = cfg.frac_bits;
+      p.kind = compiler::select_trunc_kind(accum, cfg.frac_bits);
+      compiler::MatmulTruncationPlan plan;
+      plan.kind = p.kind;
+      plan.accum_range = accum;
+      plan.batch = M * N;
+      plan.bundle = compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng, p, plan.batch);
+      return plan;
+    };
+
+    auto plan1 = make_plan(B * T, D, H, mat1_x_range, mat1_w_range, row_l1_max1);
+    auto trunc_task1 = std::make_unique<runtime::TruncTask>(
         &plan1.bundle, std::span<const uint64_t>(hidden.data(), hidden.size()),
         std::span<uint64_t>(hidden_scaled.data(), hidden_scaled.size()));
     std::mt19937_64 rng2(0);
@@ -192,11 +185,36 @@ void mlp_forward(const MLPConfig& cfg,
         std::span<const uint64_t>(hidden_scaled.data(), hidden_scaled.size()),
         std::span<uint64_t>(hidden_scaled.data(), hidden_scaled.size()));
 
+    // First wave: trunc hidden matmul accum -> SiLU cubic on shares.
     pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
-    pe->add_task(std::make_unique<SeqTask>(std::move(trunc_task), std::move(silu_task)));
+    pe->add_task(std::move(trunc_task1));
+    pe->add_task(std::move(silu_task));
     pe->run(R);
-    pe->pfss_batch().clear();
+    pe->pfss_coeff_batch().clear();
+    pe->pfss_trunc_batch().clear();
     pe->open_collector().clear();
+
+    // Linear 2 on the updated hidden.
+    matmul_publicW(view2(hidden_scaled.data(), B * T, H),
+                   W2_public,
+                   view2(Y_share.data, B * T, D),
+                   mp);
+
+    // Second wave: trunc output matmul accum.
+    std::mt19937_64 rng_out(1);
+    auto plan2 = make_plan(B * T, H, D, mat2_x_range, mat2_w_range, row_l1_max2);
+    std::vector<uint64_t> y_scaled(Y_share.numel(), 0);
+    pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
+    pe->add_task(std::make_unique<runtime::TruncTask>(
+        &plan2.bundle, std::span<const uint64_t>(Y_share.data, Y_share.numel()),
+        std::span<uint64_t>(y_scaled.data(), y_scaled.size())));
+    pe->run(R);
+    pe->pfss_coeff_batch().clear();
+    pe->pfss_trunc_batch().clear();
+    pe->open_collector().clear();
+    for (size_t i = 0; i < Y_share.numel() && i < y_scaled.size(); ++i) {
+      Y_share.data[i] = y_scaled[i];
+    }
   } else {
     if (!mp.local_rescale) rescale_buffer(hidden_scaled, cfg.frac_bits);
     auto silu_spec = make_silu_spec({cfg.frac_bits, 16});
@@ -204,36 +222,10 @@ void mlp_forward(const MLPConfig& cfg,
       int64_t v = to_signed(hidden_scaled[i]);
       hidden_scaled[i] = to_ring(ref_silu_fixed(silu_spec, v));
     }
-  }
-
-  matmul_publicW(view2(hidden_scaled.data(), B * T, H),
-                 W2_public,
-                 view2(Y_share.data, B * T, D),
-                 mp);
-
-  if (use_phase) {
-    std::mt19937_64 rng(1);
-    auto plan2 = compiler::compile_matmul_truncation(ctx->trunc_ctx->backend(),
-                                                     rng,
-                                                     B * T,
-                                                     H,
-                                                     D,
-                                                     cfg.frac_bits,
-                                                     mat2_x_range,
-                                                     mat2_w_range);
-    std::vector<uint64_t> y_vec(Y_share.data, Y_share.data + Y_share.numel());
-    std::vector<uint64_t> y_scaled(Y_share.numel(), 0);
-    pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
-    pe->add_task(std::make_unique<runtime::TruncTask>(
-        &plan2.bundle, std::span<const uint64_t>(y_vec.data(), y_vec.size()),
-        std::span<uint64_t>(y_scaled.data(), y_scaled.size())));
-    pe->run(R);
-    pe->pfss_batch().clear();
-    pe->open_collector().clear();
-    for (size_t i = 0; i < Y_share.numel() && i < y_scaled.size(); ++i) {
-      Y_share.data[i] = y_scaled[i];
-    }
-  } else {
+    matmul_publicW(view2(hidden_scaled.data(), B * T, H),
+                   W2_public,
+                   view2(Y_share.data, B * T, D),
+                   mp);
     if (!mp.local_rescale) rescale_view(Y_share, cfg.frac_bits);
   }
 }

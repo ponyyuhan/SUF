@@ -77,9 +77,8 @@ void transformer_layer_forward(const TransformerConfig& cfg,
                                TensorView<uint64_t> Y_share,
                                LayerContext* ctx,
                                runtime::PhaseExecutor* pe) {
-  runtime::PfssSuperBatch local_batch;
   if (ctx && ctx->pfss_batch == nullptr) {
-    ctx->pfss_batch = &pe->pfss_batch();
+    ctx->pfss_batch = &pe->pfss_trunc_batch();
   }
   runtime::PhaseExecutor local_pe;
   if (pe == nullptr) pe = &local_pe;

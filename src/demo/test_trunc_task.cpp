@@ -97,7 +97,8 @@ int main() {
     runtime::ProtoChanFromNet pch(net_ch);
     R.pfss_chan = &pch;
     R.net_chan = &net_ch;
-    R.pfss = &pe.pfss_batch();
+    R.pfss_coeff = &pe.pfss_coeff_batch();
+    R.pfss_trunc = &pe.pfss_trunc_batch();
     R.opens = &pe.open_collector();
 
     std::vector<uint64_t> out(in.size(), 0);

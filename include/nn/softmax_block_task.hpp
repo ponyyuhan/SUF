@@ -2,7 +2,9 @@
 
 #include <memory>
 #include <vector>
+#include <optional>
 
+#include "compiler/range_analysis.hpp"
 #include "runtime/phase_tasks.hpp"
 
 namespace nn {
@@ -16,6 +18,7 @@ struct SoftmaxPlan {
   runtime::RecipTaskBundle recip;
   runtime::TruncChoice prob_trunc;
   runtime::RowBroadcastTripleProvider* row_triples = nullptr;
+  std::optional<compiler::RangeInterval> prob_range;  // optional override for prob trunc selection
 };
 
 // Single-task softmax: nExp -> sum -> recip -> exp*recip -> trunc, all within one PhaseExecutor run.
@@ -94,6 +97,7 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
         auto need = mul_task_->step(R);
         if (!mul_task_->done()) return need;
         // Choose trunc bundle based on range
+        if (plan_.prob_range) prob_range_ = *plan_.prob_range;
         const auto* trunc_bundle = select_trunc_bundle(plan_.prob_trunc, prob_range_, plan_.frac_bits);
         if (!trunc_bundle) throw std::runtime_error("SoftmaxBlockTask: missing trunc bundle");
         trunc_task_ = std::make_unique<runtime::TruncTask>(trunc_bundle,

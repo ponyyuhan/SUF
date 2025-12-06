@@ -178,7 +178,8 @@ PartyResult run_party(int party,
   R.pfss_backend = &backend;
   R.pfss_chan = &pch;
   R.net_chan = &ch;
-  R.pfss = &pe.pfss_batch();
+  R.pfss_coeff = &pe.pfss_coeff_batch();
+  R.pfss_trunc = &pe.pfss_trunc_batch();
   R.opens = &pe.open_collector();
 
   std::vector<uint64_t> out(plan.rows * plan.cols, 0);
@@ -448,18 +449,20 @@ void test_correctness_and_flush() {
   assert(all_close);  // within 1 LSB at Q16
 
   auto check_stats = [&](const runtime::PhaseExecutor::Stats& s) {
+    size_t pfss_flushes = s.pfss_coeff_flushes + s.pfss_trunc_flushes;
+    size_t pfss_jobs = s.pfss_coeff_jobs + s.pfss_trunc_jobs;
     // Expect a modest number of flushes for this tiny problem: a handful of waves.
-    assert(s.pfss_flushes > 0 && s.pfss_flushes <= 8);
+    assert(pfss_flushes > 0 && pfss_flushes <= 8);
     assert(s.open_flushes > 0 && s.open_flushes <= 16);
-    assert(s.pfss_jobs > 0);
+    assert(pfss_jobs > 0);
   };
   check_stats(res0.stats);
   check_stats(res1.stats);
 
   // Flush counts should stay small for this tiny problem.
   assert(res0.stats.open_flushes > 0);
-  assert(res0.stats.pfss_flushes > 0);
-  assert(res0.stats.pfss_jobs > 0);
+  assert(res0.stats.pfss_coeff_flushes + res0.stats.pfss_trunc_flushes > 0);
+  assert(res0.stats.pfss_coeff_jobs + res0.stats.pfss_trunc_jobs > 0);
 }
 
 }  // namespace
