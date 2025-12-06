@@ -7,14 +7,6 @@ namespace nn {
 
 static inline int64_t to_signed(uint64_t v) { return static_cast<int64_t>(v); }
 static inline uint64_t to_ring(int64_t v) { return static_cast<uint64_t>(v); }
-static inline void rescale_view(const TensorView<uint64_t>& t, int frac_bits) {
-  if (frac_bits <= 0) return;
-  size_t n = t.numel();
-  for (size_t i = 0; i < n; ++i) {
-    int64_t s = to_signed(t.data[i]);
-    t.data[i] = to_ring(s >> frac_bits);
-  }
-}
 
 void add(const TensorView<uint64_t>& x,
          const TensorView<uint64_t>& y,
@@ -34,18 +26,16 @@ void mul_const(const TensorView<uint64_t>& x,
                int64_t c,
                int frac_bits,
                TensorView<uint64_t> out,
-               bool apply_rescale,
                LayerContext* ctx) {
   bool use_ctx = (ctx != nullptr);
-  bool do_shift_inline = apply_rescale && !use_ctx;
   size_t n = x.numel();
   for (size_t i = 0; i < n; ++i) {
     __int128 prod = static_cast<__int128>(to_signed(x.data[i])) * static_cast<__int128>(c);
-    int64_t res = static_cast<int64_t>(prod);
-    if (do_shift_inline && frac_bits > 0) res >>= frac_bits;
-    out.data[i] = to_ring(res);
+    out.data[i] = to_ring(static_cast<int64_t>(prod));
   }
-  if (use_ctx && do_shift_inline) rescale_view(out, frac_bits);
+  if (!use_ctx) {
+    throw std::runtime_error("mul_const: explicit rescale required via LayerContext/Rescale op");
+  }
 }
 
 void axpy(const TensorView<uint64_t>& x,
@@ -53,19 +43,17 @@ void axpy(const TensorView<uint64_t>& x,
           int64_t a,
           int frac_bits,
           TensorView<uint64_t> out,
-          bool apply_rescale,
           LayerContext* ctx) {
   bool use_ctx = (ctx != nullptr);
-  bool do_shift_inline = apply_rescale && !use_ctx;
   size_t n = x.numel();
   for (size_t i = 0; i < n; ++i) {
     __int128 prod = static_cast<__int128>(to_signed(y.data[i])) * static_cast<__int128>(a);
-    int64_t res = static_cast<int64_t>(prod);
-    if (do_shift_inline && frac_bits > 0) res >>= frac_bits;
-    res += to_signed(x.data[i]);
+    int64_t res = static_cast<int64_t>(prod) + to_signed(x.data[i]);
     out.data[i] = to_ring(res);
   }
-  if (use_ctx && do_shift_inline) rescale_view(out, frac_bits);
+  if (!use_ctx) {
+    throw std::runtime_error("axpy: explicit rescale required via LayerContext/Rescale op");
+  }
 }
 
 void hadamard(const LinOpsContext& ctx,
@@ -74,20 +62,19 @@ void hadamard(const LinOpsContext& ctx,
               TensorView<uint64_t> out,
               const std::vector<mpc::BeaverTripleA<core::Z2n<64>>>& triples,
               size_t triple_offset,
-              int frac_bits,
-              bool apply_rescale) {
+              int frac_bits) {
   size_t n = x.numel();
-  bool do_shift_inline = apply_rescale && (ctx.graph == nullptr);
+  bool use_ctx = (ctx.graph != nullptr);
   for (size_t i = 0; i < n; ++i) {
     auto t = triples[triple_offset + i];
     mpc::AddShare<core::Z2n<64>> xs{core::Z2n<64>(x.data[i])};
     mpc::AddShare<core::Z2n<64>> ys{core::Z2n<64>(y.data[i])};
     auto z = mpc::mul_share(ctx.party, *ctx.ch, xs, ys, t);
-    int64_t res = static_cast<int64_t>(z.s.v);
-    if (do_shift_inline && frac_bits > 0) res >>= frac_bits;
-    out.data[i] = to_ring(res);
+    out.data[i] = to_ring(static_cast<int64_t>(z.s.v));
   }
-  if (ctx.graph && do_shift_inline) rescale_view(out, frac_bits);
+  if (!use_ctx) {
+    throw std::runtime_error("hadamard: explicit rescale required via LayerContext/Rescale op");
+  }
 }
 
 void sum_lastdim(const LinOpsContext& ctx,

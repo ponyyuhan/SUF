@@ -23,6 +23,14 @@ struct LayerContext {
   int frac_bits = 16;
   bool enable_hoist = false;  // enable conservative rescale hoisting when finalizing
   std::optional<compiler::TruncationPassResult> last_trunc;
+  std::unordered_map<int, TensorView<uint64_t>> bindings;
+
+  void bind(int tid, const TensorView<uint64_t>& buf) { bindings[tid] = buf; }
+  std::optional<TensorView<uint64_t>> view(int tid) const {
+    auto it = bindings.find(tid);
+    if (it == bindings.end()) return std::nullopt;
+    return it->second;
+  }
 };
 
 inline compiler::Scale make_scale(int frac_bits, bool is_signed = true) {

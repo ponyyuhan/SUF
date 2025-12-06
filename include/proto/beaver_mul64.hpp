@@ -15,7 +15,10 @@ struct BeaverMul64 {
 
   // One multiplication (1 round: open e,f)
   u64 mul(u64 x, u64 y) {
-    if (idx >= triples.size()) throw std::runtime_error("BeaverMul64: out of triples");
+    if (idx >= triples.size()) {
+      throw std::runtime_error("BeaverMul64: out of triples at " + std::to_string(idx) +
+                               " of " + std::to_string(triples.size()));
+    }
     const auto& t = triples[idx++];
     u64 e_share = sub_mod(x, t.a);
     u64 f_share = sub_mod(y, t.b);
@@ -42,7 +45,10 @@ struct BeaverMul64 {
                  std::vector<u64>& out) {
     const size_t n = x.size();
     if (y.size() != n) throw std::runtime_error("mul_batch size mismatch");
-    if (idx + n > triples.size()) throw std::runtime_error("mul_batch out of triples");
+    if (idx + n > triples.size()) {
+      throw std::runtime_error("mul_batch out of triples at " + std::to_string(idx + n) +
+                               " of " + std::to_string(triples.size()));
+    }
     out.resize(n);
 
     std::vector<u64> e_share(n), f_share(n), other_e(n), other_f(n);

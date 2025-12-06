@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <cstring>
 #include <optional>
 #include <random>
 #include <vector>
@@ -24,23 +25,6 @@ namespace {
 
 inline int64_t to_signed(uint64_t v) { return static_cast<int64_t>(v); }
 inline uint64_t to_ring(int64_t v) { return static_cast<uint64_t>(v); }
-
-static inline void rescale_buffer(std::vector<uint64_t>& buf, int frac_bits) {
-  if (frac_bits <= 0) return;
-  for (auto& v : buf) {
-    int64_t s = to_signed(v);
-    v = to_ring(s >> frac_bits);
-  }
-}
-
-static inline void rescale_view(const TensorView<uint64_t>& t, int frac_bits) {
-  if (frac_bits <= 0) return;
-  size_t n = t.numel();
-  for (size_t i = 0; i < n; ++i) {
-    int64_t s = to_signed(t.data[i]);
-    t.data[i] = to_ring(s >> frac_bits);
-  }
-}
 
 // Temporary helper to open shares to plaintext (will be removed once score/prob path is fully taskified).
 void open_to_plain(int party,
@@ -202,6 +186,12 @@ void attention_forward(const AttentionConfig& cfg,
   size_t H = cfg.H;
   size_t Dh = cfg.Dh;
   int fb = cfg.frac_bits;
+  if (!ctx || !ctx->trunc_ctx) {
+    throw std::runtime_error("attention_forward: LayerContext with truncation context required (no legacy rescale)");
+  }
+  if (cfg.legacy_softmax) {
+    throw std::runtime_error("attention_forward: legacy softmax path disabled (inline shifts not allowed)");
+  }
   bool use_phase_softmax = !cfg.legacy_softmax && pe && ctx && ctx->trunc_ctx;
 
   std::vector<uint64_t> qkv(B * T * 3 * D, 0);
@@ -271,15 +261,40 @@ void attention_forward(const AttentionConfig& cfg,
   MatmulParams mp;
   mp.frac_bits = fb;
   mp.w_transposed = false;
-  mp.local_rescale = (ctx == nullptr);
-  mp.allow_legacy_shift = (ctx == nullptr);
+  mp.local_rescale = false;
+  mp.allow_legacy_shift = false;
+
+  if (!ctx) {
+    throw std::runtime_error("attention_forward: LayerContext required (no local rescale fallback)");
+  }
 
   matmul_publicW(view2(const_cast<uint64_t*>(X_share.data), B * T, D),
                  Wqkv_public,
                  view2(qkv.data(), B * T, 3 * D),
                  mp);
-  if (!ctx && !mp.local_rescale) {
-    rescale_buffer(qkv, fb);
+  // Truncate qkv accum (Q2f -> Qf) via composite truncation (no local shift).
+  compiler::GateParams trunc_params_qkv;
+  trunc_params_qkv.kind = compiler::select_trunc_kind(compiler::RangeInterval::whole(true), fb);
+  trunc_params_qkv.frac_bits = fb;
+  std::mt19937_64 rng_qkv(123);
+  auto trunc_qkv_bundle =
+      compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng_qkv, trunc_params_qkv, qkv.size());
+  {
+    runtime::PhaseResources truncR;
+    runtime::ProtoChanFromNet pch(ch);
+    truncR.party = party;
+    truncR.net_chan = &ch;
+    truncR.pfss_backend = &ctx->trunc_ctx->backend();
+    truncR.pfss_chan = &pch;
+    truncR.pfss_trunc = &pe->pfss_trunc_batch();
+    truncR.opens = &pe->open_collector();
+    pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
+    auto trunc_task = std::make_unique<runtime::TruncTask>(
+        &trunc_qkv_bundle,
+        std::span<const uint64_t>(qkv.data(), qkv.size()),
+        std::span<uint64_t>(qkv.data(), qkv.size()));
+    pe->add_task(std::move(trunc_task));
+    pe->run(truncR);
   }
 
   std::vector<uint64_t> ctx_shares(B * T * H * Dh, 0);
@@ -306,9 +321,9 @@ void attention_forward(const AttentionConfig& cfg,
   std::optional<compiler::TruncationLoweringResult> prob_faithful;
   runtime::TruncChoice prob_choice{};
   runtime::PhaseResources phase_R;
-  runtime::ProtoChanFromNet pch(ch);
   phase_R.party = party;
   phase_R.net_chan = &ch;
+  runtime::ProtoChanFromNet pch(ch);
   std::mt19937_64 rng(123);
   if (use_phase_softmax) {
     size_t triple_need = 3 * cache.S_max * B * H;
@@ -489,13 +504,14 @@ void attention_forward(const AttentionConfig& cfg,
     pe->open_collector().clear();
 
     // Scale scores by inv_sqrt (public scalar) and prepare softmax inputs.
+    // Explicit Rescale is required; legacy inline shift is disallowed.
     for (size_t row = 0; row < rows; ++row) {
       uint64_t max_share = 0;
       for (size_t s = 0; s < cur_len; ++s) {
         size_t idx = row * cur_len + s;
         uint64_t v = score_share[idx];
         __int128 scaled = static_cast<__int128>(to_signed(v)) * static_cast<__int128>(inv_sqrt);
-        score_share[idx] = to_ring(static_cast<int64_t>(scaled >> fb));
+        score_share[idx] = to_ring(static_cast<int64_t>(scaled));
         if (score_share[idx] > max_share) max_share = score_share[idx];
       }
       if (use_phase_softmax) {
@@ -741,7 +757,29 @@ void attention_forward(const AttentionConfig& cfg,
                  Wout_public,
                  Y_share,
                  mp);
-  if (!mp.local_rescale) rescale_view(Y_share, fb);
+  // Truncate output accum (Q2f -> Qf) via composite truncation.
+  compiler::GateParams trunc_params_out;
+  trunc_params_out.kind = compiler::select_trunc_kind(compiler::RangeInterval::whole(true), fb);
+  trunc_params_out.frac_bits = fb;
+  std::mt19937_64 rng_out(456);
+  auto trunc_out_bundle =
+      compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng_out, trunc_params_out, Y_share.numel());
+  {
+    runtime::PhaseResources truncR;
+    runtime::ProtoChanFromNet pch(ch);
+    truncR.party = party;
+    truncR.net_chan = &ch;
+    truncR.pfss_backend = &ctx->trunc_ctx->backend();
+    truncR.pfss_chan = &pch;
+    truncR.pfss_trunc = &pe->pfss_trunc_batch();
+    truncR.opens = &pe->open_collector();
+    pe->begin_phase(runtime::PhaseExecutor::Phase::kOutProj);
+    pe->add_task(std::make_unique<runtime::TruncTask>(
+        &trunc_out_bundle,
+        std::span<const uint64_t>(Y_share.data, Y_share.numel()),
+        std::span<uint64_t>(Y_share.data, Y_share.numel())));
+    pe->run(truncR);
+  }
 }
 
 }  // namespace nn

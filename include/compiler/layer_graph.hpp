@@ -37,7 +37,11 @@ enum class OpKind {
   kAxpy,
   kMulConst,
   kHadamard,
-  kRescale
+  kRescale,
+  kMean,
+  kVar,
+  kRsqrt,
+  kAffine
 };
 
 struct MatmulAttrs {
@@ -69,6 +73,7 @@ struct OpNode {
   RescaleAttrs rescale;
   int64_t scalar = 0;      // for MulConst / Axpy
   int frac_bits = 0;       // for MulConst / Axpy / Hadamard rescale
+  int length = 0;          // for LN mean/var length
 };
 
 class LayerGraph {
@@ -94,6 +99,11 @@ class LayerGraph {
   int add_mul_const(int x, int64_t c, int frac_bits, const Scale& out_scale);
   int add_axpy(int x, int y, int64_t a, int frac_bits, const Scale& out_scale);
   int add_hadamard(int x, int y, int frac_bits, const Scale& out_scale);
+  // LayerNorm primitives
+  int add_mean(int x, int length, const Scale& out_scale);
+  int add_var(int x, int mean_tensor, int length, int frac_bits, const Scale& out_scale);
+  int add_rsqrt(int x, int frac_bits, const Scale& out_scale);
+  int add_affine(int x, int gamma, int beta, int frac_bits, const Scale& out_scale);
 
   // Run forward range propagation.
   void propagate_ranges();

@@ -31,9 +31,8 @@ struct LayerNormKeys {
   LayerNormKey party1;
 };
 
-inline LayerNormKeys dealer_make_layernorm_keys(
-    const LayerNormParams& params,
-    std::mt19937_64& rng) {
+inline LayerNormKeys dealer_make_layernorm_keys(const LayerNormParams& params,
+                                                std::mt19937_64& rng) {
   LayerNormKeys out;
   RsqrtParams rparams;
   rparams.frac_bits = params.frac_bits;
@@ -60,10 +59,9 @@ inline LayerNormKeys dealer_make_layernorm_keys(
   return out;
 }
 
-inline std::vector<uint64_t> exchange_layer_shares(
-    int party,
-    net::Chan& ch,
-    const std::vector<mpc::AddShare<core::Z2n<64>>>& mine) {
+inline std::vector<uint64_t> exchange_layer_shares(int party,
+                                                   net::Chan& ch,
+                                                   const std::vector<mpc::AddShare<core::Z2n<64>>>& mine) {
   std::vector<uint64_t> other(mine.size(), 0);
   if (party == 0) {
     for (auto& s : mine) ch.send_u64(s.s.v);
@@ -75,14 +73,13 @@ inline std::vector<uint64_t> exchange_layer_shares(
   return other;
 }
 
-inline void eval_layernorm_block(
-    const LayerNormKey& k,
-    int party,
-    net::Chan& ch,
-    const std::vector<mpc::AddShare<core::Z2n<64>>>& x_shares,
-    const std::vector<mpc::AddShare<core::Z2n<64>>>* gamma_shares,
-    const std::vector<mpc::AddShare<core::Z2n<64>>>* beta_shares,
-    std::vector<mpc::AddShare<core::Z2n<64>>>& out_shares) {
+inline void eval_layernorm_block(const LayerNormKey& k,
+                                 int party,
+                                 net::Chan& ch,
+                                 const std::vector<mpc::AddShare<core::Z2n<64>>>& x_shares,
+                                 const std::vector<mpc::AddShare<core::Z2n<64>>>* gamma_shares,
+                                 const std::vector<mpc::AddShare<core::Z2n<64>>>* beta_shares,
+                                 std::vector<mpc::AddShare<core::Z2n<64>>>& out_shares) {
   out_shares.resize(x_shares.size());
   auto other_x = exchange_layer_shares(party, ch, x_shares);
   std::vector<int64_t> x_plain(x_shares.size(), 0);

@@ -160,11 +160,17 @@ void matmul_beaver_finalize(PreparedMatmulBeaver& prep,
     }
   }
 
-  bool trunc_requested = params.trunc_backend != nullptr;
+  bool trunc_requested = (params.trunc_backend != nullptr) ||
+                         (params.trunc_bundle != nullptr) ||
+                         (params.trunc_plan != nullptr);
   const compiler::TruncationLoweringResult* bundle_ptr = params.trunc_bundle;
   const compiler::MatmulTruncationPlan* plan_ptr = params.trunc_plan;
   if (trunc_requested && !bundle_ptr && plan_ptr) {
     bundle_ptr = &plan_ptr->bundle;
+  }
+
+  if (trunc_requested && !params.trunc_backend) {
+    throw std::runtime_error("matmul_beaver_finalize: truncation requested but backend null");
   }
 
   if (trunc_requested && !bundle_ptr) {
@@ -176,6 +182,9 @@ void matmul_beaver_finalize(PreparedMatmulBeaver& prep,
   }
 
   if (!trunc_requested) {
+    if (!params.allow_local_shift) {
+      throw std::runtime_error("matmul_beaver_finalize: local shift fallback disallowed");
+    }
     for (size_t i = 0; i < total; ++i) {
       prep.Y_share.data[i] = to_ring(static_cast<int64_t>(to_signed(acc_share[i]) >> params.frac_bits));
     }
@@ -358,11 +367,17 @@ static void matmul_beaver2d(const MatmulBeaverParams& params,
     }
   }
 
-  bool trunc_requested = params.trunc_backend != nullptr;
+  bool trunc_requested = (params.trunc_backend != nullptr) ||
+                         (params.trunc_bundle != nullptr) ||
+                         (params.trunc_plan != nullptr);
   const compiler::TruncationLoweringResult* bundle_ptr = params.trunc_bundle;
   const compiler::MatmulTruncationPlan* plan_ptr = params.trunc_plan;
   if (trunc_requested && !bundle_ptr && plan_ptr) {
     bundle_ptr = &plan_ptr->bundle;
+  }
+
+  if (trunc_requested && !params.trunc_backend) {
+    throw std::runtime_error("matmul_beaver: truncation requested but backend null");
   }
 
   if (trunc_requested && !bundle_ptr) {
@@ -374,6 +389,9 @@ static void matmul_beaver2d(const MatmulBeaverParams& params,
   }
 
   if (!trunc_requested) {
+    if (!params.allow_local_shift) {
+      throw std::runtime_error("matmul_beaver: local shift fallback disallowed");
+    }
     for (size_t i = 0; i < total; ++i) {
       Y_share.data[i] = to_ring(static_cast<int64_t>(to_signed(acc_share[i]) >> params.frac_bits));
     }

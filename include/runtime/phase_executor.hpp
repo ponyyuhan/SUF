@@ -110,12 +110,12 @@ class PhaseExecutor {
       }
       if (want_pfss_coeff && R.pfss_coeff && R.pfss_backend && R.pfss_chan &&
           R.pfss_coeff->has_pending()) {
-        R.pfss_coeff->flush_and_finalize(R.party, *R.pfss_backend, *R.pfss_chan);
+        R.pfss_coeff->flush_eval(R.party, *R.pfss_backend, *R.pfss_chan);
         progressed = true;
       }
       if (want_pfss_trunc && R.pfss_trunc && R.pfss_backend && R.pfss_chan &&
           R.pfss_trunc->has_pending()) {
-        R.pfss_trunc->flush_and_finalize(R.party, *R.pfss_backend, *R.pfss_chan);
+        R.pfss_trunc->flush_eval(R.party, *R.pfss_backend, *R.pfss_chan);
         progressed = true;
       }
       if (!progressed) {
@@ -135,6 +135,11 @@ class PhaseExecutor {
     stats_.pfss_trunc_jobs = pts.jobs;
     stats_.pfss_trunc_arith_words = pts.arith_words;
     stats_.pfss_trunc_pred_bits = pts.pred_bits;
+
+    // Clear batches/opens for next phase; stats already recorded.
+    pfss_coeff_.clear();
+    pfss_trunc_.clear();
+    opens_.clear();
   }
 
  private:

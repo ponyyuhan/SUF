@@ -19,23 +19,6 @@ using gates::ref_silu_fixed;
 static inline int64_t to_signed(uint64_t v) { return static_cast<int64_t>(v); }
 static inline uint64_t to_ring(int64_t v) { return static_cast<uint64_t>(v); }
 
-static inline void rescale_buffer(std::vector<uint64_t>& buf, int frac_bits) {
-  if (frac_bits <= 0) return;
-  for (auto& v : buf) {
-    int64_t s = to_signed(v);
-    v = to_ring(s >> frac_bits);
-  }
-}
-
-static inline void rescale_view(const TensorView<uint64_t>& t, int frac_bits) {
-  if (frac_bits <= 0) return;
-  size_t n = t.numel();
-  for (size_t i = 0; i < n; ++i) {
-    int64_t s = to_signed(t.data[i]);
-    t.data[i] = to_ring(s >> frac_bits);
-  }
-}
-
 void mlp_forward(const MLPConfig& cfg,
                  const TensorView<uint64_t>& X_share,
                  const TensorView<int64_t>& W1_public,
@@ -51,8 +34,11 @@ void mlp_forward(const MLPConfig& cfg,
   size_t H = cfg.Hidden;
   MatmulParams mp;
   mp.frac_bits = cfg.frac_bits;
-  mp.local_rescale = (ctx == nullptr);  // explicit rescale when ctx is provided.
-  mp.allow_legacy_shift = (ctx == nullptr);
+  mp.local_rescale = false;  // explicit rescale via truncation only
+  mp.allow_legacy_shift = false;
+  if (!ctx) {
+    throw std::runtime_error("mlp_forward: LayerContext required (no local rescale fallback)");
+  }
 
   std::vector<uint64_t> hidden(B * T * H, 0);
   compiler::RangeInterval mat1_x_range;
@@ -216,17 +202,7 @@ void mlp_forward(const MLPConfig& cfg,
       Y_share.data[i] = y_scaled[i];
     }
   } else {
-    if (!mp.local_rescale) rescale_buffer(hidden_scaled, cfg.frac_bits);
-    auto silu_spec = make_silu_spec({cfg.frac_bits, 16});
-    for (size_t i = 0; i < hidden_scaled.size(); ++i) {
-      int64_t v = to_signed(hidden_scaled[i]);
-      hidden_scaled[i] = to_ring(ref_silu_fixed(silu_spec, v));
-    }
-    matmul_publicW(view2(hidden_scaled.data(), B * T, H),
-                   W2_public,
-                   view2(Y_share.data, B * T, D),
-                   mp);
-    if (!mp.local_rescale) rescale_view(Y_share, cfg.frac_bits);
+    throw std::runtime_error("mlp_forward: phase executor + truncation required (legacy path disabled)");
   }
 }
 

@@ -79,6 +79,7 @@ set(CMAKE_DEPEND_INFO_FILES
   "CMakeFiles/test_truncation.dir/DependInfo.cmake"
   "CMakeFiles/test_softmax_task.dir/DependInfo.cmake"
   "CMakeFiles/test_trunc_task.dir/DependInfo.cmake"
+  "CMakeFiles/test_layernorm_task.dir/DependInfo.cmake"
   "CMakeFiles/bench_gemm.dir/DependInfo.cmake"
   "CMakeFiles/bench_truncation.dir/DependInfo.cmake"
   "CMakeFiles/test_myl7_bit_order.dir/DependInfo.cmake"

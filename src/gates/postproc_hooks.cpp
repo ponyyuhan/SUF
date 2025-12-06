@@ -46,48 +46,17 @@ const compiler::TruncationLoweringResult& HornerCubicHook::ensure_trunc_bundle()
   return *trunc_bundle;
 }
 
-void HornerCubicHook::run_batch(int party,
-                                proto::IChannel& ch,
-                                proto::BeaverMul64& mul,
-                                const uint64_t* hatx_public,
-                                const uint64_t* arith_share_in,
-                                size_t arith_stride,
+void HornerCubicHook::run_batch(int,
+                                proto::IChannel&,
+                                proto::BeaverMul64&,
+                                const uint64_t*,
                                 const uint64_t*,
                                 size_t,
-                                size_t N,
-                                uint64_t* haty_share_out) const {
-  if (arith_stride < 4) return;
-  std::vector<uint64_t> x_share(N, 0);
-  for (size_t i = 0; i < N; ++i) {
-    uint64_t hx = hatx_public ? hatx_public[i] : 0ull;
-    x_share[i] = (party == 0) ? proto::sub_mod(hx, r_in_share) : proto::sub_mod(0ull, r_in_share);
-  }
-
-  std::vector<uint64_t> t1(N, 0);
-  for (size_t i = 0; i < N; ++i) {
-    const uint64_t* coeff = arith_share_in + i * arith_stride;
-    t1[i] = mul.mul(coeff[3], x_share[i]);
-  }
-
-  std::vector<uint64_t> t2(N, 0);
-  for (size_t i = 0; i < N; ++i) {
-    const uint64_t* coeff = arith_share_in + i * arith_stride;
-    uint64_t sum = proto::add_mod(t1[i], coeff[2]);
-    t2[i] = mul.mul(sum, x_share[i]);
-  }
-
-  std::vector<uint64_t> t3(N, 0);
-  for (size_t i = 0; i < N; ++i) {
-    const uint64_t* coeff = arith_share_in + i * arith_stride;
-    uint64_t sum = proto::add_mod(t2[i], coeff[1]);
-    t3[i] = mul.mul(sum, x_share[i]);
-  }
-
-  for (size_t i = 0; i < N; ++i) {
-    const uint64_t* coeff = arith_share_in + i * arith_stride;
-    uint64_t acc = proto::add_mod(t3[i], coeff[0]);
-    haty_share_out[i] = acc;
-  }
+                                const uint64_t*,
+                                size_t,
+                                size_t,
+                                uint64_t*) const {
+  throw std::runtime_error("HornerCubicHook is disabled; use task-based cubic evaluation with truncation");
 }
 
 }  // namespace gates

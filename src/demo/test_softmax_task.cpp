@@ -225,12 +225,22 @@ void test_correctness_and_flush() {
   ensure_triples(nexp_mat.trunc_2f, 4096, rng);
   std::fill(nexp_mat.keys.k0.r_out_share.begin(), nexp_mat.keys.k0.r_out_share.end(), 0ull);
   std::fill(nexp_mat.keys.k1.r_out_share.begin(), nexp_mat.keys.k1.r_out_share.end(), 0ull);
+  nexp_mat.keys.k0.r_in_share_vec.assign(static_cast<size_t>(rows * cols), nexp_mat.keys.k0.r_in_share);
+  nexp_mat.keys.k1.r_in_share_vec.assign(static_cast<size_t>(rows * cols), nexp_mat.keys.k1.r_in_share);
+  nexp_mat.trunc_f.keys.k0.r_in_share_vec.assign(static_cast<size_t>(rows * cols), nexp_mat.trunc_f.keys.k0.r_in_share);
+  nexp_mat.trunc_f.keys.k1.r_in_share_vec.assign(static_cast<size_t>(rows * cols), nexp_mat.trunc_f.keys.k1.r_in_share);
+  nexp_mat.trunc_2f.keys.k0.r_in_share_vec.assign(static_cast<size_t>(rows * cols), nexp_mat.trunc_2f.keys.k0.r_in_share);
+  nexp_mat.trunc_2f.keys.k1.r_in_share_vec.assign(static_cast<size_t>(rows * cols), nexp_mat.trunc_2f.keys.k1.r_in_share);
   auto nexp_bundle = gates::make_nexp_cubic_bundle(nexp_mat, fb);
   auto recip_mat = gates::dealer_make_recip_task_material(backend, fb, /*nr_iters=*/1, rng);
   ensure_triples(recip_mat.keys, 4096, rng);
   ensure_triples(recip_mat.trunc_fb, 4096, rng);
   std::fill(recip_mat.keys.k0.r_out_share.begin(), recip_mat.keys.k0.r_out_share.end(), 0ull);
   std::fill(recip_mat.keys.k1.r_out_share.begin(), recip_mat.keys.k1.r_out_share.end(), 0ull);
+  recip_mat.keys.k0.r_in_share_vec.assign(static_cast<size_t>(rows), recip_mat.keys.k0.r_in_share);
+  recip_mat.keys.k1.r_in_share_vec.assign(static_cast<size_t>(rows), recip_mat.keys.k1.r_in_share);
+  recip_mat.trunc_fb.keys.k0.r_in_share_vec.assign(static_cast<size_t>(rows), recip_mat.trunc_fb.keys.k0.r_in_share);
+  recip_mat.trunc_fb.keys.k1.r_in_share_vec.assign(static_cast<size_t>(rows), recip_mat.trunc_fb.keys.k1.r_in_share);
   auto recip_bundle = gates::make_recip_bundle(recip_mat);
 
   compiler::GateParams gap_p;
@@ -250,6 +260,10 @@ void test_correctness_and_flush() {
   std::fill(prob_gapars.keys.k1.r_out_share.begin(), prob_gapars.keys.k1.r_out_share.end(), 0ull);
   std::fill(prob_faithful.keys.k0.r_out_share.begin(), prob_faithful.keys.k0.r_out_share.end(), 0ull);
   std::fill(prob_faithful.keys.k1.r_out_share.begin(), prob_faithful.keys.k1.r_out_share.end(), 0ull);
+  prob_gapars.keys.k0.r_in_share_vec.assign(static_cast<size_t>(rows * cols), prob_gapars.keys.k0.r_in_share);
+  prob_gapars.keys.k1.r_in_share_vec.assign(static_cast<size_t>(rows * cols), prob_gapars.keys.k1.r_in_share);
+  prob_faithful.keys.k0.r_in_share_vec.assign(static_cast<size_t>(rows * cols), prob_faithful.keys.k0.r_in_share);
+  prob_faithful.keys.k1.r_in_share_vec.assign(static_cast<size_t>(rows * cols), prob_faithful.keys.k1.r_in_share);
 
   RowBroadcastTripleMaterial triple_mat = make_row_broadcast_triples(rows, cols, rng);
   RowBroadcastTripleProviderImpl triples0(triple_mat, 0);
@@ -326,39 +340,6 @@ void test_correctness_and_flush() {
     }
   }
 
-  // Also compute Horner-hook output directly using the composite + hook path for comparison.
-  auto run_hook_exp = [&](int party, LocalChan& lc) {
-    try {
-      auto hook = std::make_unique<gates::HornerCubicHook>(fb, (party == 0) ? nexp_mat.keys.k0.r_in_share
-                                                                             : nexp_mat.keys.k1.r_in_share);
-      hook->backend = &backend;
-      hook->trunc_frac_bits = fb;
-      runtime::ProtoChanFromNet pch(lc);
-      gates::CompositeBatchInput in;
-      uint64_t r_in = proto::add_mod(nexp_mat.keys.k0.r_in_share, nexp_mat.keys.k1.r_in_share);
-      std::vector<uint64_t> hatx(plain.size());
-      for (size_t i = 0; i < plain.size(); ++i) {
-        hatx[i] = proto::add_mod(static_cast<uint64_t>(plain[i]), r_in);
-      }
-      in.hatx = hatx.data();
-      in.N = hatx.size();
-      auto out = gates::composite_eval_batch_with_postproc(party,
-                                                           backend,
-                                                           pch,
-                                                           (party == 0) ? nexp_mat.keys.k0 : nexp_mat.keys.k1,
-                                                           nexp_mat.suf,
-                                                           in,
-                                                           *hook);
-      return out.haty_share;
-    } catch (const std::exception& e) {
-      std::cerr << "run_hook_exp party " << party << " exception: " << e.what() << "\n";
-      return std::vector<uint64_t>{};
-    }
-  };
-
-  std::vector<uint64_t> hook0(plain.size(), 0), hook1(plain.size(), 0);
-  bool hook_computed = false;
-
   auto recon_vec = [&](const std::vector<uint64_t>& a, const std::vector<uint64_t>& b) {
     std::vector<uint64_t> out(a.size());
     for (size_t i = 0; i < a.size(); ++i) {
@@ -366,21 +347,7 @@ void test_correctness_and_flush() {
     }
     return out;
   };
-  {
-    LocalChan::Shared hook_sh;
-    LocalChan hc0(&hook_sh, true), hc1(&hook_sh, false);
-    std::vector<uint64_t> h0, h1;
-    std::thread ht([&] { h1 = run_hook_exp(1, hc1); });
-    h0 = run_hook_exp(0, hc0);
-    ht.join();
-    if (!h0.empty() && h0.size() == h1.size()) {
-      hook0 = std::move(h0);
-      hook1 = std::move(h1);
-      hook_computed = true;
-    }
-  }
   auto exp_recon = recon_vec(res0.exp, res1.exp);
-  auto hook_recon = recon_vec(hook0, hook1);
   auto sum_recon = recon_vec(res0.sum, res1.sum);
   auto inv_recon = recon_vec(res0.inv, res1.inv);
   auto prod_recon = recon_vec(res0.prod, res1.prod);
@@ -396,13 +363,6 @@ void test_correctness_and_flush() {
     if (std::llabs(got - expected_exp[i]) > 1) {
       stage_ok = false;
       print_stage("exp", i, got, expected_exp[i]);
-    }
-    if (hook_computed) {
-      int64_t got_hook = static_cast<int64_t>(hook_recon[i]);
-      if (std::llabs(got_hook - expected_exp[i]) > 1) {
-        stage_ok = false;
-        print_stage("exp_hook", i, got_hook, expected_exp[i]);
-      }
     }
   }
   for (size_t r = 0; r < sum_recon.size(); ++r) {

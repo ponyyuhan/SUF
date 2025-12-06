@@ -452,6 +452,19 @@ test_trunc_task/fast:
 .PHONY : test_trunc_task/fast
 
 #=============================================================================
+# Target rules for targets named test_layernorm_task
+
+# Build rule for target.
+test_layernorm_task: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_layernorm_task
+.PHONY : test_layernorm_task
+
+# fast build rule for target.
+test_layernorm_task/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_layernorm_task.dir/build.make CMakeFiles/test_layernorm_task.dir/build
+.PHONY : test_layernorm_task/fast
+
+#=============================================================================
 # Target rules for targets named bench_gemm
 
 # Build rule for target.
@@ -897,6 +910,30 @@ src/demo/test_composite_runtime.s: src/demo/test_composite_runtime.cpp.s
 src/demo/test_composite_runtime.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_runtime.dir/build.make CMakeFiles/test_composite_runtime.dir/src/demo/test_composite_runtime.cpp.s
 .PHONY : src/demo/test_composite_runtime.cpp.s
+
+src/demo/test_layernorm_task.o: src/demo/test_layernorm_task.cpp.o
+.PHONY : src/demo/test_layernorm_task.o
+
+# target to build an object file
+src/demo/test_layernorm_task.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_layernorm_task.dir/build.make CMakeFiles/test_layernorm_task.dir/src/demo/test_layernorm_task.cpp.o
+.PHONY : src/demo/test_layernorm_task.cpp.o
+
+src/demo/test_layernorm_task.i: src/demo/test_layernorm_task.cpp.i
+.PHONY : src/demo/test_layernorm_task.i
+
+# target to preprocess a source file
+src/demo/test_layernorm_task.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_layernorm_task.dir/build.make CMakeFiles/test_layernorm_task.dir/src/demo/test_layernorm_task.cpp.i
+.PHONY : src/demo/test_layernorm_task.cpp.i
+
+src/demo/test_layernorm_task.s: src/demo/test_layernorm_task.cpp.s
+.PHONY : src/demo/test_layernorm_task.s
+
+# target to generate assembly for a file
+src/demo/test_layernorm_task.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_layernorm_task.dir/build.make CMakeFiles/test_layernorm_task.dir/src/demo/test_layernorm_task.cpp.s
+.PHONY : src/demo/test_layernorm_task.cpp.s
 
 src/demo/test_llm_gates.o: src/demo/test_llm_gates.cpp.o
 .PHONY : src/demo/test_llm_gates.o
@@ -1523,6 +1560,7 @@ help:
 	@echo "... test_composite_equiv_proto_myl7"
 	@echo "... test_composite_equiv_proto_sigmafast"
 	@echo "... test_composite_runtime"
+	@echo "... test_layernorm_task"
 	@echo "... test_llm_gates"
 	@echo "... test_mask_rewrite"
 	@echo "... test_matmul"
@@ -1586,6 +1624,9 @@ help:
 	@echo "... src/demo/test_composite_runtime.o"
 	@echo "... src/demo/test_composite_runtime.i"
 	@echo "... src/demo/test_composite_runtime.s"
+	@echo "... src/demo/test_layernorm_task.o"
+	@echo "... src/demo/test_layernorm_task.i"
+	@echo "... src/demo/test_layernorm_task.s"
 	@echo "... src/demo/test_llm_gates.o"
 	@echo "... src/demo/test_llm_gates.i"
 	@echo "... src/demo/test_llm_gates.s"

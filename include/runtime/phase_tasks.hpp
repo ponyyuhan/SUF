@@ -46,6 +46,7 @@
 #include "compiler/truncation_lowering.hpp"
 #include "compiler/range_analysis.hpp"
 #include "gates/postproc_hooks.hpp"
+#include "gates/rsqrt_gate.hpp"
 #include "proto/beaver.hpp"
 #include "proto/beaver_mul64.hpp"
 #include "proto/common.hpp"
@@ -54,6 +55,9 @@
 #include "runtime/pfss_superbatch.hpp"
 
 namespace runtime {
+
+inline int64_t to_signed(uint64_t v) { return static_cast<int64_t>(v); }
+inline uint64_t to_ring(int64_t v) { return static_cast<uint64_t>(v); }
 
 // Simple Beaver mul task (secret x secret). Uses OpenCollector if provided,
 // otherwise falls back to direct channel opens.
@@ -176,13 +180,24 @@ class TruncTask final : public detail::PhaseTask {
       hook_ = (R.party == 0) ? bundle_->hook0.get() : bundle_->hook1.get();
       if (!hook_) throw std::runtime_error("TruncTask: hook missing");
       hook_->configure(key_->compiled.layout);
+      // Require per-element masks if available; otherwise fail-closed.
+      if (!key_->r_in_share_vec.empty() &&
+          key_->r_in_share_vec.size() != in_.size() &&
+          key_->r_in_share_vec.size() != 1) {
+        throw std::runtime_error("TruncTask: r_in_share_vec size mismatch");
+      }
     }
 
     switch (st_) {
       case St::OpenXhat: {
         masked_.resize(in_.size());
         for (size_t i = 0; i < in_.size(); ++i) {
-          masked_[i] = proto::add_mod(in_[i], key_->r_in_share);
+          uint64_t rin = key_->r_in_share;
+          if (!key_->r_in_share_vec.empty()) {
+            rin = (key_->r_in_share_vec.size() == in_.size()) ? key_->r_in_share_vec[i]
+                                                              : key_->r_in_share_vec[0];
+          }
+          masked_[i] = proto::add_mod(in_[i], rin);
         }
         if (R.opens) {
           h_open_ = R.opens->enqueue(masked_);
@@ -236,26 +251,7 @@ class TruncTask final : public detail::PhaseTask {
         const std::vector<proto::BeaverTriple64Share>* triples = &key_->triples;
         size_t need_triples = std::max<size_t>(elems * v.ell, elems * v.r);
         if (triples->size() < need_triples) {
-          fallback_triples_.clear();
-          fallback_triples_.reserve(need_triples);
-          std::mt19937_64 rng(key_->r_in_share + 12345);
-          for (size_t i = 0; i < need_triples; ++i) {
-            uint64_t a = rng();
-            uint64_t b = rng();
-            uint64_t c = proto::mul_mod(a, b);
-            uint64_t a0 = rng();
-            uint64_t a1 = a - a0;
-            uint64_t b0 = rng();
-            uint64_t b1 = b - b0;
-            uint64_t c0 = rng();
-            uint64_t c1 = c - c0;
-            if (R.party == 0) {
-              fallback_triples_.push_back({a0, b0, c0});
-            } else {
-              fallback_triples_.push_back({a1, b1, c1});
-            }
-          }
-          triples = &fallback_triples_;
+          throw std::runtime_error("TruncTask: insufficient triples");
         }
         proto::BeaverMul64 mul{R.party, *R.pfss_chan, *triples};
         hook_->run_batch(R.party, *R.pfss_chan, mul,
@@ -287,7 +283,6 @@ class TruncTask final : public detail::PhaseTask {
   std::vector<int64_t> opened_;
   OpenHandle h_open_{};
   size_t token_ = static_cast<size_t>(-1);
-  std::vector<proto::BeaverTriple64Share> fallback_triples_;
 
   const uint64_t* job_hatx() {
     if (hatx_public_.empty()) {
@@ -301,6 +296,22 @@ class TruncTask final : public detail::PhaseTask {
 
   std::vector<uint64_t> hatx_public_;
 };
+
+struct TruncChoice {
+  const compiler::TruncationLoweringResult* gapars = nullptr;
+  const compiler::TruncationLoweringResult* faithful = nullptr;
+  int shift_bits = 0;
+  bool signed_value = true;
+};
+
+inline const compiler::TruncationLoweringResult* select_trunc_bundle(
+    const TruncChoice& choice,
+    const compiler::RangeInterval& range,
+    int frac_bits) {
+  if (!choice.gapars || !choice.faithful) return choice.faithful;
+  auto kind = compiler::select_trunc_kind(range, frac_bits);
+  return (kind == compiler::GateKind::GapARS) ? choice.gapars : choice.faithful;
+}
 
 struct CubicPolyBundle {
   const suf::SUF<uint64_t>* suf = nullptr;
@@ -320,21 +331,307 @@ struct RecipTaskBundle {
   int nr_iters = 1;
 };
 
-struct TruncChoice {
-  const compiler::TruncationLoweringResult* gapars = nullptr;
-  const compiler::TruncationLoweringResult* faithful = nullptr;
-  int shift_bits = 0;
-  bool signed_value = true;
+struct RsqrtTaskBundle {
+  const suf::SUF<uint64_t>* suf = nullptr;  // affine init coeff program
+  const gates::CompositePartyKey* key0 = nullptr;
+  const gates::CompositePartyKey* key1 = nullptr;
+  const compiler::TruncationLoweringResult* trunc_f = nullptr;
+  const compiler::TruncationLoweringResult* trunc_2f = nullptr;
+  const gates::PiecewisePolySpec* init_spec = nullptr;
+  int frac_bits = 0;
+  int nr_iters = 1;
 };
 
-inline const compiler::TruncationLoweringResult* select_trunc_bundle(
-    const TruncChoice& choice,
-    const compiler::RangeInterval& range,
-    int frac_bits) {
-  if (!choice.gapars || !choice.faithful) return choice.faithful;
-  auto kind = compiler::select_trunc_kind(range, frac_bits);
-  return (kind == compiler::GateKind::GapARS) ? choice.gapars : choice.faithful;
-}
+// NR-based rsqrt task: y <- y*(1.5 - 0.5*x*y^2), keeps shares throughout.
+class RsqrtTask final : public detail::PhaseTask {
+ public:
+  RsqrtTask(const RsqrtTaskBundle& bundle,
+            std::span<const uint64_t> x_qf,
+            std::span<uint64_t> out_qf)
+      : bundle_(bundle), x_(x_qf), out_(out_qf) {
+    if (x_.size() != out_.size()) throw std::runtime_error("RsqrtTask: size mismatch");
+    if (!bundle_.suf || !bundle_.trunc_f || !bundle_.trunc_2f) {
+      throw std::runtime_error("RsqrtTask: bundle missing parts");
+    }
+  }
+
+  bool done() const override { return st_ == St::Done; }
+  const std::vector<uint64_t>& init_y_debug() const { return init_y_; }
+  const std::vector<uint64_t>& xy2_f_debug() const { return xy2_f_last_; }
+  const std::vector<uint64_t>& c0_debug() const { return c0_; }
+  const std::vector<uint64_t>& c1_debug() const { return c1_; }
+  const std::vector<uint64_t>& x_plain_debug() const { return x_plain_debug_; }
+  int init_r_debug() const { return init_r_; }
+
+  detail::Need step(PhaseResources& R) override {
+    if (!key_) {
+      key_ = (R.party == 0) ? bundle_.key0 : bundle_.key1;
+      if (!key_) throw std::runtime_error("RsqrtTask: missing party key");
+      triple_span_ = std::span<const proto::BeaverTriple64Share>(key_->triples);
+      if (key_->r_in_share_vec.size() != x_.size()) {
+        throw std::runtime_error("RsqrtTask: r_in_share_vec size mismatch");
+      }
+    }
+    switch (st_) {
+      case St::OpenXhat: {
+        // Mask and open x (public) for init PFSS.
+        masked_.resize(x_.size());
+        for (size_t i = 0; i < x_.size(); ++i) {
+          uint64_t rin = key_->r_in_share_vec[i];
+          masked_[i] = proto::add_mod(x_[i], rin);
+        }
+        if (!R.opens) throw std::runtime_error("RsqrtTask: no OpenCollector");
+        h_open_ = R.opens->enqueue(masked_);
+        st_ = St::WaitOpen;
+        return detail::Need::Open;
+      }
+      case St::WaitOpen: {
+        if (!R.opens->ready(h_open_)) return detail::Need::Open;
+        auto v = R.opens->view(h_open_);
+        opened_.assign(v.begin(), v.end());
+        st_ = St::EnqueueInit;
+        [[fallthrough]];
+      }
+      case St::EnqueueInit: {
+        PreparedCompositeJob job;
+        job.suf = bundle_.suf;
+        job.key = key_;
+        job.hook = nullptr;
+        job.hatx_public.resize(opened_.size());
+        for (size_t i = 0; i < opened_.size(); ++i) {
+          job.hatx_public[i] = static_cast<uint64_t>(opened_[i]);
+        }
+        if (!R.pfss_coeff) throw std::runtime_error("RsqrtTask: missing coeff PFSS batch");
+        coeff_token_ = R.pfss_coeff->enqueue_composite(std::move(job)).token;
+        st_ = St::WaitInit;
+        return detail::Need::PfssCoeff;
+      }
+      case St::WaitInit: {
+        if (!R.pfss_coeff->ready(PfssHandle{coeff_token_})) return detail::Need::PfssCoeff;
+        auto v = R.pfss_coeff->view(PfssHandle{coeff_token_});
+        size_t elems = x_.size();
+        if (v.r < 2 || v.arith_words < elems * v.r) {
+          throw std::runtime_error("RsqrtTask: coeff payload too small");
+        }
+        init_r_ = static_cast<int>(v.r);
+        coeff_buf_.assign(v.arith, v.arith + elems * v.r);
+        c0_.assign(elems, 0);
+        c1_.assign(elems, 0);
+        for (size_t i = 0; i < elems; ++i) {
+          c0_[i] = coeff_buf_[i * v.r + 0];
+          c1_[i] = (v.r > 1) ? coeff_buf_[i * v.r + 1] : 0ull;
+          uint64_t x_plain = proto::sub_mod(static_cast<uint64_t>(opened_[i]), key_->r_in_share_vec[i]);
+          x_plain_debug_.push_back(x_plain);
+        }
+        y_init_q2f_.assign(elems, 0);
+        auto triples = next_triples(elems);
+        init_mul_ = std::make_unique<MulTask>(
+            std::span<const uint64_t>(c1_.data(), c1_.size()),
+            std::span<const uint64_t>(x_.data(), x_.size()),
+            std::span<uint64_t>(y_init_q2f_.data(), y_init_q2f_.size()),
+            triples);
+        st_ = St::InitMul;
+        return detail::Need::None;
+      }
+      case St::InitMul: {
+        auto need = init_mul_->step(R);
+        if (!init_mul_->done()) return need;
+        y_init_qf_.assign(y_init_q2f_.size(), 0);
+        init_trunc_ = std::make_unique<TruncTask>(
+            bundle_.trunc_f,
+            std::span<const uint64_t>(y_init_q2f_.data(), y_init_q2f_.size()),
+            std::span<uint64_t>(y_init_qf_.data(), y_init_qf_.size()));
+        st_ = St::InitTrunc;
+        return detail::Need::None;
+      }
+      case St::InitTrunc: {
+        auto need = init_trunc_->step(R);
+        if (!init_trunc_->done()) return need;
+        y_ = y_init_qf_;
+        for (size_t i = 0; i < y_.size(); ++i) {
+          y_[i] = proto::add_mod(y_[i], c0_[i]);
+        }
+        init_y_ = y_;
+        iter_ = 0;
+        st_ = St::IterMul1;
+        return detail::Need::None;
+      }
+      case St::IterMul1: {
+        if (iter_ >= bundle_.nr_iters) {
+          for (size_t i = 0; i < out_.size(); ++i) out_[i] = y_[i];
+          st_ = St::Done;
+          return detail::Need::None;
+        }
+        auto triples = next_triples(x_.size());
+        y2_.assign(x_.size(), 0);
+        mul1_ = std::make_unique<MulTask>(
+            std::span<const uint64_t>(y_.data(), y_.size()),
+            std::span<const uint64_t>(y_.data(), y_.size()),
+            std::span<uint64_t>(y2_.data(), y2_.size()),
+            triples);
+        st_ = St::Mul1;
+        return detail::Need::None;
+      }
+      case St::Mul1: {
+        auto need = mul1_->step(R);
+        if (!mul1_->done()) return need;
+        y2_trunc_.assign(y2_.size(), 0);
+        trunc_y2_ = std::make_unique<TruncTask>(
+            bundle_.trunc_f,
+            std::span<const uint64_t>(y2_.data(), y2_.size()),
+            std::span<uint64_t>(y2_trunc_.data(), y2_trunc_.size()));
+        st_ = St::TruncY2;
+        return detail::Need::None;
+      }
+      case St::TruncY2: {
+        auto need = trunc_y2_->step(R);
+        if (!trunc_y2_->done()) return need;
+        y2_f_ = y2_trunc_;
+        auto triples = next_triples(x_.size());
+        xy2_.assign(x_.size(), 0);
+        mul2_ = std::make_unique<MulTask>(
+            std::span<const uint64_t>(x_.data(), x_.size()),
+            std::span<const uint64_t>(y2_f_.data(), y2_f_.size()),
+            std::span<uint64_t>(xy2_.data(), xy2_.size()),
+            triples);
+        st_ = St::Mul2;
+        return detail::Need::None;
+      }
+      case St::Mul2: {
+        auto need = mul2_->step(R);
+        if (!mul2_->done()) return need;
+        xy2_trunc_.assign(x_.size(), 0);
+        trunc_xy2_ = std::make_unique<TruncTask>(
+            bundle_.trunc_f,
+            std::span<const uint64_t>(xy2_.data(), xy2_.size()),
+            std::span<uint64_t>(xy2_trunc_.data(), xy2_trunc_.size()));
+        st_ = St::TruncXY2;
+        return detail::Need::None;
+      }
+      case St::TruncXY2: {
+        auto need = trunc_xy2_->step(R);
+        if (!trunc_xy2_->done()) return need;
+        xy2_f_ = xy2_trunc_;
+        xy2_f_last_ = xy2_f_;
+        st_ = St::ComputeT;
+        return detail::Need::None;
+      }
+      case St::ComputeT: {
+        t_.assign(x_.size(), 0);
+        uint64_t one5 = proto::add_mod(static_cast<uint64_t>((3ull << (fb_ - 1))), 0ull);  // 1.5 in Qf
+        for (size_t i = 0; i < x_.size(); ++i) {
+          uint64_t half_xy2 = xy2_f_[i] >> 1;
+          uint64_t const_share = (R.party == 0) ? one5 : 0ull;
+          t_[i] = proto::sub_mod(const_share, half_xy2);
+        }
+        auto triples = next_triples(x_.size());
+        y_update_q2f_.assign(x_.size(), 0);
+        mul3_ = std::make_unique<MulTask>(
+            std::span<const uint64_t>(y_.data(), y_.size()),
+            std::span<const uint64_t>(t_.data(), t_.size()),
+            std::span<uint64_t>(y_update_q2f_.data(), y_update_q2f_.size()),
+            triples);
+        st_ = St::Mul3;
+        return detail::Need::None;
+      }
+      case St::Mul3: {
+        auto need = mul3_->step(R);
+        if (!mul3_->done()) return need;
+        y_new_.assign(y_update_q2f_.size(), 0);
+        trunc_out_ = std::make_unique<TruncTask>(
+            bundle_.trunc_f,
+            std::span<const uint64_t>(y_update_q2f_.data(), y_update_q2f_.size()),
+            std::span<uint64_t>(y_new_.data(), y_new_.size()));
+        st_ = St::TruncOut;
+        return detail::Need::None;
+      }
+      case St::TruncOut: {
+        auto need = trunc_out_->step(R);
+        if (!trunc_out_->done()) return need;
+        y_ = y_new_;
+        iter_ += 1;
+        st_ = St::IterMul1;
+        return detail::Need::None;
+      }
+      case St::Done:
+        return detail::Need::None;
+    }
+    return detail::Need::None;
+  }
+
+ private:
+  enum class St {
+    OpenXhat,
+    WaitOpen,
+    EnqueueInit,
+    WaitInit,
+    InitMul,
+    InitTrunc,
+    IterMul1,
+    Mul1,
+    TruncY2,
+    Mul2,
+    TruncXY2,
+    ComputeT,
+    Mul3,
+    TruncOut,
+    Done
+  } st_ = St::OpenXhat;
+  RsqrtTaskBundle bundle_;
+  const gates::CompositePartyKey* key_ = nullptr;
+  std::span<const uint64_t> x_;
+  std::span<uint64_t> out_;
+  std::vector<uint64_t> masked_;
+  std::vector<int64_t> opened_;
+  OpenHandle h_open_{};
+  size_t coeff_token_ = static_cast<size_t>(-1);
+
+  std::span<const proto::BeaverTriple64Share> triple_span_;
+  size_t triple_cursor_ = 0;
+
+  std::vector<uint64_t> y_;       // current y (Qf)
+  std::vector<uint64_t> y2_;      // Q2f
+  std::vector<uint64_t> y2_trunc_; // Qf
+  std::vector<uint64_t> y2_f_;    // Qf
+  std::vector<uint64_t> xy2_;     // Q2f
+  std::vector<uint64_t> xy2_trunc_; // Qf
+  std::vector<uint64_t> xy2_f_;   // Qf
+  std::vector<uint64_t> t_;       // Qf
+  std::vector<uint64_t> y_update_q2f_; // Q2f
+  std::vector<uint64_t> y_new_;   // Qf
+
+  std::vector<uint64_t> coeff_buf_;
+  std::vector<uint64_t> c0_;
+  std::vector<uint64_t> c1_;
+  std::vector<uint64_t> y_init_q2f_;
+  std::vector<uint64_t> y_init_qf_;
+
+  std::unique_ptr<MulTask> mul1_;
+  std::unique_ptr<MulTask> mul2_;
+  std::unique_ptr<MulTask> mul3_;
+  std::unique_ptr<MulTask> init_mul_;
+  std::unique_ptr<TruncTask> init_trunc_;
+  std::unique_ptr<TruncTask> trunc_y2_;
+  std::unique_ptr<TruncTask> trunc_xy2_;
+  std::unique_ptr<TruncTask> trunc_out_;
+
+  int iter_ = 0;
+  int fb_ = bundle_.frac_bits;
+
+  std::vector<uint64_t> init_y_;
+  std::vector<uint64_t> xy2_f_last_;
+  int init_r_ = 0;
+  std::vector<uint64_t> x_plain_debug_;
+
+  std::span<const proto::BeaverTriple64Share> next_triples(size_t n) {
+    if (triple_cursor_ + n > triple_span_.size()) {
+      throw std::runtime_error("RsqrtTask: not enough triples");
+    }
+    auto s = triple_span_.subspan(triple_cursor_, n);
+    triple_cursor_ += n;
+    return s;
+  }
+};
 
 struct RowBroadcastTriple {
   std::span<const uint64_t> A;
@@ -434,7 +731,7 @@ class MulRowBroadcastTask final : public detail::PhaseTask {
       case St::Done:
         return detail::Need::None;
     }
-    return detail::Need::None;
+      return detail::Need::None;
   }
 
  private:
@@ -450,6 +747,289 @@ class MulRowBroadcastTask final : public detail::PhaseTask {
   RowBroadcastTriple triple_;
   std::vector<uint64_t> buf_de_;
   OpenHandle h_open_{};
+};
+
+struct LayerNormTaskBundle {
+  TruncChoice mean_trunc;  // shift=f (sum*invL Q2f -> Qf)
+  TruncChoice var_trunc;   // shift=2f (var Q3f -> Qf)
+  TruncChoice norm_trunc;  // shift=f (diff*invstd Q2f -> Qf)
+  RsqrtTaskBundle rsqrt;
+  uint64_t inv_len_qf = 0;  // public inv(L) in Qf (shared on both parties)
+  uint64_t eps_qf = 0;      // eps in Qf, only party0 set
+  int frac_bits = 0;
+  std::span<const int64_t> gamma;  // Qf public
+  std::span<const int64_t> beta;   // Qf public
+  std::span<const proto::BeaverTriple64Share> mul_triples;  // for diff^2
+  RowBroadcastTripleProvider* row_triples = nullptr;
+};
+
+// LayerNorm over rows*cols with secret shares, using RsqrtTask and batched mul/trunc.
+class LayerNormTask final : public detail::PhaseTask {
+ public:
+  LayerNormTask(const LayerNormTaskBundle& bundle,
+                std::span<const uint64_t> x_qf,
+                std::span<uint64_t> out_qf,
+                int rows,
+                int cols)
+      : bundle_(bundle), x_(x_qf), out_(out_qf), rows_(rows), cols_(cols) {
+    if (x_.size() != out_.size()) throw std::runtime_error("LayerNormTask: size mismatch");
+    if (rows_ * cols_ != static_cast<int>(x_.size())) {
+      throw std::runtime_error("LayerNormTask: dims mismatch");
+    }
+  }
+
+  bool done() const override { return st_ == St::Done; }
+  const std::vector<uint64_t>& mu_qf_debug() const { return mu_qf_; }
+  const std::vector<uint64_t>& mu_q2f_debug() const { return mu_q2f_; }
+  const std::vector<uint64_t>& var_qf_debug() const { return var_qf_; }
+  const std::vector<uint64_t>& var_q3f_debug() const { return var_q3f_; }
+  const std::vector<uint64_t>& rsqrt_qf_debug() const { return rsqrt_out_; }
+  const std::vector<uint64_t>& rsqrt_init_debug() const { return rsqrt_init_; }
+  const std::vector<uint64_t>& rsqrt_xy2_f_debug() const { return rsqrt_xy2_f_; }
+  const std::vector<uint64_t>& rsqrt_c0_debug() const { return rsqrt_c0_; }
+  const std::vector<uint64_t>& rsqrt_c1_debug() const { return rsqrt_c1_; }
+  int rsqrt_init_r_debug() const { return rsqrt_init_r_; }
+  const std::vector<uint64_t>& rsqrt_x_plain_debug() const { return rsqrt_x_plain_; }
+  const std::vector<uint64_t>& norm_qf_debug() const { return norm_qf_; }
+
+  detail::Need step(PhaseResources& R) override {
+    switch (st_) {
+      case St::Mean: {
+        sum_.assign(static_cast<size_t>(rows_), 0);
+        for (int r = 0; r < rows_; ++r) {
+          uint64_t acc = 0;
+          for (int c = 0; c < cols_; ++c) {
+            size_t idx = static_cast<size_t>(r * cols_ + c);
+            acc = proto::add_mod(acc, x_[idx]);
+          }
+          sum_[static_cast<size_t>(r)] = acc;
+        }
+        mu_q2f_.assign(sum_.size(), 0);
+        mu_qf_.assign(sum_.size(), 0);
+        for (size_t r = 0; r < sum_.size(); ++r) {
+          uint64_t const_share = bundle_.inv_len_qf;
+          mu_q2f_[r] = proto::mul_mod(sum_[r], const_share);
+        }
+        st_ = St::MeanTrunc;
+        return detail::Need::None;
+      }
+      case St::MeanTrunc: {
+        const auto* tb = select_trunc_bundle(bundle_.mean_trunc, mu_range_, bundle_.frac_bits);
+        if (!tb) throw std::runtime_error("LayerNormTask: missing mean trunc bundle");
+        mean_trunc_task_ = std::make_unique<TruncTask>(
+            tb, std::span<const uint64_t>(mu_q2f_.data(), mu_q2f_.size()),
+            std::span<uint64_t>(mu_qf_.data(), mu_qf_.size()));
+        st_ = St::MeanTruncRun;
+        [[fallthrough]];
+      }
+      case St::MeanTruncRun: {
+        auto need = mean_trunc_task_->step(R);
+        if (!mean_trunc_task_->done()) return need;
+        st_ = St::VarDiff;
+        return detail::Need::None;
+      }
+      case St::VarDiff: {
+        if (bundle_.mul_triples.size() == 0) {
+          throw std::runtime_error("LayerNormTask: mul triples missing");
+        }
+        if (triple_span_.size() == 0) triple_span_ = bundle_.mul_triples;
+        diff_.assign(x_.size(), 0);
+        for (int r = 0; r < rows_; ++r) {
+          uint64_t mu = (r < static_cast<int>(mu_qf_.size())) ? mu_qf_[static_cast<size_t>(r)] : 0ull;
+          for (int c = 0; c < cols_; ++c) {
+            size_t idx = static_cast<size_t>(r * cols_ + c);
+            diff_[idx] = proto::sub_mod(x_[idx], mu);
+          }
+        }
+        auto triples = next_triples(x_.size());
+        diff2_.assign(x_.size(), 0);
+        var_mul_ = std::make_unique<MulTask>(std::span<const uint64_t>(diff_.data(), diff_.size()),
+                                             std::span<const uint64_t>(diff_.data(), diff_.size()),
+                                             std::span<uint64_t>(diff2_.data(), diff2_.size()),
+                                             triples);
+        st_ = St::VarMul;
+        return detail::Need::None;
+      }
+      case St::VarMul: {
+        auto need = var_mul_->step(R);
+        if (!var_mul_->done()) return need;
+        var_sum_.assign(static_cast<size_t>(rows_), 0);
+        for (int r = 0; r < rows_; ++r) {
+          uint64_t acc = 0;
+          for (int c = 0; c < cols_; ++c) {
+            size_t idx = static_cast<size_t>(r * cols_ + c);
+            acc = proto::add_mod(acc, diff2_[idx]);
+          }
+          var_sum_[static_cast<size_t>(r)] = acc;
+        }
+        var_q3f_.assign(var_sum_.size(), 0);
+        for (size_t r = 0; r < var_sum_.size(); ++r) {
+          uint64_t const_share = bundle_.inv_len_qf;
+          var_q3f_[r] = proto::mul_mod(var_sum_[r], const_share);
+        }
+        st_ = St::VarTrunc;
+        return detail::Need::None;
+      }
+      case St::VarTrunc: {
+        var_range_.lo = 0;
+        var_range_.is_signed = true;
+        const auto* tb = select_trunc_bundle(bundle_.var_trunc, var_range_, 2 * bundle_.frac_bits);
+        if (!tb) throw std::runtime_error("LayerNormTask: missing var trunc bundle");
+        var_qf_.assign(var_q3f_.size(), 0);
+        var_trunc_task_ = std::make_unique<TruncTask>(
+            tb, std::span<const uint64_t>(var_q3f_.data(), var_q3f_.size()),
+            std::span<uint64_t>(var_qf_.data(), var_qf_.size()));
+        st_ = St::VarTruncRun;
+        return detail::Need::None;
+      }
+      case St::VarTruncRun: {
+        auto need = var_trunc_task_->step(R);
+        if (!var_trunc_task_->done()) return need;
+        if (R.party == 0) {
+          for (auto& v : var_qf_) v = proto::add_mod(v, bundle_.eps_qf);
+        }
+        st_ = St::Rsqrt;
+        return detail::Need::None;
+      }
+      case St::Rsqrt: {
+        rsqrt_out_.assign(var_qf_.size(), 0);
+        rsqrt_task_ = std::make_unique<RsqrtTask>(bundle_.rsqrt,
+                                                  std::span<const uint64_t>(var_qf_.data(), var_qf_.size()),
+                                                  std::span<uint64_t>(rsqrt_out_.data(), rsqrt_out_.size()));
+        st_ = St::RsqrtRun;
+        return detail::Need::None;
+      }
+      case St::RsqrtRun: {
+        auto need = rsqrt_task_->step(R);
+        if (!rsqrt_task_->done()) return need;
+        rsqrt_init_ = rsqrt_task_->init_y_debug();
+        rsqrt_xy2_f_ = rsqrt_task_->xy2_f_debug();
+        rsqrt_c0_ = rsqrt_task_->c0_debug();
+        rsqrt_c1_ = rsqrt_task_->c1_debug();
+        rsqrt_init_r_ = rsqrt_task_->init_r_debug();
+        rsqrt_x_plain_.assign(rsqrt_task_->x_plain_debug().begin(),
+                              rsqrt_task_->x_plain_debug().end());
+        st_ = St::Norm;
+        return detail::Need::None;
+      }
+      case St::Norm: {
+        if (!bundle_.row_triples) throw std::runtime_error("LayerNormTask: row triples missing");
+        norm_q2f_.assign(x_.size(), 0);
+        norm_qf_.assign(x_.size(), 0);
+        mul_norm_ = std::make_unique<MulRowBroadcastTask>(
+            std::span<const uint64_t>(diff_.data(), diff_.size()),
+            std::span<const uint64_t>(rsqrt_out_.data(), rsqrt_out_.size()),
+            rows_, cols_, std::span<const int>(),
+            std::span<uint64_t>(norm_q2f_.data(), norm_q2f_.size()),
+            bundle_.row_triples);
+        st_ = St::NormMul;
+        return detail::Need::None;
+      }
+      case St::NormMul: {
+        auto need = mul_norm_->step(R);
+        if (!mul_norm_->done()) return need;
+        const auto* tb = select_trunc_bundle(bundle_.norm_trunc, norm_range_, bundle_.frac_bits);
+        if (!tb) throw std::runtime_error("LayerNormTask: missing norm trunc bundle");
+        trunc_norm_ = std::make_unique<TruncTask>(
+            tb, std::span<const uint64_t>(norm_q2f_.data(), norm_q2f_.size()),
+            std::span<uint64_t>(norm_qf_.data(), norm_qf_.size()));
+        st_ = St::NormTrunc;
+        return detail::Need::None;
+      }
+      case St::NormTrunc: {
+        auto need = trunc_norm_->step(R);
+        if (!trunc_norm_->done()) return need;
+        st_ = St::Affine;
+        return detail::Need::None;
+      }
+      case St::Affine: {
+        bool has_gamma = bundle_.gamma.data() != nullptr && bundle_.gamma.size() > 0;
+        bool has_beta = bundle_.beta.data() != nullptr && bundle_.beta.size() > 0;
+        for (size_t i = 0; i < norm_qf_.size(); ++i) {
+          size_t col = static_cast<size_t>(i % static_cast<size_t>(cols_));
+          int64_t v = to_signed(norm_qf_[i]);
+          if (has_gamma) {
+            int64_t g = (col < bundle_.gamma.size()) ? bundle_.gamma[col] : 0;
+            v = static_cast<int64_t>((static_cast<__int128>(v) * static_cast<__int128>(g)) >> bundle_.frac_bits);
+          }
+          if (has_beta) {
+            int64_t b = (col < bundle_.beta.size()) ? bundle_.beta[col] : 0;
+            v += b;
+          }
+          out_[i] = to_ring(v);
+        }
+        st_ = St::Done;
+        return detail::Need::None;
+      }
+      case St::Done:
+        return detail::Need::None;
+    }
+    return detail::Need::None;
+  }
+
+ private:
+  enum class St {
+    Mean,
+    MeanTrunc,
+    MeanTruncRun,
+    VarDiff,
+    VarMul,
+    VarTrunc,
+    VarTruncRun,
+    Rsqrt,
+    RsqrtRun,
+    Norm,
+    NormMul,
+    NormTrunc,
+    Affine,
+    Done
+  } st_ = St::Mean;
+  LayerNormTaskBundle bundle_;
+  std::span<const uint64_t> x_;
+  std::span<uint64_t> out_;
+  int rows_ = 0;
+  int cols_ = 0;
+
+  std::vector<uint64_t> sum_;
+  std::vector<uint64_t> mu_q2f_;
+  std::vector<uint64_t> mu_qf_;
+  std::vector<uint64_t> diff_;
+  std::vector<uint64_t> diff2_;
+  std::vector<uint64_t> var_sum_;
+  std::vector<uint64_t> var_q3f_;
+  std::vector<uint64_t> var_qf_;
+  std::vector<uint64_t> rsqrt_out_;
+  std::vector<uint64_t> rsqrt_init_;
+  std::vector<uint64_t> rsqrt_xy2_f_;
+  std::vector<uint64_t> rsqrt_c0_;
+  std::vector<uint64_t> rsqrt_c1_;
+  int rsqrt_init_r_ = 0;
+  std::vector<uint64_t> rsqrt_x_plain_;
+  std::vector<uint64_t> norm_q2f_;
+  std::vector<uint64_t> norm_qf_;
+
+  compiler::RangeInterval mu_range_ = compiler::RangeInterval::whole(true);
+  compiler::RangeInterval var_range_ = compiler::RangeInterval::whole(true);
+  compiler::RangeInterval norm_range_ = compiler::RangeInterval::whole(true);
+
+  std::unique_ptr<TruncTask> mean_trunc_task_;
+  std::unique_ptr<MulTask> var_mul_;
+  std::unique_ptr<TruncTask> var_trunc_task_;
+  std::unique_ptr<RsqrtTask> rsqrt_task_;
+  std::unique_ptr<MulRowBroadcastTask> mul_norm_;
+  std::unique_ptr<TruncTask> trunc_norm_;
+
+  std::span<const proto::BeaverTriple64Share> triple_span_;
+  size_t triple_cursor_ = 0;
+
+  std::span<const proto::BeaverTriple64Share> next_triples(size_t n) {
+    if (triple_cursor_ + n > triple_span_.size()) {
+      throw std::runtime_error("LayerNormTask: not enough triples");
+    }
+    auto s = triple_span_.subspan(triple_cursor_, n);
+    triple_cursor_ += n;
+    return s;
+  }
 };
 
 // Two-trunc cubic evaluator for SiLU/nExp.
@@ -480,13 +1060,23 @@ class CubicPolyTask final : public detail::PhaseTask {
       if (!bundle_.trunc_2f) {
         throw std::runtime_error("CubicPolyTask: missing truncation-2f bundle");
       }
+      if (!key_->r_in_share_vec.empty() &&
+          key_->r_in_share_vec.size() != x_.size() &&
+          key_->r_in_share_vec.size() != 1) {
+        throw std::runtime_error("CubicPolyTask: r_in_share_vec size mismatch");
+      }
     }
     switch (st_) {
       case St::OpenXhat: {
         if (!R.net_chan) throw std::runtime_error("CubicPolyTask: net channel missing");
         masked_.resize(x_.size());
         for (size_t i = 0; i < x_.size(); ++i) {
-          masked_[i] = proto::add_mod(x_[i], key_->r_in_share);
+          uint64_t rin = key_->r_in_share;
+          if (!key_->r_in_share_vec.empty()) {
+            rin = (key_->r_in_share_vec.size() == x_.size()) ? key_->r_in_share_vec[i]
+                                                             : key_->r_in_share_vec[0];
+          }
+          masked_[i] = proto::add_mod(x_[i], rin);
         }
         if (R.opens) {
           h_open_ = R.opens->enqueue(masked_);
@@ -603,9 +1193,6 @@ class CubicPolyTask final : public detail::PhaseTask {
         auto need = trunc1_->step(R);
         if (!trunc1_->done()) return need;
         for (size_t i = 0; i < x_.size(); ++i) {
-          p2_q2f_[i] = p_q3f_[i];
-        }
-        for (size_t i = 0; i < x_.size(); ++i) {
           q_q2f_[i] = proto::add_mod(p2_q2f_[i], c1_[i]);
         }
         auto triples3 = next_triples(x_.size());
@@ -629,9 +1216,6 @@ class CubicPolyTask final : public detail::PhaseTask {
       case St::Trunc2: {
         auto need = trunc2_->step(R);
         if (!trunc2_->done()) return need;
-        for (size_t i = 0; i < x_.size(); ++i) {
-          y_qf_[i] = r_q3f_[i];
-        }
         for (size_t i = 0; i < x_.size(); ++i) {
           out_[i] = proto::add_mod(y_qf_[i], c0_[i]);
         }
@@ -720,20 +1304,30 @@ class RecipTask final : public detail::PhaseTask {
       key_ = (R.party == 0) ? bundle_.key0 : bundle_.key1;
       if (!key_) throw std::runtime_error("RecipTask: missing party key");
       triple_span_ = std::span<const proto::BeaverTriple64Share>(key_->triples);
+      if (!key_->r_in_share_vec.empty() &&
+          key_->r_in_share_vec.size() != x_.size() &&
+          key_->r_in_share_vec.size() != 1) {
+        throw std::runtime_error("RecipTask: r_in_share_vec size mismatch");
+      }
     }
     switch (st_) {
       case St::OpenXhat: {
         if (!R.net_chan) throw std::runtime_error("RecipTask: net channel missing");
         masked_.resize(x_.size());
-        for (size_t i = 0; i < x_.size(); ++i) masked_[i] = proto::add_mod(x_[i], key_->r_in_share);
+        for (size_t i = 0; i < x_.size(); ++i) {
+          uint64_t rin = key_->r_in_share;
+          if (!key_->r_in_share_vec.empty()) {
+            rin = (key_->r_in_share_vec.size() == x_.size()) ? key_->r_in_share_vec[i]
+                                                             : key_->r_in_share_vec[0];
+          }
+          masked_[i] = proto::add_mod(x_[i], rin);
+        }
         if (R.opens) {
           h_open_ = R.opens->enqueue(masked_);
           st_ = St::WaitXhatOpen;
           return detail::Need::Open;
         }
-        opened_.assign(masked_.begin(), masked_.end());
-        st_ = St::EnqueueCoeff;
-        [[fallthrough]];
+        throw std::runtime_error("RecipTask: no OpenCollector");
       }
       case St::WaitXhatOpen: {
         if (st_ == St::WaitXhatOpen) {

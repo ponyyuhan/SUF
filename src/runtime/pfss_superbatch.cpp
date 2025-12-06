@@ -37,10 +37,10 @@ PfssHandle PfssSuperBatch::enqueue_truncation(const compiler::TruncationLowering
 }
 
 bool PfssSuperBatch::ready(const PfssHandle& h) const {
-  return h.token < completed_.size() && !completed_[h.token].arith.empty();
+  return flushed_ && h.token < completed_.size() && !completed_[h.token].arith.empty();
 }
 
-void PfssSuperBatch::flush(int party, proto::PfssBackendBatch& backend, proto::IChannel& ch) {
+void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, proto::IChannel& ch) {
   stats_.flushes += 1;
   stats_.jobs += jobs_.size();
   struct GroupKey {
@@ -184,7 +184,23 @@ void PfssSuperBatch::flush(int party, proto::PfssBackendBatch& backend, proto::I
   flushed_ = true;
   stats_.arith_words += total_arith_words;
   stats_.pred_bits += total_bool_words * 64;
+  populate_completed_();
+}
 
+PfssResultView PfssSuperBatch::view(const PfssHandle& h) const {
+  if (h.token >= completed_.size()) return PfssResultView{};
+  const auto& cj = completed_[h.token];
+  PfssResultView v;
+  v.arith = cj.arith.data();
+  v.arith_words = cj.arith.size();
+  v.bools = cj.bools.data();
+  v.bool_words = cj.bools.size();
+  v.r = cj.r;
+  v.ell = cj.ell;
+  return v;
+}
+
+void PfssSuperBatch::populate_completed_() {
   // Populate per-job completed slices (without running hooks).
   for (size_t idx = 0; idx < jobs_.size(); ++idx) {
     if (idx >= slices_.size()) continue;
@@ -214,19 +230,6 @@ void PfssSuperBatch::flush(int party, proto::PfssBackendBatch& backend, proto::I
   }
 }
 
-PfssResultView PfssSuperBatch::view(const PfssHandle& h) const {
-  if (h.token >= completed_.size()) return PfssResultView{};
-  const auto& cj = completed_[h.token];
-  PfssResultView v;
-  v.arith = cj.arith.data();
-  v.arith_words = cj.arith.size();
-  v.bools = cj.bools.data();
-  v.bool_words = cj.bools.size();
-  v.r = cj.r;
-  v.ell = cj.ell;
-  return v;
-}
-
 void PfssSuperBatch::clear() {
   jobs_.clear();
   group_results_.clear();
@@ -235,7 +238,9 @@ void PfssSuperBatch::clear() {
   flushed_ = false;
 }
 
-void PfssSuperBatch::finalize(int party, proto::IChannel& ch) {
+void PfssSuperBatch::finalize_all(int party, proto::IChannel& ch) {
+  if (!flushed_) return;
+  if (completed_.empty()) populate_completed_();
   for (size_t idx = 0; idx < jobs_.size(); ++idx) {
     const auto& job = jobs_[idx];
     if (job.token >= completed_.size()) continue;
@@ -322,8 +327,10 @@ void PfssSuperBatch::finalize(int party, proto::IChannel& ch) {
 void PfssSuperBatch::flush_and_finalize(int party,
                                         proto::PfssBackendBatch& backend,
                                         proto::IChannel& ch) {
-  flush(party, backend, ch);
-  finalize(party, ch);
+  flush_eval(party, backend, ch);
+  populate_completed_();
+  finalize_all(party, ch);
+  clear();
 }
 
 void run_truncation_now(int party,

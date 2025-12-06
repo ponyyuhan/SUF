@@ -19,6 +19,7 @@
       span(const std::vector<U>& v) : data_(v.data()), size_(v.size()) {}
       span(std::initializer_list<T> il) : data_(il.begin()), size_(il.size()) {}
       std::size_t size() const { return size_; }
+      bool empty() const { return size_ == 0; }
       const T* data() const { return data_; }
       T* data() { return const_cast<T*>(data_); }
       const T& operator[](std::size_t i) const { return data_[i]; }
@@ -61,7 +62,8 @@ namespace gates {
 
 // Minimal composite gate key (per instance) for PFSS + Beaver evaluation.
 struct CompositePartyKey {
-  uint64_t r_in_share = 0;
+  uint64_t r_in_share = 0;  // legacy scalar; prefer r_in_share_vec for safety
+  std::vector<uint64_t> r_in_share_vec;  // per-element mask shares (recommended)
   std::vector<uint64_t> r_out_share;   // size r
   std::vector<uint64_t> wrap_share;    // shares of wrap bits (same order as compiled.wrap_bits)
 
@@ -195,6 +197,8 @@ inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t
   auto [r0, r1] = split_add(r_in);
   out.k0.r_in_share = r0;
   out.k1.r_in_share = r1;
+  out.k0.r_in_share_vec.assign(batch_N, r0);
+  out.k1.r_in_share_vec.assign(batch_N, r1);
   out.k0.r_out_share.resize(F.r_out);
   out.k1.r_out_share.resize(F.r_out);
   for (int i = 0; i < F.r_out; i++) {
@@ -393,6 +397,8 @@ inline CompositeKeyPair composite_gen_trunc_gate(proto::PfssBackend& backend,
   auto [r0, r1] = split_add(r);
   out.k0.r_in_share = r0;
   out.k1.r_in_share = r1;
+  out.k0.r_in_share_vec.assign(batch_N, r0);
+  out.k1.r_in_share_vec.assign(batch_N, r1);
   out.k0.r_out_share.resize(1);
   out.k1.r_out_share.resize(1);
   auto [rout0, rout1] = split_add(r_out[0]);

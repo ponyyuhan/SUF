@@ -137,10 +137,11 @@ class PfssSuperBatch {
   bool ready(const PfssHandle& h) const;
 
   // Evaluate all queued composite jobs and store PFSS outputs.
-  void flush(int party, proto::PfssBackendBatch& backend, proto::IChannel& ch);
+  void flush_eval(int party, proto::PfssBackendBatch& backend, proto::IChannel& ch);
 
-  // Legacy finalize that applies hooks and writes masked outputs.
-  void finalize(int party, proto::IChannel& ch);
+  // Apply hooks and write masked outputs for queued jobs. Safe to call after
+  // flush_eval() if callers rely on legacy behavior.
+  void finalize_all(int party, proto::IChannel& ch);
 
   // Convenience wrapper that performs flush() followed by finalize().
   void flush_and_finalize(int party, proto::PfssBackendBatch& backend, proto::IChannel& ch);
@@ -187,6 +188,8 @@ class PfssSuperBatch {
   std::vector<JobSlice> slices_;
   bool flushed_ = false;
   Stats stats_;
+
+  void populate_completed_();
 };
 
 // Convenience: run a truncation bundle immediately on a flat vector of shares.

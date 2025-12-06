@@ -37,7 +37,8 @@ struct MatmulBeaverParams {
   // Either a prebuilt plan or a raw bundle; plan carries GateKind/range metadata.
   const compiler::MatmulTruncationPlan* trunc_plan = nullptr;
   const compiler::TruncationLoweringResult* trunc_bundle = nullptr;
-  bool require_truncation = false;  // forbid local-shift fallback when true
+  bool require_truncation = true;  // forbid local-shift fallback by default
+  bool allow_local_shift = false;  // only for legacy/debug; otherwise throws when no trunc
   // Optional range hints to allow GapARS selection during auto-plan.
   compiler::RangeInterval x_range = compiler::RangeInterval::whole(true);
   compiler::RangeInterval w_range = compiler::RangeInterval::whole(true);

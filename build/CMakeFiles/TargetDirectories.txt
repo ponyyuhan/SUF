@@ -23,6 +23,7 @@
 /home/yuhan/new/SUF/build/CMakeFiles/test_truncation.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_softmax_task.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_trunc_task.dir
+/home/yuhan/new/SUF/build/CMakeFiles/test_layernorm_task.dir
 /home/yuhan/new/SUF/build/CMakeFiles/bench_gemm.dir
 /home/yuhan/new/SUF/build/CMakeFiles/bench_truncation.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_myl7_bit_order.dir

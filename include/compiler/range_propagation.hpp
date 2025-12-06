@@ -33,6 +33,15 @@ inline RangeInterval propagate_axpy(const RangeInterval& x,
   return axpy_range(x, y, a, frac_bits);
 }
 
+// Elementwise product of two fixed-point values; result carries full precision
+// (no implicit shift) and the caller can decide to shift down based on scale.
+inline RangeInterval propagate_mul(const RangeInterval& a,
+                                   const RangeInterval& b,
+                                   int frac_bits) {
+  (void)frac_bits;
+  return mul_range(a, b);
+}
+
 // Matmul accumulator range before truncation/rescale.
 inline RangeInterval propagate_matmul_accum(const RangeInterval& x,
                                             const RangeInterval& w,

@@ -317,10 +317,10 @@ struct HornerCubicHook : public PostProcHook {
                  const uint64_t* hatx_public,
                  const uint64_t* arith_share_in,
                  size_t arith_stride,
-                 const uint64_t*,
-                 size_t,
-                 size_t N,
-                 uint64_t* haty_share_out) const override;
+                const uint64_t*,
+                size_t,
+                size_t N,
+                uint64_t* haty_share_out) const override;
 
  private:
   const compiler::TruncationLoweringResult& ensure_trunc_bundle() const;

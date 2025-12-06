@@ -95,6 +95,47 @@ int LayerGraph::add_hadamard(int x, int y, int frac_bits, const Scale& out_scale
   return op.outputs[0];
 }
 
+int LayerGraph::add_mean(int x, int length, const Scale& out_scale) {
+  OpNode op;
+  op.kind = OpKind::kMean;
+  op.inputs = {x};
+  op.outputs = {add_tensor(out_scale, RangeInterval::whole(out_scale.is_signed))};
+  op.length = length;
+  ops_.push_back(op);
+  return op.outputs[0];
+}
+
+int LayerGraph::add_var(int x, int mean_tensor, int length, int frac_bits, const Scale& out_scale) {
+  OpNode op;
+  op.kind = OpKind::kVar;
+  op.inputs = {x, mean_tensor};
+  op.outputs = {add_tensor(out_scale, RangeInterval::whole(out_scale.is_signed))};
+  op.length = length;
+  op.frac_bits = frac_bits;
+  ops_.push_back(op);
+  return op.outputs[0];
+}
+
+int LayerGraph::add_rsqrt(int x, int frac_bits, const Scale& out_scale) {
+  OpNode op;
+  op.kind = OpKind::kRsqrt;
+  op.inputs = {x};
+  op.outputs = {add_tensor(out_scale, RangeInterval::whole(out_scale.is_signed))};
+  op.frac_bits = frac_bits;
+  ops_.push_back(op);
+  return op.outputs[0];
+}
+
+int LayerGraph::add_affine(int x, int gamma, int beta, int frac_bits, const Scale& out_scale) {
+  OpNode op;
+  op.kind = OpKind::kAffine;
+  op.inputs = {x, gamma, beta};
+  op.outputs = {add_tensor(out_scale, RangeInterval::whole(out_scale.is_signed))};
+  op.frac_bits = frac_bits;
+  ops_.push_back(op);
+  return op.outputs[0];
+}
+
 void LayerGraph::propagate_ranges() {
   for (const auto& op : ops_) {
     auto get_range = [&](int tid) -> const RangeInterval& {
@@ -148,6 +189,26 @@ void LayerGraph::propagate_ranges() {
         RangeInterval r = get_range(op.inputs[0]);
         int shift = (op.rescale.from_frac - op.rescale.to_frac);
         tensors_[static_cast<size_t>(op.outputs[0])].range = shift_down(r, shift);
+        break;
+      }
+      case OpKind::kMean: {
+        tensors_[static_cast<size_t>(op.outputs[0])].range = get_range(op.inputs[0]);
+        break;
+      }
+      case OpKind::kVar: {
+        RangeInterval xr = get_range(op.inputs[0]);
+        RangeInterval mr = get_range(op.inputs[1]);
+        RangeInterval diff = propagate_sub(xr, mr);
+        RangeInterval sq = propagate_mul(diff, diff, op.frac_bits);
+        tensors_[static_cast<size_t>(op.outputs[0])].range = sq;
+        break;
+      }
+      case OpKind::kRsqrt: {
+        tensors_[static_cast<size_t>(op.outputs[0])].range = RangeInterval::whole(true);
+        break;
+      }
+      case OpKind::kAffine: {
+        tensors_[static_cast<size_t>(op.outputs[0])].range = get_range(op.inputs[0]);
         break;
       }
       default:

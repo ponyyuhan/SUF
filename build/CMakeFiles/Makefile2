@@ -88,6 +88,7 @@ all: CMakeFiles/test_matmul.dir/all
 all: CMakeFiles/test_truncation.dir/all
 all: CMakeFiles/test_softmax_task.dir/all
 all: CMakeFiles/test_trunc_task.dir/all
+all: CMakeFiles/test_layernorm_task.dir/all
 all: CMakeFiles/bench_gemm.dir/all
 all: CMakeFiles/bench_truncation.dir/all
 all: CMakeFiles/test_myl7_bit_order.dir/all
@@ -123,6 +124,7 @@ clean: CMakeFiles/test_matmul.dir/clean
 clean: CMakeFiles/test_truncation.dir/clean
 clean: CMakeFiles/test_softmax_task.dir/clean
 clean: CMakeFiles/test_trunc_task.dir/clean
+clean: CMakeFiles/test_layernorm_task.dir/clean
 clean: CMakeFiles/bench_gemm.dir/clean
 clean: CMakeFiles/bench_truncation.dir/clean
 clean: CMakeFiles/test_myl7_bit_order.dir/clean
@@ -187,7 +189,7 @@ CMakeFiles/sim_harness.dir/clean:
 CMakeFiles/test_suf_ref_eval.dir/all: CMakeFiles/myl7_core.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_suf_ref_eval.dir/build.make CMakeFiles/test_suf_ref_eval.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_suf_ref_eval.dir/build.make CMakeFiles/test_suf_ref_eval.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=65,66 "Built target test_suf_ref_eval"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=67,68 "Built target test_suf_ref_eval"
 .PHONY : CMakeFiles/test_suf_ref_eval.dir/all
 
 # Build rule for subdir invocation for target.
@@ -213,7 +215,7 @@ CMakeFiles/test_suf_ref_eval.dir/clean:
 CMakeFiles/test_mask_rewrite.dir/all: CMakeFiles/myl7_core.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_mask_rewrite.dir/build.make CMakeFiles/test_mask_rewrite.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_mask_rewrite.dir/build.make CMakeFiles/test_mask_rewrite.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=49,50 "Built target test_mask_rewrite"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=51,52 "Built target test_mask_rewrite"
 .PHONY : CMakeFiles/test_mask_rewrite.dir/all
 
 # Build rule for subdir invocation for target.
@@ -236,8 +238,8 @@ CMakeFiles/test_mask_rewrite.dir/clean:
 # Target rules for target CMakeFiles/test_compile_pfss.dir
 
 # All Build rule for target.
-CMakeFiles/test_compile_pfss.dir/all: CMakeFiles/compiler_passes.dir/all
 CMakeFiles/test_compile_pfss.dir/all: CMakeFiles/myl7_core.dir/all
+CMakeFiles/test_compile_pfss.dir/all: CMakeFiles/compiler_passes.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_compile_pfss.dir/build.make CMakeFiles/test_compile_pfss.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_compile_pfss.dir/build.make CMakeFiles/test_compile_pfss.dir/build
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=37,38 "Built target test_compile_pfss"
@@ -292,7 +294,7 @@ CMakeFiles/compiler_passes.dir/clean:
 CMakeFiles/test_sigmafast.dir/all: CMakeFiles/myl7_core.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_sigmafast.dir/build.make CMakeFiles/test_sigmafast.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_sigmafast.dir/build.make CMakeFiles/test_sigmafast.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=61,62 "Built target test_sigmafast"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=63,64 "Built target test_sigmafast"
 .PHONY : CMakeFiles/test_sigmafast.dir/all
 
 # Build rule for subdir invocation for target.
@@ -315,8 +317,8 @@ CMakeFiles/test_sigmafast.dir/clean:
 # Target rules for target CMakeFiles/test_composite_runtime.dir
 
 # All Build rule for target.
-CMakeFiles/test_composite_runtime.dir/all: CMakeFiles/compiler_passes.dir/all
 CMakeFiles/test_composite_runtime.dir/all: CMakeFiles/myl7_core.dir/all
+CMakeFiles/test_composite_runtime.dir/all: CMakeFiles/compiler_passes.dir/all
 CMakeFiles/test_composite_runtime.dir/all: CMakeFiles/nn_ops.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_runtime.dir/build.make CMakeFiles/test_composite_runtime.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_runtime.dir/build.make CMakeFiles/test_composite_runtime.dir/build
@@ -346,7 +348,7 @@ CMakeFiles/test_composite_runtime.dir/clean:
 CMakeFiles/test_pred_semantics.dir/all: CMakeFiles/myl7_core.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pred_semantics.dir/build.make CMakeFiles/test_pred_semantics.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pred_semantics.dir/build.make CMakeFiles/test_pred_semantics.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=59,60 "Built target test_pred_semantics"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=61,62 "Built target test_pred_semantics"
 .PHONY : CMakeFiles/test_pred_semantics.dir/all
 
 # Build rule for subdir invocation for target.
@@ -369,8 +371,8 @@ CMakeFiles/test_pred_semantics.dir/clean:
 # Target rules for target CMakeFiles/test_composite_equiv_proto.dir
 
 # All Build rule for target.
-CMakeFiles/test_composite_equiv_proto.dir/all: CMakeFiles/compiler_passes.dir/all
 CMakeFiles/test_composite_equiv_proto.dir/all: CMakeFiles/myl7_core.dir/all
+CMakeFiles/test_composite_equiv_proto.dir/all: CMakeFiles/compiler_passes.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto.dir/build.make CMakeFiles/test_composite_equiv_proto.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto.dir/build.make CMakeFiles/test_composite_equiv_proto.dir/build
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=39,40 "Built target test_composite_equiv_proto"
@@ -396,8 +398,8 @@ CMakeFiles/test_composite_equiv_proto.dir/clean:
 # Target rules for target CMakeFiles/test_composite_equiv_proto_myl7.dir
 
 # All Build rule for target.
-CMakeFiles/test_composite_equiv_proto_myl7.dir/all: CMakeFiles/compiler_passes.dir/all
 CMakeFiles/test_composite_equiv_proto_myl7.dir/all: CMakeFiles/myl7_core.dir/all
+CMakeFiles/test_composite_equiv_proto_myl7.dir/all: CMakeFiles/compiler_passes.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_myl7.dir/build.make CMakeFiles/test_composite_equiv_proto_myl7.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_myl7.dir/build.make CMakeFiles/test_composite_equiv_proto_myl7.dir/build
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=41,42 "Built target test_composite_equiv_proto_myl7"
@@ -423,8 +425,8 @@ CMakeFiles/test_composite_equiv_proto_myl7.dir/clean:
 # Target rules for target CMakeFiles/test_composite_equiv_proto_sigmafast.dir
 
 # All Build rule for target.
-CMakeFiles/test_composite_equiv_proto_sigmafast.dir/all: CMakeFiles/compiler_passes.dir/all
 CMakeFiles/test_composite_equiv_proto_sigmafast.dir/all: CMakeFiles/myl7_core.dir/all
+CMakeFiles/test_composite_equiv_proto_sigmafast.dir/all: CMakeFiles/compiler_passes.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_sigmafast.dir/build.make CMakeFiles/test_composite_equiv_proto_sigmafast.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_equiv_proto_sigmafast.dir/build.make CMakeFiles/test_composite_equiv_proto_sigmafast.dir/build
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=43,44 "Built target test_composite_equiv_proto_sigmafast"
@@ -453,7 +455,7 @@ CMakeFiles/test_composite_equiv_proto_sigmafast.dir/clean:
 CMakeFiles/test_postproc_hooks.dir/all: CMakeFiles/myl7_core.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_postproc_hooks.dir/build.make CMakeFiles/test_postproc_hooks.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_postproc_hooks.dir/build.make CMakeFiles/test_postproc_hooks.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=57,58 "Built target test_postproc_hooks"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=59,60 "Built target test_postproc_hooks"
 .PHONY : CMakeFiles/test_postproc_hooks.dir/all
 
 # Build rule for subdir invocation for target.
@@ -479,7 +481,7 @@ CMakeFiles/test_postproc_hooks.dir/clean:
 CMakeFiles/test_llm_gates.dir/all: CMakeFiles/myl7_core.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_llm_gates.dir/build.make CMakeFiles/test_llm_gates.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_llm_gates.dir/build.make CMakeFiles/test_llm_gates.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=47,48 "Built target test_llm_gates"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=49,50 "Built target test_llm_gates"
 .PHONY : CMakeFiles/test_llm_gates.dir/all
 
 # Build rule for subdir invocation for target.
@@ -554,8 +556,8 @@ CMakeFiles/bench_sigmafast_coeff.dir/clean:
 # Target rules for target CMakeFiles/bench_sigmafast_gates.dir
 
 # All Build rule for target.
-CMakeFiles/bench_sigmafast_gates.dir/all: CMakeFiles/compiler_passes.dir/all
 CMakeFiles/bench_sigmafast_gates.dir/all: CMakeFiles/myl7_core.dir/all
+CMakeFiles/bench_sigmafast_gates.dir/all: CMakeFiles/compiler_passes.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_sigmafast_gates.dir/build.make CMakeFiles/bench_sigmafast_gates.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_sigmafast_gates.dir/build.make CMakeFiles/bench_sigmafast_gates.dir/build
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=9,10 "Built target bench_sigmafast_gates"
@@ -581,8 +583,8 @@ CMakeFiles/bench_sigmafast_gates.dir/clean:
 # Target rules for target CMakeFiles/nn_ops.dir
 
 # All Build rule for target.
-CMakeFiles/nn_ops.dir/all: CMakeFiles/compiler_passes.dir/all
 CMakeFiles/nn_ops.dir/all: CMakeFiles/myl7_core.dir/all
+CMakeFiles/nn_ops.dir/all: CMakeFiles/compiler_passes.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/build
 	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=24,25,26,27,28,29,30,31,32,33,34 "Built target nn_ops"
@@ -634,8 +636,8 @@ CMakeFiles/bench_llm_gates.dir/clean:
 # Target rules for target CMakeFiles/bench_attention.dir
 
 # All Build rule for target.
-CMakeFiles/bench_attention.dir/all: CMakeFiles/compiler_passes.dir/all
 CMakeFiles/bench_attention.dir/all: CMakeFiles/myl7_core.dir/all
+CMakeFiles/bench_attention.dir/all: CMakeFiles/compiler_passes.dir/all
 CMakeFiles/bench_attention.dir/all: CMakeFiles/nn_ops.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_attention.dir/build.make CMakeFiles/bench_attention.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_attention.dir/build.make CMakeFiles/bench_attention.dir/build
@@ -662,12 +664,12 @@ CMakeFiles/bench_attention.dir/clean:
 # Target rules for target CMakeFiles/test_matmul_and_attention.dir
 
 # All Build rule for target.
-CMakeFiles/test_matmul_and_attention.dir/all: CMakeFiles/compiler_passes.dir/all
 CMakeFiles/test_matmul_and_attention.dir/all: CMakeFiles/myl7_core.dir/all
+CMakeFiles/test_matmul_and_attention.dir/all: CMakeFiles/compiler_passes.dir/all
 CMakeFiles/test_matmul_and_attention.dir/all: CMakeFiles/nn_ops.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_matmul_and_attention.dir/build.make CMakeFiles/test_matmul_and_attention.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_matmul_and_attention.dir/build.make CMakeFiles/test_matmul_and_attention.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=53,54 "Built target test_matmul_and_attention"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=55,56 "Built target test_matmul_and_attention"
 .PHONY : CMakeFiles/test_matmul_and_attention.dir/all
 
 # Build rule for subdir invocation for target.
@@ -690,12 +692,12 @@ CMakeFiles/test_matmul_and_attention.dir/clean:
 # Target rules for target CMakeFiles/test_matmul.dir
 
 # All Build rule for target.
-CMakeFiles/test_matmul.dir/all: CMakeFiles/compiler_passes.dir/all
 CMakeFiles/test_matmul.dir/all: CMakeFiles/myl7_core.dir/all
+CMakeFiles/test_matmul.dir/all: CMakeFiles/compiler_passes.dir/all
 CMakeFiles/test_matmul.dir/all: CMakeFiles/nn_ops.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_matmul.dir/build.make CMakeFiles/test_matmul.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_matmul.dir/build.make CMakeFiles/test_matmul.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=51,52 "Built target test_matmul"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=53,54 "Built target test_matmul"
 .PHONY : CMakeFiles/test_matmul.dir/all
 
 # Build rule for subdir invocation for target.
@@ -718,11 +720,11 @@ CMakeFiles/test_matmul.dir/clean:
 # Target rules for target CMakeFiles/test_truncation.dir
 
 # All Build rule for target.
-CMakeFiles/test_truncation.dir/all: CMakeFiles/compiler_passes.dir/all
 CMakeFiles/test_truncation.dir/all: CMakeFiles/myl7_core.dir/all
+CMakeFiles/test_truncation.dir/all: CMakeFiles/compiler_passes.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_truncation.dir/build.make CMakeFiles/test_truncation.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_truncation.dir/build.make CMakeFiles/test_truncation.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=69,70 "Built target test_truncation"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=71,72 "Built target test_truncation"
 .PHONY : CMakeFiles/test_truncation.dir/all
 
 # Build rule for subdir invocation for target.
@@ -745,12 +747,12 @@ CMakeFiles/test_truncation.dir/clean:
 # Target rules for target CMakeFiles/test_softmax_task.dir
 
 # All Build rule for target.
-CMakeFiles/test_softmax_task.dir/all: CMakeFiles/compiler_passes.dir/all
 CMakeFiles/test_softmax_task.dir/all: CMakeFiles/myl7_core.dir/all
+CMakeFiles/test_softmax_task.dir/all: CMakeFiles/compiler_passes.dir/all
 CMakeFiles/test_softmax_task.dir/all: CMakeFiles/nn_ops.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_softmax_task.dir/build.make CMakeFiles/test_softmax_task.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_softmax_task.dir/build.make CMakeFiles/test_softmax_task.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=63,64 "Built target test_softmax_task"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=65,66 "Built target test_softmax_task"
 .PHONY : CMakeFiles/test_softmax_task.dir/all
 
 # Build rule for subdir invocation for target.
@@ -773,12 +775,12 @@ CMakeFiles/test_softmax_task.dir/clean:
 # Target rules for target CMakeFiles/test_trunc_task.dir
 
 # All Build rule for target.
-CMakeFiles/test_trunc_task.dir/all: CMakeFiles/compiler_passes.dir/all
 CMakeFiles/test_trunc_task.dir/all: CMakeFiles/myl7_core.dir/all
+CMakeFiles/test_trunc_task.dir/all: CMakeFiles/compiler_passes.dir/all
 CMakeFiles/test_trunc_task.dir/all: CMakeFiles/nn_ops.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_trunc_task.dir/build.make CMakeFiles/test_trunc_task.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_trunc_task.dir/build.make CMakeFiles/test_trunc_task.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=67,68 "Built target test_trunc_task"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=69,70 "Built target test_trunc_task"
 .PHONY : CMakeFiles/test_trunc_task.dir/all
 
 # Build rule for subdir invocation for target.
@@ -798,11 +800,39 @@ CMakeFiles/test_trunc_task.dir/clean:
 .PHONY : CMakeFiles/test_trunc_task.dir/clean
 
 #=============================================================================
+# Target rules for target CMakeFiles/test_layernorm_task.dir
+
+# All Build rule for target.
+CMakeFiles/test_layernorm_task.dir/all: CMakeFiles/myl7_core.dir/all
+CMakeFiles/test_layernorm_task.dir/all: CMakeFiles/compiler_passes.dir/all
+CMakeFiles/test_layernorm_task.dir/all: CMakeFiles/nn_ops.dir/all
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_layernorm_task.dir/build.make CMakeFiles/test_layernorm_task.dir/depend
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_layernorm_task.dir/build.make CMakeFiles/test_layernorm_task.dir/build
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=47,48 "Built target test_layernorm_task"
+.PHONY : CMakeFiles/test_layernorm_task.dir/all
+
+# Build rule for subdir invocation for target.
+CMakeFiles/test_layernorm_task.dir/rule: cmake_check_build_system
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/yuhan/new/SUF/build/CMakeFiles 22
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 CMakeFiles/test_layernorm_task.dir/all
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/yuhan/new/SUF/build/CMakeFiles 0
+.PHONY : CMakeFiles/test_layernorm_task.dir/rule
+
+# Convenience name for target.
+test_layernorm_task: CMakeFiles/test_layernorm_task.dir/rule
+.PHONY : test_layernorm_task
+
+# clean rule for target.
+CMakeFiles/test_layernorm_task.dir/clean:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_layernorm_task.dir/build.make CMakeFiles/test_layernorm_task.dir/clean
+.PHONY : CMakeFiles/test_layernorm_task.dir/clean
+
+#=============================================================================
 # Target rules for target CMakeFiles/bench_gemm.dir
 
 # All Build rule for target.
-CMakeFiles/bench_gemm.dir/all: CMakeFiles/compiler_passes.dir/all
 CMakeFiles/bench_gemm.dir/all: CMakeFiles/myl7_core.dir/all
+CMakeFiles/bench_gemm.dir/all: CMakeFiles/compiler_passes.dir/all
 CMakeFiles/bench_gemm.dir/all: CMakeFiles/nn_ops.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_gemm.dir/build.make CMakeFiles/bench_gemm.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_gemm.dir/build.make CMakeFiles/bench_gemm.dir/build
@@ -858,7 +888,7 @@ CMakeFiles/bench_truncation.dir/clean:
 CMakeFiles/test_myl7_bit_order.dir/all: CMakeFiles/myl7_core.dir/all
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_myl7_bit_order.dir/build.make CMakeFiles/test_myl7_bit_order.dir/depend
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_myl7_bit_order.dir/build.make CMakeFiles/test_myl7_bit_order.dir/build
-	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=55,56 "Built target test_myl7_bit_order"
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --progress-dir=/home/yuhan/new/SUF/build/CMakeFiles --progress-num=57,58 "Built target test_myl7_bit_order"
 .PHONY : CMakeFiles/test_myl7_bit_order.dir/all
 
 # Build rule for subdir invocation for target.

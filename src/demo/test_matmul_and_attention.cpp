@@ -18,6 +18,8 @@
 #include "nn/matmul_publicW.hpp"
 #include "nn/transformer_layer.hpp"
 #include "mpc/net.hpp"
+#include "proto/reference_backend.hpp"
+#include "compiler/truncation_pass_runner.hpp"
 
 using namespace nn;
 
@@ -415,6 +417,16 @@ static void test_transformer_layer() {
   std::vector<uint64_t> Y0(T * D), Y1(T * D);
   KVCache cache0(1, cfg.attn.H, cfg.attn.S_max, cfg.attn.Dh), cache1(1, cfg.attn.H, cfg.attn.S_max, cfg.attn.Dh);
 
+  proto::ReferenceBackend trunc_backend0, trunc_backend1;
+  // Deterministic seeds so both parties derive identical truncation material.
+  compiler::TruncationPassContext trunc_ctx0(trunc_backend0, 0x74723130ull);
+  compiler::TruncationPassContext trunc_ctx1(trunc_backend1, 0x74723130ull);
+  LayerContext ctx0, ctx1;
+  ctx0.trunc_ctx = &trunc_ctx0;
+  ctx1.trunc_ctx = &trunc_ctx1;
+  ctx0.frac_bits = cfg.frac_bits;
+  ctx1.frac_bits = cfg.frac_bits;
+
   LocalChan::Shared sh;
   LocalChan c0(&sh, true), c1(&sh, false);
   std::thread th1([&] {
@@ -425,7 +437,8 @@ static void test_transformer_layer() {
                               view2(W1.data(), D, cfg.mlp.Hidden),
                               view2(W2.data(), cfg.mlp.Hidden, D),
                               cache1,
-                              view3(Y1.data(), 1, T, D));
+                              view3(Y1.data(), 1, T, D),
+                              &ctx1);
   });
   transformer_layer_forward(cfg, 0, c0,
                             view3(X0.data(), 1, T, D),
@@ -434,7 +447,8 @@ static void test_transformer_layer() {
                             view2(W1.data(), D, cfg.mlp.Hidden),
                             view2(W2.data(), cfg.mlp.Hidden, D),
                             cache0,
-                            view3(Y0.data(), 1, T, D));
+                            view3(Y0.data(), 1, T, D),
+                            &ctx0);
   th1.join();
 
   auto plain = transformer_ref(cfg, X, Wqkv, Wout, W1, W2);

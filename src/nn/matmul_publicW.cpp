@@ -24,7 +24,6 @@ static void matmul2d(const uint64_t* X,
         __int128 wv = static_cast<__int128>(W[widx]);
         acc += xv * wv;
       }
-      if (params.local_rescale && params.frac_bits > 0) acc >>= params.frac_bits;
       if (params.bias && n < params.bias->size()) acc += static_cast<__int128>((*params.bias)[n]);
       Y[m * N + n] = to_ring(static_cast<int64_t>(acc));
     }
@@ -35,8 +34,8 @@ void matmul_publicW(const TensorView<uint64_t>& X_share,
                     const TensorView<int64_t>& W_public,
                     TensorView<uint64_t> Y_share,
                     const MatmulParams& params) {
-  if (!params.allow_legacy_shift && params.local_rescale) {
-    throw std::runtime_error("matmul_publicW: legacy local_rescale not allowed");
+  if (params.local_rescale) {
+    throw std::runtime_error("matmul_publicW: local_rescale is unsupported; insert explicit Rescale");
   }
   if (X_share.dims == 2) {
     size_t M = X_share.shape[0];

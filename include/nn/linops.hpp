@@ -27,12 +27,10 @@ void sub(const TensorView<uint64_t>& x,
          const TensorView<uint64_t>& y,
          TensorView<uint64_t> out);
 
-// Produces product; set apply_rescale=false when emitting explicit Rescale nodes.
 void mul_const(const TensorView<uint64_t>& x,
                int64_t c,
                int frac_bits,
                TensorView<uint64_t> out,
-               bool apply_rescale = true,
                LayerContext* ctx = nullptr);
 
 void axpy(const TensorView<uint64_t>& x,
@@ -40,7 +38,6 @@ void axpy(const TensorView<uint64_t>& x,
           int64_t a,
           int frac_bits,
           TensorView<uint64_t> out,
-          bool apply_rescale = true,
           LayerContext* ctx = nullptr);
 
 void hadamard(const LinOpsContext& ctx,
@@ -49,8 +46,7 @@ void hadamard(const LinOpsContext& ctx,
               TensorView<uint64_t> out,
               const std::vector<mpc::BeaverTripleA<core::Z2n<64>>>& triples,
               size_t triple_offset = 0,
-              int frac_bits = 0,
-              bool apply_rescale = true);
+              int frac_bits = 0);
 
 void sum_lastdim(const LinOpsContext& ctx,
                  const TensorView<uint64_t>& x,
