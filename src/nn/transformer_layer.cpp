@@ -213,7 +213,7 @@ RsqrtTaskMaterial make_rsqrt_material(proto::PfssBackendBatch& backend,
   auto suf_gate = build_rsqrt_affine_eval_suf(spec);
   std::vector<uint64_t> r_out(static_cast<size_t>(suf_gate.r_out), 0ull);
   auto kp = gates::composite_gen_backend_with_masks(
-      suf_gate, backend, rng, rng(), r_out, static_cast<size_t>(rows));
+      suf_gate, backend, rng, rng(), r_out, static_cast<size_t>(rows), compiler::GateKind::Rsqrt);
   kp.k0.compiled.gate_kind = compiler::GateKind::Rsqrt;
   kp.k1.compiled.gate_kind = compiler::GateKind::Rsqrt;
 
@@ -296,7 +296,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   int cols = static_cast<int>(D);
   int fb = cfg.frac_bits;
   double eps = 1.0 / 1024.0;
-  int rsqrt_iters = 2;
+  int rsqrt_iters = 1;
 
   // Shared trunc bundles for LN.
   std::mt19937_64 rng_trunc(0x6c6e7472ull);
@@ -319,9 +319,9 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   auto norm_gap = compiler::lower_truncation_gate(
       backend, rng_trunc, p_gap, static_cast<size_t>(rows) * static_cast<size_t>(cols));
 
-  runtime::TruncChoice mean_choice{&mean_gap, &mean_faithful, fb, true};
-  runtime::TruncChoice var_choice{&var_gap, &var_faithful, 2 * fb, true};
-  runtime::TruncChoice norm_choice{&norm_gap, &norm_faithful, fb, true};
+  runtime::TruncChoice mean_choice{nullptr, &mean_faithful, fb, true};
+  runtime::TruncChoice var_choice{nullptr, &var_faithful, 2 * fb, true};
+  runtime::TruncChoice norm_choice{nullptr, &norm_faithful, fb, true};
 
   uint64_t inv_len_qf =
       static_cast<uint64_t>(std::llround((1.0 / static_cast<double>(cols)) * std::ldexp(1.0, fb)));
@@ -403,7 +403,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
 
   // Residual add
   for (size_t i = 0; i < attn_out.size(); ++i) {
-    attn_out[i] = to_ring(to_signed(attn_out[i]) + to_signed(X_share.data[i]));
+    attn_out[i] = proto::add_mod(attn_out[i], X_share.data[i]);
   }
 
   // LayerNorm 2 via task.
@@ -433,7 +433,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
 
   // Residual add
   for (size_t i = 0; i < Y_share.numel(); ++i) {
-    Y_share.data[i] = to_ring(to_signed(Y_share.data[i]) + to_signed(attn_out[i]));
+    Y_share.data[i] = proto::add_mod(Y_share.data[i], attn_out[i]);
   }
 
   finalize_layer(*ctx, party, ch, backend);

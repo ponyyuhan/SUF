@@ -162,6 +162,8 @@ void mlp_forward(const MLPConfig& cfg,
         &plan1.bundle, std::span<const uint64_t>(hidden.data(), hidden.size()),
         std::span<uint64_t>(hidden_scaled.data(), hidden_scaled.size()));
     std::mt19937_64 rng2(0);
+    std::cerr << "mlp_forward: building silu task material frac_bits=" << cfg.frac_bits
+              << " elems=" << hidden_scaled.size() << "\n";
     auto mat = gates::dealer_make_silu_task_material(
         ctx->trunc_ctx->backend(),
         cfg.frac_bits,
@@ -175,9 +177,16 @@ void mlp_forward(const MLPConfig& cfg,
         std::span<const uint64_t>(hidden_scaled.data(), hidden_scaled.size()),
         std::span<uint64_t>(hidden_scaled.data(), hidden_scaled.size()));
 
-    // First wave: trunc hidden matmul accum -> SiLU cubic on shares.
+    // First wave: trunc hidden matmul accum to Qf.
     pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
     pe->add_task(std::move(trunc_task1));
+    pe->run(R);
+    pe->pfss_coeff_batch().clear();
+    pe->pfss_trunc_batch().clear();
+    pe->open_collector().clear();
+
+    // Second wave: apply SiLU cubic on the truncated hidden.
+    pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
     pe->add_task(std::move(silu_task));
     pe->run(R);
     pe->pfss_coeff_batch().clear();

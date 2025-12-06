@@ -484,19 +484,6 @@ void attention_forward(const AttentionConfig& cfg,
       }
     }
 
-    // MatmulTask expects A[M x K], B[K x N]. We reshape K as [Dh x (rows*cur_len)] then transpose logic.
-    // Flatten B as [Dh x (rows*cur_len)] column-major per K dimension.
-    std::vector<uint64_t> k_mat_reshaped(Dh * rows * cur_len, 0);
-    for (size_t row = 0; row < rows; ++row) {
-      for (size_t s = 0; s < cur_len; ++s) {
-        for (size_t d = 0; d < Dh; ++d) {
-          size_t dst = d * (rows * cur_len) + (row * cur_len + s);
-          size_t src = (row * cur_len + s) * Dh + d;
-          k_mat_reshaped[dst] = k_mat[src];
-        }
-      }
-    }
-
     // Need Dh * (rows*cur_len) triples for the matmul products.
     static std::unordered_map<uint64_t, std::vector<proto::BeaverTriple64Share>> score_cache_p0;
     static std::unordered_map<uint64_t, std::vector<proto::BeaverTriple64Share>> score_cache_p1;
@@ -505,13 +492,16 @@ void attention_forward(const AttentionConfig& cfg,
 
     // Phase: score matmul (unscaled Q2f).
     pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
-    auto score_task = std::make_unique<runtime::MatmulTask>(
-        static_cast<int>(rows), static_cast<int>(Dh), static_cast<int>(cur_len),
-        std::span<const uint64_t>(q_mat.data(), q_mat.size()),
-        std::span<const uint64_t>(k_mat_reshaped.data(), k_mat_reshaped.size()),
-        std::span<uint64_t>(score_share.data(), score_share.size()),
-        std::span<const proto::BeaverTriple64Share>(score_triples.data(), score_triples.size()));
-    pe->add_task(std::move(score_task));
+    for (size_t row = 0; row < rows; ++row) {
+      auto q_row = std::span<const uint64_t>(q_mat.data() + row * Dh, Dh);
+      auto k_row = std::span<const uint64_t>(k_mat.data() + row * cur_len * Dh, cur_len * Dh);
+      auto out_row = std::span<uint64_t>(score_share.data() + row * cur_len, cur_len);
+      auto tri_row = std::span<const proto::BeaverTriple64Share>(
+          score_triples.data() + row * cur_len * Dh, cur_len * Dh);
+      auto score_task = std::make_unique<runtime::MatmulTask>(
+          /*M=*/1, static_cast<int>(Dh), static_cast<int>(cur_len), q_row, k_row, out_row, tri_row);
+      pe->add_task(std::move(score_task));
+    }
     pe->run(phase_R);
     pe->pfss_coeff_batch().clear();
     pe->pfss_trunc_batch().clear();

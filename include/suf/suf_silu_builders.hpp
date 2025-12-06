@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <limits>
 #include <vector>
+#include <iostream>
 
 #include "gates/piecewise_poly.hpp"
 #include "suf/suf_ir.hpp"
@@ -92,34 +93,95 @@ inline SUF<uint64_t> build_silu_suf_from_piecewise(const gates::PiecewisePolySpe
             });
   if (intervals.empty()) return F;
 
-  F.alpha.clear();
-  F.alpha.reserve(intervals.size() + 1);
-  F.alpha.push_back(intervals.front().start);
-
-  // Ensure coverage starts at 0; if not, prepend a zero poly interval.
-  if (F.alpha.front() != 0) {
+  auto make_zero_piece = [&]() {
     suf::SufPiece<uint64_t> zero_piece;
     for (int i = 0; i < F.r_out; ++i) {
       suf::Poly<uint64_t> zero_poly;
       zero_poly.coeffs.assign(1, 0);
       zero_piece.polys.push_back(std::move(zero_poly));
     }
-    F.pieces.push_back(std::move(zero_piece));
-    F.alpha.insert(F.alpha.begin(), 0ull);
-  }
+    return zero_piece;
+  };
 
-  for (const auto& iv : intervals) {
+  auto make_coeff_piece = [&](const gates::CoeffPack& pack) {
     suf::SufPiece<uint64_t> piece;
-    auto coeffs = expand_to_x_coeffs(iv.pack, 3, spec.frac_bits_out);  // up to cubic
+    auto coeffs = expand_to_x_coeffs(pack, 3, spec.frac_bits_out);  // up to cubic
     coeffs.resize(static_cast<size_t>(F.r_out), 0);
     for (int i = 0; i < F.r_out; ++i) {
       suf::Poly<uint64_t> poly;
       poly.coeffs = {coeffs[static_cast<size_t>(i)]};  // degree 0 payload
       piece.polys.push_back(std::move(poly));
     }
-    F.pieces.push_back(std::move(piece));
-    F.alpha.push_back(iv.end);
+    return piece;
+  };
+
+  F.alpha.clear();
+  F.alpha.reserve(intervals.size() + 1);
+  uint64_t cur = 0;
+  bool seeded = false;
+
+  for (const auto& iv : intervals) {
+    uint64_t start = iv.start;
+    uint64_t end = iv.end;
+    if (end <= start) continue;
+
+    if (!seeded) {
+      // Ensure alpha begins at 0 for full-domain consistency.
+      if (start > 0) {
+        F.alpha.push_back(0ull);
+        F.pieces.push_back(make_zero_piece());
+        F.alpha.push_back(start);
+      } else {
+        F.alpha.push_back(start);
+      }
+      cur = start;
+      seeded = true;
+    }
+
+    // Trim overlap; enforce monotonic starts.
+    if (start < cur) start = cur;
+    if (end <= start) continue;
+
+    // Fill any gap with a zero piece to keep boundaries increasing.
+    if (start > cur) {
+      F.pieces.push_back(make_zero_piece());
+      F.alpha.push_back(start);
+      cur = start;
+    }
+
+    F.pieces.push_back(make_coeff_piece(iv.pack));
+    F.alpha.push_back(end);
+    cur = end;
   }
+
+  // If nothing was emitted (all degenerate), fall back to a single zero interval.
+  if (F.pieces.empty()) {
+    F.alpha.clear();
+    F.alpha.push_back(0ull);
+    F.alpha.push_back(~uint64_t(0));
+    F.pieces.push_back(make_zero_piece());
+  }
+
+  bool monotonic = true;
+  for (size_t i = 1; i < F.alpha.size(); ++i) {
+    if (F.alpha[i - 1] >= F.alpha[i]) {
+      monotonic = false;
+      break;
+    }
+  }
+  if (!monotonic) {
+    std::cerr << "build_silu_suf_from_piecewise produced non-monotonic alpha size="
+              << F.alpha.size() << " frac_in=" << spec.frac_bits_in
+              << " frac_out=" << spec.frac_bits_out << " intervals=" << intervals.size()
+              << " vals=";
+    size_t limit = std::min<size_t>(F.alpha.size(), 32);
+    for (size_t i = 0; i < limit; ++i) {
+      std::cerr << F.alpha[i];
+      if (i + 1 < limit) std::cerr << ",";
+    }
+    std::cerr << "\n";
+  }
+
   return F;
 }
 

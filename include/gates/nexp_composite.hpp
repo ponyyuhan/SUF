@@ -65,7 +65,8 @@ inline NexpCompositeKeys dealer_make_nexp_composite_keys(proto::PfssBackend& bac
   // build_silu_suf_from_piecewise works for any piecewise poly spec expanded to x-polys.
   auto suf_gate = suf::build_silu_suf_from_piecewise(spec);
   std::vector<uint64_t> r_out(static_cast<size_t>(suf_gate.r_out), 0ull);
-  auto kp = gates::composite_gen_backend_with_masks(suf_gate, backend, rng, rng(), r_out);
+  auto kp = gates::composite_gen_backend_with_masks(
+      suf_gate, backend, rng, /*r_in=*/0ull, r_out, /*batch_N=*/1, compiler::GateKind::NExp);
   NexpCompositeKeys out;
   out.suf = std::move(suf_gate);
   out.keys = std::move(kp);
@@ -82,7 +83,8 @@ inline NexpTaskMaterial dealer_make_nexp_task_material(proto::PfssBackendBatch& 
   auto spec = make_nexp_spec(params);
   auto suf_gate = suf::build_silu_suf_from_piecewise(spec);
   std::vector<uint64_t> r_out(static_cast<size_t>(suf_gate.r_out), 0ull);
-  auto kp = gates::composite_gen_backend_with_masks(suf_gate, backend, rng, rng(), r_out, batch_N);
+  auto kp = gates::composite_gen_backend_with_masks(
+      suf_gate, backend, rng, /*r_in=*/0ull, r_out, batch_N, compiler::GateKind::NExp);
   kp.k0.compiled.gate_kind = compiler::GateKind::NExp;
   kp.k1.compiled.gate_kind = compiler::GateKind::NExp;
 

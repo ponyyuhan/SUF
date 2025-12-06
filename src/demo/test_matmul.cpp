@@ -19,6 +19,8 @@
 #include "mpc/net.hpp"
 #include "proto/reference_backend.hpp"
 #include "runtime/pfss_superbatch.hpp"
+#include "runtime/phase_executor.hpp"
+#include "runtime/phase_tasks.hpp"
 
 using namespace nn;
 
@@ -106,6 +108,49 @@ static void test_matmul_public_basic() {
                  view2(W.data(), K, N),
                  view3(Y1.data(), B, M, N),
                  mp);
+
+  // Rescale Q2f -> Qf via faithful truncation.
+  proto::ReferenceBackend trunc_backend;
+  compiler::GateParams tp;
+  tp.kind = compiler::GateKind::FaithfulARS;
+  tp.frac_bits = frac_bits;
+  auto trunc_bundle = compiler::lower_truncation_gate(trunc_backend, rng, tp, Y0.size());
+  std::fill(trunc_bundle.keys.k0.r_out_share.begin(), trunc_bundle.keys.k0.r_out_share.end(), 0ull);
+  std::fill(trunc_bundle.keys.k1.r_out_share.begin(), trunc_bundle.keys.k1.r_out_share.end(), 0ull);
+
+  LocalChan::Shared sh_tr;
+  LocalChan c0(&sh_tr, true), c1(&sh_tr, false);
+  runtime::PhaseExecutor pe0, pe1;
+  runtime::PhaseResources R0, R1;
+  R0.party = 0;
+  R1.party = 1;
+  R0.net_chan = &c0;
+  R1.net_chan = &c1;
+  runtime::ProtoChanFromNet pch0(c0), pch1(c1);
+  R0.pfss_backend = &trunc_backend;
+  R1.pfss_backend = &trunc_backend;
+  R0.pfss_chan = &pch0;
+  R1.pfss_chan = &pch1;
+  R0.pfss_trunc = &pe0.pfss_trunc_batch();
+  R1.pfss_trunc = &pe1.pfss_trunc_batch();
+  R0.opens = &pe0.open_collector();
+  R1.opens = &pe1.open_collector();
+
+  auto run_party = [&](int party,
+                       runtime::PhaseExecutor& pe,
+                       runtime::PhaseResources& R,
+                       std::vector<uint64_t>& buf) {
+    auto task = std::make_unique<runtime::TruncTask>(
+        &trunc_bundle,
+        std::span<const uint64_t>(buf.data(), buf.size()),
+        std::span<uint64_t>(buf.data(), buf.size()));
+    pe.add_task(std::move(task));
+    pe.run(R);
+  };
+
+  std::thread trunc1([&] { run_party(1, pe1, R1, Y1); });
+  run_party(0, pe0, R0, Y0);
+  trunc1.join();
 
   const int64_t tol = 1;
   int64_t max_diff = 0;
@@ -259,9 +304,30 @@ static void test_matmul_beaver_case(size_t B,
 
 int main() {
   test_matmul_public_basic();
-  test_matmul_beaver_case(/*B=*/1, /*M=*/2, /*K=*/3, /*N=*/4, /*w_transposed=*/false, /*frac_bits=*/8, /*seed=*/7);
-  test_matmul_beaver_case(/*B=*/2, /*M=*/2, /*K=*/2, /*N=*/3, /*w_transposed=*/true, /*frac_bits=*/6, /*seed=*/9);
-  test_matmul_beaver_case(/*B=*/1, /*M=*/2, /*K=*/3, /*N=*/4, /*w_transposed=*/false, /*frac_bits=*/8, /*seed=*/13, /*use_truncation=*/true);
+  test_matmul_beaver_case(/*B=*/1,
+                          /*M=*/2,
+                          /*K=*/3,
+                          /*N=*/4,
+                          /*w_transposed=*/false,
+                          /*frac_bits=*/8,
+                          /*seed=*/7,
+                          /*use_truncation=*/true);
+  test_matmul_beaver_case(/*B=*/2,
+                          /*M=*/2,
+                          /*K=*/2,
+                          /*N=*/3,
+                          /*w_transposed=*/true,
+                          /*frac_bits=*/6,
+                          /*seed=*/9,
+                          /*use_truncation=*/true);
+  test_matmul_beaver_case(/*B=*/1,
+                          /*M=*/2,
+                          /*K=*/3,
+                          /*N=*/4,
+                          /*w_transposed=*/false,
+                          /*frac_bits=*/8,
+                          /*seed=*/13,
+                          /*use_truncation=*/true);
   std::cout << "Matmul public/private tests passed\n";
   return 0;
 }

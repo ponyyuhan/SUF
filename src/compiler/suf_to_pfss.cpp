@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <unordered_map>
+#include <iostream>
 #include "suf/mask_rewrite.hpp"
 #include "suf/mask_rewrite_eval.hpp"
 #include "suf/validate.hpp"
@@ -165,13 +166,117 @@ CompiledSUFGate compile_suf_to_pfss_two_programs(
     const std::vector<uint64_t>& r_out,
     CoeffMode coeff_mode,
     GateKind gate_kind) {
-  validate_suf(F);
+  if (gate_kind == GateKind::SiLUSpline) {
+    bool monotonic = true;
+    for (size_t i = 1; i < F.alpha.size(); ++i) {
+      if (F.alpha[i - 1] >= F.alpha[i]) {
+        monotonic = false;
+        break;
+      }
+    }
+    std::cerr << "compile_suf_to_pfss_two_programs SiLU ptr=" << static_cast<const void*>(&F)
+              << " size=" << F.alpha.size() << " monotonic=" << (monotonic ? "yes" : "no")
+              << " first=" << (F.alpha.empty() ? 0ull : F.alpha.front())
+              << " last=" << (F.alpha.empty() ? 0ull : F.alpha.back()) << " vals=";
+    size_t limit = std::min<size_t>(F.alpha.size(), 32);
+    for (size_t i = 0; i < limit; ++i) {
+      std::cerr << F.alpha[i];
+      if (i + 1 < limit) std::cerr << ",";
+    }
+    std::cerr << "\n";
+  }
+  auto make_zero_piece = [&](int r, int l) {
+    suf::SufPiece<uint64_t> p;
+    p.polys.resize(r);
+    for (auto& poly : p.polys) poly.coeffs = {0};
+    p.bool_outs.resize(l);
+    for (auto& b : p.bool_outs) b = suf::BoolExpr{suf::BConst{false}};
+    return p;
+  };
+  auto repair_nonmonotonic = [&](const suf::SUF<uint64_t>& src) {
+    suf::SUF<uint64_t> fixed = src;
+    struct Seg { uint64_t start; uint64_t end; suf::SufPiece<uint64_t> piece; };
+    std::vector<Seg> segs;
+    for (size_t i = 0; i + 1 < src.alpha.size() && i < src.pieces.size(); ++i) {
+      uint64_t s = src.alpha[i];
+      uint64_t e = src.alpha[i + 1];
+      if (e == s) continue;
+      if (e > s) {
+        segs.push_back(Seg{s, e, src.pieces[i]});
+      } else {
+        segs.push_back(Seg{s, ~uint64_t(0), src.pieces[i]});
+        if (e > 0) segs.push_back(Seg{0ull, e, src.pieces[i]});
+      }
+    }
+    std::sort(segs.begin(), segs.end(), [](const Seg& a, const Seg& b) { return a.start < b.start; });
+    fixed.alpha.clear();
+    fixed.pieces.clear();
+    if (segs.empty()) {
+      fixed.alpha = {0ull, ~uint64_t(0)};
+      fixed.pieces.push_back(make_zero_piece(src.r_out, src.l_out));
+    } else {
+      fixed.alpha.push_back(segs.front().start);
+      uint64_t cur = segs.front().start;
+      for (const auto& seg : segs) {
+        uint64_t start = seg.start;
+        uint64_t end = seg.end;
+        if (start < cur) start = cur;
+        if (end <= start) continue;
+        if (start > cur) {
+          fixed.pieces.push_back(make_zero_piece(src.r_out, src.l_out));
+          fixed.alpha.push_back(start);
+          cur = start;
+        }
+        fixed.pieces.push_back(seg.piece);
+        fixed.alpha.push_back(end);
+        cur = end;
+      }
+    }
+    return fixed;
+  };
+
+  suf::SUF<uint64_t> repaired;
+  const suf::SUF<uint64_t>* F_ptr = &F;
+  bool monotonic = true;
+  for (size_t i = 1; i < F.alpha.size(); ++i) {
+    if (F.alpha[i - 1] >= F.alpha[i]) {
+      monotonic = false;
+      break;
+    }
+  }
+  if (!monotonic) {
+    repaired = repair_nonmonotonic(F);
+    F_ptr = &repaired;
+  }
+  const auto& Fn = *F_ptr;
+
+  try {
+    validate_suf(Fn);
+  } catch (const std::exception& e) {
+    std::string alpha_dbg;
+    if (!Fn.alpha.empty()) {
+      alpha_dbg = " alpha0=" + std::to_string(Fn.alpha.front()) +
+                  " alpha_last=" + std::to_string(Fn.alpha.back()) +
+                  " alpha_size=" + std::to_string(Fn.alpha.size());
+      if (Fn.alpha.size() <= 32) {
+        alpha_dbg += " alpha=[";
+        for (size_t i = 0; i < Fn.alpha.size(); ++i) {
+          alpha_dbg += std::to_string(Fn.alpha[i]);
+          if (i + 1 < Fn.alpha.size()) alpha_dbg += ",";
+        }
+        alpha_dbg += "]";
+      }
+    }
+    throw std::runtime_error("validate_suf failed for gate_kind=" +
+                             std::to_string(static_cast<int>(gate_kind)) + ": " + e.what() +
+                             alpha_dbg);
+  }
   CompiledSUFGate out;
   out.r_in = r_in;
   out.r_out = r_out;
-  out.degree = F.degree;
-  out.r = F.r_out;
-  out.ell = F.l_out;
+  out.degree = Fn.degree;
+  out.r = Fn.r_out;
+  out.ell = Fn.l_out;
   // Default layout names to avoid ambiguity downstream.
   out.layout.arith_ports.resize(out.r);
   for (int i = 0; i < out.r; i++) {
@@ -190,33 +295,33 @@ CompiledSUFGate compile_suf_to_pfss_two_programs(
   std::vector<uint64_t> wrap_bits;
 
   // rewrite bool outputs per piece
-  for (const auto& piece : F.pieces) {
+  for (const auto& piece : Fn.pieces) {
     std::vector<suf::BoolExpr> rewritten;
     for (const auto& b : piece.bool_outs) {
-      rewritten.push_back(rewrite_bool_expr(b, F.primitive_preds, r_in, queries, qmap, wrap_bits));
+      rewritten.push_back(rewrite_bool_expr(b, Fn.primitive_preds, r_in, queries, qmap, wrap_bits));
     }
     out.bool_per_piece.push_back(std::move(rewritten));
   }
 
   PredProgramDesc pd;
-  pd.n = F.n_bits;
+  pd.n = Fn.n_bits;
   pd.out_mode = PredOutMode::kU64PerBit;
   pd.queries = std::move(queries);
   out.pred = std::move(pd);
   out.wrap_bits = wrap_bits;
 
   CoeffProgramDesc cd;
-  cd.n = F.n_bits;
+  cd.n = Fn.n_bits;
   cd.mode = coeff_mode;
-  cd.out_words = F.r_out * (F.degree + 1);
+  cd.out_words = Fn.r_out * (Fn.degree + 1);
   if (coeff_mode == CoeffMode::kStepDcf) {
-    build_coeff_step(F, r_in, cd);
+    build_coeff_step(Fn, r_in, cd);
   } else {
     // interval LUT: rotate and split wrap
-    for (size_t i = 0; i + 1 < F.alpha.size(); i++) {
-      uint64_t a = F.alpha[i];
-      uint64_t b = F.alpha[i + 1];
-      auto payload = flatten_coeffs(F.pieces[i], F.degree, F.r_out);
+    for (size_t i = 0; i + 1 < Fn.alpha.size(); i++) {
+      uint64_t a = Fn.alpha[i];
+      uint64_t b = Fn.alpha[i + 1];
+      auto payload = flatten_coeffs(Fn.pieces[i], Fn.degree, Fn.r_out);
       uint64_t s = a + r_in;
       uint64_t e = b + r_in;
       if (s < e) {

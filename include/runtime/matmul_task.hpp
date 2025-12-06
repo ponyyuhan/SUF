@@ -24,13 +24,19 @@ class MatmulTask final : public detail::PhaseTask {
              std::span<const proto::BeaverTriple64Share> triples)
       : M_(M), K_(K), N_(N), A_(A), B_(B), out_(out), triples_(triples) {
     if (A_.size() != static_cast<size_t>(M_) * static_cast<size_t>(K_)) {
-      throw std::runtime_error("MatmulTask: A size mismatch");
+      throw std::runtime_error("MatmulTask: A size mismatch (got " + std::to_string(A_.size()) +
+                               ", expected " + std::to_string(static_cast<size_t>(M_) * static_cast<size_t>(K_)) +
+                               ")");
     }
     if (B_.size() != static_cast<size_t>(K_) * static_cast<size_t>(N_)) {
-      throw std::runtime_error("MatmulTask: B size mismatch");
+      throw std::runtime_error("MatmulTask: B size mismatch (got " + std::to_string(B_.size()) +
+                               ", expected " + std::to_string(static_cast<size_t>(K_) * static_cast<size_t>(N_)) +
+                               ")");
     }
     if (out_.size() != static_cast<size_t>(M_) * static_cast<size_t>(N_)) {
-      throw std::runtime_error("MatmulTask: out size mismatch");
+      throw std::runtime_error("MatmulTask: out size mismatch (got " + std::to_string(out_.size()) +
+                               ", expected " + std::to_string(static_cast<size_t>(M_) * static_cast<size_t>(N_)) +
+                               ")");
     }
     size_t need = static_cast<size_t>(M_) * static_cast<size_t>(K_) * static_cast<size_t>(N_);
     if (triples_.size() < need) {
@@ -113,4 +119,3 @@ class MatmulTask final : public detail::PhaseTask {
 };
 
 }  // namespace runtime
-

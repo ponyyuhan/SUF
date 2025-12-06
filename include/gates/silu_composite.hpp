@@ -3,6 +3,7 @@
 #include <memory>
 #include <random>
 #include <vector>
+#include <iostream>
 
 #include "compiler/suf_to_pfss.hpp"
 #include "gates/composite_fss.hpp"
@@ -48,11 +49,34 @@ inline SiluTaskMaterial dealer_make_silu_task_material(proto::PfssBackendBatch& 
                                                        size_t triple_need = 0,
                                                        size_t batch_N = 1) {
   auto spec = make_silu_spec({frac_bits, 16});
+  static bool logged = false;
+  if (!logged) {
+    logged = true;
+    std::cerr << "SiLU intervals (first 32): ";
+    for (size_t i = 0; i < spec.intervals.size() && i < 32; ++i) {
+      const auto& iv = spec.intervals[i];
+      std::cerr << "(" << iv.start << "," << iv.end << ")";
+      if (i + 1 < spec.intervals.size() && i + 1 < 32) std::cerr << " ";
+    }
+    std::cerr << "\n";
+  }
   auto suf_gate = suf::build_silu_suf_from_piecewise(spec);
-  auto kp = gates::composite_gen_backend(suf_gate, backend, rng, batch_N);
-  // zero output masks so coeff payload is direct.
-  std::fill(kp.k0.r_out_share.begin(), kp.k0.r_out_share.end(), 0ull);
-  std::fill(kp.k1.r_out_share.begin(), kp.k1.r_out_share.end(), 0ull);
+  std::cerr << "dealer_make_silu_task_material suf ptr=" << static_cast<const void*>(&suf_gate)
+            << " frac_bits=" << frac_bits << " alpha_size=" << suf_gate.alpha.size() << "\n";
+  static bool logged_alpha = false;
+  if (!logged_alpha) {
+    logged_alpha = true;
+    std::cerr << "SiLU SUF alpha (first 32): ";
+    for (size_t i = 0; i < suf_gate.alpha.size() && i < 32; ++i) {
+      std::cerr << suf_gate.alpha[i];
+      if (i + 1 < suf_gate.alpha.size() && i + 1 < 32) std::cerr << ",";
+    }
+    std::cerr << " size=" << suf_gate.alpha.size() << "\n";
+  }
+  std::vector<uint64_t> r_out(static_cast<size_t>(suf_gate.r_out), 0ull);
+  auto kp = gates::composite_gen_backend_with_masks(
+      suf_gate, backend, rng, /*r_in=*/0ull, r_out, batch_N, compiler::GateKind::SiLUSpline);
+  // output masks are already zero; keep r_out shares zeroed for coeff payload.
   kp.k0.compiled.gate_kind = compiler::GateKind::SiLUSpline;
   kp.k1.compiled.gate_kind = compiler::GateKind::SiLUSpline;
 
@@ -86,13 +110,13 @@ inline SiluCompositeKeys dealer_make_silu_composite_keys(proto::PfssBackend& bac
                                                          std::mt19937_64& rng) {
   auto spec = make_silu_spec(params);
   auto suf_gate = suf::build_silu_suf_from_piecewise(spec);
-  auto kp = gates::composite_gen_backend(suf_gate, backend, rng);
+  std::vector<uint64_t> r_out(static_cast<size_t>(suf_gate.r_out), 0ull);
+  auto kp = gates::composite_gen_backend_with_masks(
+      suf_gate, backend, rng, /*r_in=*/0ull, r_out, /*batch_N=*/1, compiler::GateKind::SiLUSpline);
   SiluCompositeKeys out;
   out.suf = std::move(suf_gate);
   out.keys = std::move(kp);
-  // Coeff payload only; downstream hook performs Horner, so mask outputs are zeroed.
-  std::fill(out.keys.k0.r_out_share.begin(), out.keys.k0.r_out_share.end(), 0ull);
-  std::fill(out.keys.k1.r_out_share.begin(), out.keys.k1.r_out_share.end(), 0ull);
+  // Coeff payload only; downstream hook performs Horner, so mask outputs are already zeroed.
   // Mark gate kind so downstream postproc knows this is a SiLU payload (already Horner-evaluated).
   out.keys.k0.compiled.gate_kind = compiler::GateKind::SiLUSpline;
   out.keys.k1.compiled.gate_kind = compiler::GateKind::SiLUSpline;

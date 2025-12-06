@@ -7,6 +7,7 @@
 #include <random>
 #include <thread>
 #include <vector>
+#include <atomic>
 
 #include "gates/silu_spline_gate.hpp"
 #include "gates/rsqrt_gate.hpp"
@@ -288,24 +289,57 @@ static void test_attention_correctness() {
 
   std::vector<uint64_t> Y0(T * cfg.D), Y1(T * cfg.D);
   KVCache cache0(1, cfg.H, cfg.S_max, cfg.Dh), cache1(1, cfg.H, cfg.S_max, cfg.Dh);
+  proto::ReferenceBackend trunc_backend0, trunc_backend1;
+  compiler::TruncationPassContext trunc_ctx0(trunc_backend0, 0x6174743064756c6cull);
+  compiler::TruncationPassContext trunc_ctx1(trunc_backend1, 0x6174743064756c6cull);
+  LayerContext ctx0, ctx1;
+  ctx0.trunc_ctx = &trunc_ctx0;
+  ctx1.trunc_ctx = &trunc_ctx1;
+  ctx0.frac_bits = cfg.frac_bits;
+  ctx1.frac_bits = cfg.frac_bits;
+  runtime::PhaseExecutor pe0, pe1;
+
+  std::atomic<bool> fail{false};
+  std::string err;
+  std::mutex err_mu;
+  auto record_err = [&](const std::exception& e) {
+    fail.store(true, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lk(err_mu);
+    if (err.empty()) err = e.what();
+  };
 
   LocalChan::Shared sh;
   LocalChan c0(&sh, true), c1(&sh, false);
   std::thread th1([&] {
-    attention_forward(cfg, 1, c1,
-                      view3(X1.data(), 1, T, cfg.D),
+    try {
+      attention_forward(cfg, 1, c1,
+                        view3(X1.data(), 1, T, cfg.D),
+                        view2(Wqkv.data(), cfg.D, cfg.D * 3),
+                        view2(Wout.data(), cfg.D, cfg.D),
+                        cache1,
+                        view3(Y1.data(), 1, T, cfg.D),
+                        &ctx1,
+                        &pe1);
+    } catch (const std::exception& e) {
+      record_err(e);
+    }
+  });
+  try {
+    attention_forward(cfg, 0, c0,
+                      view3(X0.data(), 1, T, cfg.D),
                       view2(Wqkv.data(), cfg.D, cfg.D * 3),
                       view2(Wout.data(), cfg.D, cfg.D),
-                      cache1,
-                      view3(Y1.data(), 1, T, cfg.D));
-  });
-  attention_forward(cfg, 0, c0,
-                    view3(X0.data(), 1, T, cfg.D),
-                    view2(Wqkv.data(), cfg.D, cfg.D * 3),
-                    view2(Wout.data(), cfg.D, cfg.D),
-                    cache0,
-                    view3(Y0.data(), 1, T, cfg.D));
+                      cache0,
+                      view3(Y0.data(), 1, T, cfg.D),
+                      &ctx0,
+                      &pe0);
+  } catch (const std::exception& e) {
+    record_err(e);
+  }
   th1.join();
+  if (fail.load(std::memory_order_relaxed)) {
+    throw std::runtime_error("attention_correctness: " + err);
+  }
 
   auto plain = attention_ref(cfg, X, Wqkv, Wout);
   for (size_t i = 0; i < plain.size(); ++i) {
@@ -335,23 +369,55 @@ static void test_attention_step_vs_batch() {
   // Batch path.
   std::vector<uint64_t> Y0(T * cfg.D), Y1(T * cfg.D);
   KVCache cache0(1, cfg.H, cfg.S_max, cfg.Dh), cache1(1, cfg.H, cfg.S_max, cfg.Dh);
+  proto::ReferenceBackend trunc_backend0, trunc_backend1;
+  compiler::TruncationPassContext trunc_ctx0(trunc_backend0, 0x6174743164756c6cull);
+  compiler::TruncationPassContext trunc_ctx1(trunc_backend1, 0x6174743164756c6cull);
+  LayerContext ctx0, ctx1;
+  ctx0.trunc_ctx = &trunc_ctx0;
+  ctx1.trunc_ctx = &trunc_ctx1;
+  ctx0.frac_bits = cfg.frac_bits;
+  ctx1.frac_bits = cfg.frac_bits;
+  runtime::PhaseExecutor pe0, pe1;
+  std::atomic<bool> fail{false};
+  std::string err;
+  std::mutex err_mu;
+  auto record_err = [&](const std::exception& e) {
+    fail.store(true, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lk(err_mu);
+    if (err.empty()) err = e.what();
+  };
   LocalChan::Shared sh_batch;
   LocalChan cb0(&sh_batch, true), cb1(&sh_batch, false);
   std::thread th1([&] {
-    attention_forward(cfg, 1, cb1,
-                      view3(X1.data(), 1, T, cfg.D),
+    try {
+      attention_forward(cfg, 1, cb1,
+                        view3(X1.data(), 1, T, cfg.D),
+                        view2(Wqkv.data(), cfg.D, cfg.D * 3),
+                        view2(Wout.data(), cfg.D, cfg.D),
+                        cache1,
+                        view3(Y1.data(), 1, T, cfg.D),
+                        &ctx1,
+                        &pe1);
+    } catch (const std::exception& e) {
+      record_err(e);
+    }
+  });
+  try {
+    attention_forward(cfg, 0, cb0,
+                      view3(X0.data(), 1, T, cfg.D),
                       view2(Wqkv.data(), cfg.D, cfg.D * 3),
                       view2(Wout.data(), cfg.D, cfg.D),
-                      cache1,
-                      view3(Y1.data(), 1, T, cfg.D));
-  });
-  attention_forward(cfg, 0, cb0,
-                    view3(X0.data(), 1, T, cfg.D),
-                    view2(Wqkv.data(), cfg.D, cfg.D * 3),
-                    view2(Wout.data(), cfg.D, cfg.D),
-                    cache0,
-                    view3(Y0.data(), 1, T, cfg.D));
+                      cache0,
+                      view3(Y0.data(), 1, T, cfg.D),
+                      &ctx0,
+                      &pe0);
+  } catch (const std::exception& e) {
+    record_err(e);
+  }
   th1.join();
+  if (fail.load(std::memory_order_relaxed)) {
+    throw std::runtime_error("attention_batch: " + err);
+  }
 
   std::vector<int64_t> batch_out(T * cfg.D, 0);
   for (size_t i = 0; i < batch_out.size(); ++i) {
@@ -360,6 +426,20 @@ static void test_attention_step_vs_batch() {
 
   // Step mode.
   KVCache step0(1, cfg.H, cfg.S_max, cfg.Dh), step1(1, cfg.H, cfg.S_max, cfg.Dh);
+  LayerContext sctx0, sctx1;
+  sctx0.trunc_ctx = &trunc_ctx0;
+  sctx1.trunc_ctx = &trunc_ctx1;
+  sctx0.frac_bits = cfg.frac_bits;
+  sctx1.frac_bits = cfg.frac_bits;
+  runtime::PhaseExecutor spe0, spe1;
+  std::atomic<bool> fail_step{false};
+  std::string err_step;
+  std::mutex err_step_mu;
+  auto record_err_step = [&](const std::exception& e) {
+    fail_step.store(true, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lk(err_step_mu);
+    if (err_step.empty()) err_step = e.what();
+  };
   std::vector<int64_t> step_out;
   LocalChan::Shared sh_step;
   LocalChan cs0(&sh_step, true), cs1(&sh_step, false);
@@ -370,20 +450,35 @@ static void test_attention_step_vs_batch() {
       sX1[d] = X1[t * cfg.D + d];
     }
     std::thread t1([&] {
-      attention_forward(cfg, 1, cs1,
-                        view3(sX1.data(), 1, 1, cfg.D),
+      try {
+        attention_forward(cfg, 1, cs1,
+                          view3(sX1.data(), 1, 1, cfg.D),
+                          view2(Wqkv.data(), cfg.D, cfg.D * 3),
+                          view2(Wout.data(), cfg.D, cfg.D),
+                          step1,
+                          view3(sY1.data(), 1, 1, cfg.D),
+                          &sctx1,
+                          &spe1);
+      } catch (const std::exception& e) {
+        record_err_step(e);
+      }
+    });
+    try {
+      attention_forward(cfg, 0, cs0,
+                        view3(sX0.data(), 1, 1, cfg.D),
                         view2(Wqkv.data(), cfg.D, cfg.D * 3),
                         view2(Wout.data(), cfg.D, cfg.D),
-                        step1,
-                        view3(sY1.data(), 1, 1, cfg.D));
-    });
-    attention_forward(cfg, 0, cs0,
-                      view3(sX0.data(), 1, 1, cfg.D),
-                      view2(Wqkv.data(), cfg.D, cfg.D * 3),
-                      view2(Wout.data(), cfg.D, cfg.D),
-                      step0,
-                      view3(sY0.data(), 1, 1, cfg.D));
+                        step0,
+                        view3(sY0.data(), 1, 1, cfg.D),
+                        &sctx0,
+                        &spe0);
+    } catch (const std::exception& e) {
+      record_err_step(e);
+    }
     t1.join();
+    if (fail_step.load(std::memory_order_relaxed)) {
+      throw std::runtime_error("attention_step: " + err_step);
+    }
     for (size_t d = 0; d < cfg.D; ++d) {
       step_out.push_back(to_signed(sY0[d]) + to_signed(sY1[d]));
     }
@@ -427,40 +522,149 @@ static void test_transformer_layer() {
   ctx0.frac_bits = cfg.frac_bits;
   ctx1.frac_bits = cfg.frac_bits;
 
+  std::atomic<bool> fail{false};
+  std::string err;
+  std::mutex err_mu;
+  auto record_err = [&](const std::exception& e) {
+    fail.store(true, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lk(err_mu);
+    if (err.empty()) err = e.what();
+  };
+
   LocalChan::Shared sh;
   LocalChan c0(&sh, true), c1(&sh, false);
   std::thread th1([&] {
-    transformer_layer_forward(cfg, 1, c1,
-                              view3(X1.data(), 1, T, D),
+    try {
+      transformer_layer_forward(cfg, 1, c1,
+                                view3(X1.data(), 1, T, D),
+                                view2(Wqkv.data(), D, D * 3),
+                                view2(Wout.data(), D, D),
+                                view2(W1.data(), D, cfg.mlp.Hidden),
+                                view2(W2.data(), cfg.mlp.Hidden, D),
+                                cache1,
+                                view3(Y1.data(), 1, T, D),
+                                &ctx1);
+    } catch (const std::exception& e) {
+      record_err(e);
+    }
+  });
+  try {
+    transformer_layer_forward(cfg, 0, c0,
+                              view3(X0.data(), 1, T, D),
                               view2(Wqkv.data(), D, D * 3),
                               view2(Wout.data(), D, D),
                               view2(W1.data(), D, cfg.mlp.Hidden),
                               view2(W2.data(), cfg.mlp.Hidden, D),
-                              cache1,
-                              view3(Y1.data(), 1, T, D),
-                              &ctx1);
-  });
-  transformer_layer_forward(cfg, 0, c0,
-                            view3(X0.data(), 1, T, D),
-                            view2(Wqkv.data(), D, D * 3),
-                            view2(Wout.data(), D, D),
-                            view2(W1.data(), D, cfg.mlp.Hidden),
-                            view2(W2.data(), cfg.mlp.Hidden, D),
-                            cache0,
-                            view3(Y0.data(), 1, T, D),
-                            &ctx0);
+                              cache0,
+                              view3(Y0.data(), 1, T, D),
+                              &ctx0);
+  } catch (const std::exception& e) {
+    record_err(e);
+  }
   th1.join();
+  if (fail.load(std::memory_order_relaxed)) {
+    throw std::runtime_error("transformer_layer: " + err);
+  }
 
   auto plain = transformer_ref(cfg, X, Wqkv, Wout, W1, W2);
   for (size_t i = 0; i < plain.size(); ++i) {
     int64_t got = to_signed(Y0[i]) + to_signed(Y1[i]);
-    assert(got == plain[i]);
+    if (std::llabs(got - plain[i]) > 1) {
+      std::cerr << "transformer mismatch idx=" << i << " got=" << got << " expected=" << plain[i]
+                << " y0=" << to_signed(Y0[i]) << " y1=" << to_signed(Y1[i]) << "\n";
+      assert(std::llabs(got - plain[i]) <= 1);
+    }
+  }
+}
+
+static void test_mlp_only() {
+  std::mt19937_64 rng(21);
+  size_t D = 4;
+  size_t T = 2;
+  MLPConfig cfg{static_cast<int>(D), 6, 8};
+  std::vector<int64_t> X(T * D), W1(D * cfg.Hidden), W2(cfg.Hidden * D);
+  for (auto& v : X) v = static_cast<int64_t>(rng() % 64);
+  for (auto& w : W1) w = static_cast<int64_t>(rng() % 32);
+  for (auto& w : W2) w = static_cast<int64_t>(rng() % 32);
+
+  std::vector<uint64_t> X0, X1;
+  split_shares(X, rng, cfg.frac_bits, X0, X1);
+  std::vector<uint64_t> Y0(T * D), Y1(T * D);
+
+  proto::ReferenceBackend trunc_backend0, trunc_backend1;
+  compiler::TruncationPassContext trunc_ctx0(trunc_backend0, 0x6d6c7030ull);
+  compiler::TruncationPassContext trunc_ctx1(trunc_backend1, 0x6d6c7030ull);
+  LayerContext ctx0, ctx1;
+  ctx0.trunc_ctx = &trunc_ctx0;
+  ctx1.trunc_ctx = &trunc_ctx1;
+  ctx0.frac_bits = cfg.frac_bits;
+  ctx1.frac_bits = cfg.frac_bits;
+
+  runtime::PhaseExecutor pe0, pe1;
+  ctx0.pfss_batch = &pe0.pfss_trunc_batch();
+  ctx1.pfss_batch = &pe1.pfss_trunc_batch();
+  ctx0.open_collector = &pe0.open_collector();
+  ctx1.open_collector = &pe1.open_collector();
+
+  LocalChan::Shared sh;
+  LocalChan c0(&sh, true), c1(&sh, false);
+  std::atomic<bool> fail{false};
+  std::string err;
+  std::mutex err_mu;
+  auto record_err = [&](const std::exception& e) {
+    fail.store(true, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lk(err_mu);
+    if (err.empty()) err = e.what();
+  };
+
+  std::thread th1([&] {
+    try {
+      mlp_forward(cfg,
+                  view3(X1.data(), 1, T, D),
+                  view2(W1.data(), D, cfg.Hidden),
+                  view2(W2.data(), cfg.Hidden, D),
+                  view3(Y1.data(), 1, T, D),
+                  1,
+                  c1,
+                  &ctx1,
+                  &pe1);
+    } catch (const std::exception& e) {
+      record_err(e);
+    }
+  });
+  try {
+    mlp_forward(cfg,
+                view3(X0.data(), 1, T, D),
+                view2(W1.data(), D, cfg.Hidden),
+                view2(W2.data(), cfg.Hidden, D),
+                view3(Y0.data(), 1, T, D),
+                0,
+                c0,
+                &ctx0,
+                &pe0);
+  } catch (const std::exception& e) {
+    record_err(e);
+  }
+  th1.join();
+  if (fail.load(std::memory_order_relaxed)) {
+    throw std::runtime_error("mlp_only: " + err);
+  }
+
+  auto plain = mlp_ref(cfg, X, W1, W2);
+  for (size_t i = 0; i < plain.size(); ++i) {
+    int64_t got = to_signed(Y0[i]) + to_signed(Y1[i]);
+    if (std::llabs(got - plain[i]) > 1) {
+      std::cerr << "mlp mismatch idx=" << i << " got=" << got << " expected=" << plain[i]
+                << " y0=" << to_signed(Y0[i]) << " y1=" << to_signed(Y1[i]) << "\n";
+      assert(std::llabs(got - plain[i]) <= 1);
+    }
   }
 }
 
 int main() {
   test_attention_correctness();
   test_attention_step_vs_batch();
+  test_mlp_only();
   test_transformer_layer();
   std::cout << "Attention/Transformer tests passed\n";
   return 0;

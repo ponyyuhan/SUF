@@ -1,4 +1,4 @@
-# SUF/PFSS Prototype (GPT-5 Codex Agent)
+# SUF/PFSS Prototype
 
 ## 目录结构（精简）
 
@@ -10,35 +10,29 @@ include/
   suf/                            # SUF IR、谓词、BoolExpr、mask rewrite + ref_eval/validate
   compiler/                       # PFSS 描述（pred/coeff）、编译产物、suf_to_pfss.cpp
   pfss/                           # 抽象 PFSS 接口
-  gates/                          # 门级 API + ReLU/ReluARS/GeLU SUF 占位
-  proto/                          # bits-in/bytes-out DCF 原型层
-    backend_clear.hpp             # 明文 DCF/区间 LUT
-    myl7_fss_backend.hpp          # 真实 myl7/fss 适配（支持 payload 分块）
-    sigma_fast_backend_ext.hpp    # packed compare / interval LUT（CPU stub，支持 in_bits<=64 掩码打包）
-    beaver*/bit_ring_ops.hpp      # 批量 Beaver + 布尔算子
-    tape.hpp                      # Vec/File tape，统一标签格式
-    reluars_* / gelu_*            # 离线 dealer + 在线 evaluator
-    pfss_utils.hpp/pack_utils.hpp # eval 辅助、key 打包
+  gates/                          # 门级 API + SiLU/Recip/nExp/Softmax 组合门 + 任务 bundle
+  runtime/                        # PhaseExecutor、PhaseTask 状态机、PfssSuperBatch、OpenCollector
+  nn/                             # attention/MLP/transformer 层，LayerContext/hoist/rescale 记录
+  proto/                          # bits-in/bytes-out DCF 层（clear/myl7/sigmafast 后端、Beaver、tape）
 src/compiler/suf_to_pfss.cpp      # SUF→PFSS 编译实现
+src/runtime/*                     # PfssSuperBatch/OpenCollector 实现
+src/nn/*                          # attention_block / mlp_block / transformer_layer
 src/demo/sim_harness.cpp          # 全流程两方模拟 + 断言
-src/demo/test_*                   # SUF/mask/编译 测试
-expand*.md, initial.md, milestone*.md, paper.md
+src/demo/test_*                   # SUF/mask/编译/任务 测试
+expand*.md, initial.md, milestone*.md, advice*.md, revise_m11_*.md, paper.md
 ```
 
 ## 核心流程与逻辑
 
-- **SUF IR & 校验**：`suf/validate.hpp` 确认区间单调、度数/谓词参数合法；`suf/ref_eval.hpp` 作为语义金标准（谓词、BoolExpr、多项式、分段）。
-- **掩码重写 (§3.3)**：`suf/mask_rewrite.hpp` 将 `x<β / x mod 2^f < γ / MSB(x+c)` 在 `hatx = x+r` 域下重写为公共阈值比较 + 秘密 wrap bit。wrap 以 **additive u64 share** 存储，在线用 MPC `SEL`。
-- **SUF→PFSS 编译（Milestone 5/6）**：
-  - `compiler/pfss_program_desc.hpp` 描述 `PredProgramDesc`（原始比较查询集合）与 `CoeffProgramDesc`（Step-DCF 或 Interval-LUT）。
-  - `compiler/compiled_suf_gate.hpp` 存储掩码 `r_in/r_out[]`、编译后的 BoolExpr（变量=raw predicate idx + wrap bits）、系数模式元数据。
-  - `compiler/suf_to_pfss.hpp` / `src/compiler/suf_to_pfss.cpp`：收集原始谓词→掩码重写→去重→生成谓词程序；系数区间按掩码旋转/拆 wrap → Step-DCF deltas 或 Interval LUT。
-  - 参考测试：`src/demo/test_compile_pfss.cpp` 直接在明文模拟 Pred/Coeff 程序，并与 `ref_eval` 对比。
-- **proto 在线层**：`reluars_online_complete.hpp`、`gelu_online_step_dcf.hpp` 等使用 PFSS 后端给出的 helper bits/系数 share，结合 BeaverMul64/BitRingOps 完成 MPC 逻辑，最终输出 masked y。
-- **后端抽象**：
-  - `proto/backend_clear.hpp`：确定性明文 share（party0 负载，party1=0），用于自测/harness。
-  - `proto/myl7_fss_backend.hpp`：真实 myl7/fss 适配。若检测到 `<fss/dcf.h>`，使用 C 库 keygen/eval；payload 超过 `kLambda` 时自动按 `kLambda` 分块生成多把 DCF key 并拼回原始长度；key header 编码包含 in_bits / 分块数 / party 位 / payload_len。
-  - `proto/sigma_fast_backend_ext.hpp`：packed compare / interval LUT 的 CPU 实现（party0 为真实掩码或 payload，party1=0），支持 `in_bits<=64`，带断言测试 `test_sigmafast`。
+- **SUF 层**：`suf/validate.hpp` 校验区间/度数，`suf/ref_eval.hpp` 提供语义金标；`suf/mask_rewrite.hpp` 将谓词迁移到 `hatx=x+r` 域并引入 wrap bit（加法 share），`suf/suf_silu_builders.hpp` 生成 SiLU/nExp/Recip 样条 SUF（r_out=4 coeff，degree=0，零 r_in）。
+- **编译管线**：`compiler/suf_to_pfss.cpp` 收集原始谓词→掩码重写→去重→Pred/Coeff ProgramDesc（Step-DCF 或 Interval LUT，处理 wrap 分段），输出 `CompiledSUFGate`（掩码、布局、额外 gate_kind/spec）。参考测试 `test_compile_pfss.cpp` 对比 `ref_eval`。
+- **后端抽象**：`proto/backend_clear.hpp`（明文）、`proto/myl7_fss_backend.hpp`（自动分块 DCF/party header）、`proto/sigma_fast_backend_ext.hpp`（packed compare/LUT stub），BeaverMul64/BitRingOps、tape/pack_utils 辅助。
+- **组合运行时/状态机**：`runtime/pfss_superbatch` 聚合 PFSS coeff/trunc 请求，`open_collector` 管理批量 Open，`phase_executor.hpp` 驱动任务并按 Need(Open/PfssCoeff/PfssTrunc) flush/finalize。
+  - `TruncTask`：open masked x̂ → PFSS trunc（faithful/GapARS）。
+  - `CubicPolyTask`：open x̂ → PFSS coeff → 3×Beaver mul + 2×Trunc（SiLU/nExp/Recip），可走 reference spec。
+  - `RsqrtTask`：PFSS 仿射初值 + NR（3 mul/iter + trunc）。
+  - `LayerNormTask`：mean/var trunc + rsqrt 迭代 + 行广播 mul + affine；ReferenceBackend 下可直接明文调试。
+- **图/NN 路径**：`nn/attention_block.cpp`（任务化 softmax/recip/nexp + matmul trunc 计划 + KV cache），`nn/mlp_block.cpp`（两段 matmul trunc + SiLU CubicPolyTask），`nn/transformer_layer.cpp`（两次 LayerNormTask + attention + MLP + 残差，显式 rescale/trunc，无本地 shift），`nn/layer_context.hpp` 记录 hoist/rescale/trunc 计划与 PfssSuperBatch。范围事实贯穿记录，用于选择 trunc kind 与 rescale。
 
 ## 构建与运行
 
@@ -75,3 +69,44 @@ expand*.md, initial.md, milestone*.md, paper.md
 - SigmaFast（CPU）现有 packed compare/interval LUT stub，输出 party0 掩码或 payload，配合 `test_sigmafast` 做正确性；后续可替换为 SIGMA 风格 PRG/packing 以获得真实吞吐。
 - 组合式 SUF 运行时雏形：`gates/composite_fss.hpp` + `test_composite_runtime`（使用 ClearBackend+Beaver/线程通道）；接口已为通用后端设计，Myl7/SigmaFast 需要按各自输出域做比特重分享/布尔 DAG MPC。
 - 待优化：真实 Delta/LUT/样条系数替换 toy 数据；性能化批处理（GPU/SoA）与 SigmaFast PRG 优化。
+- Milestone 11 进展：linops/matmul/attention/MLP 去内联移位，显式 Rescale/TruncChoice；LayerNorm/Rsqrt/Softmax/SiLU/nExp/Recip 任务化并接入 PhaseExecutor；SiLU/nExp/Recip SUF 单调修复、零 r_in；小型 transformer+LN 回归通过。剩余：全图 rescale-hoist 收束、范围驱动 trunc 选择、packing/flush 计数约束、LN 范围绑定，必要时收紧 demo 容差（当前容忍 ±1 LSB）。
+
+## 测试现状
+
+- `ctest`（build）：`test_softmax_task_{correctness,flush_counts}`、`test_trunc_task`、`test_layernorm_task`、`test_matmul_and_attention_executor`、`test_matmul_executor` 均通过。
+- 额外：`test_compile_pfss`、`test_mask_rewrite`、`test_sigmafast`、`test_composite_runtime`、`sim_harness`（ReluARS/GeLU 2000 轮）通过。
+
+
+## 当前状态 / 里程碑梳理
+
+- **Milestone 1-8**：SUF 语义、掩码重写、PFSS 编译、后端抽象、组合运行时全部落地，核心自测与 harness 通过。
+- **Milestone 11 已完成**  
+  - 图/IR：linops、matmul、attention、MLP 去除内联移位，统一显式 Rescale/TruncChoice，范围信息贯穿 hoist/rescale 记录。  
+  - 新任务：`LayerNormTask`（mean/var trunc + rsqrt NR + 行广播 mul + affine）、`RsqrtTask`（PFSS 仿射初值 + NR）、`CubicPolyTask`（SiLU/nExp/Recip 两次 trunc Horner）、均接入 PhaseExecutor/PfssSuperBatch。  
+  - SUF/PFSS：SiLU/nExp/Recip 构造修补非单调区间，coeff payload 统一零 `r_in`；`CubicPolyTask` reference 路径直连 `ref_silu_fixed/ref_nexp_fixed`。  
+  - Transformer：attention/MLP/LN 全部任务化，无本地 shift；残差加法使用 `proto::add_mod`；小型 transformer+LN 回归用例通过。  
+- **Milestone 11 待办**：全图 rescale-hoist 进一步贯穿，范围事实馈入 trunc 选择，全局 packing/flush 计数与约束，LN 范围绑定到图元数据，必要时收紧 demo 容差（当前 demo 容忍 ±1 LSB）。
+
+## 核心文件与逻辑脉络
+
+- **SUF 层**：`suf/*.hpp`（IR、BoolExpr、ref_eval、validate、mask_rewrite），`suf/suf_silu_builders.hpp` 生成 SiLU/nExp/Recip 样条 SUF（r_out=4 coeff，degree=0，零 r_in）。
+- **编译层**：`compiler/suf_to_pfss.cpp`（谓词去重 + wrap 重写 → Pred/Coeff ProgramDesc），`compiled_suf_gate.hpp` 保存掩码/布局，`pfss_program_desc.hpp` 描述 PFSS 程序。
+- **后端/组合运行时**：`gates/composite_fss.hpp`（CompositeKeyPair，r_in/out/wrap share、Beaver、compiled gate），`runtime/pfss_superbatch`、`open_collector`、`phase_executor.hpp` 聚合 PFSS coeff/trunc/open 请求并按 Need(Open/PfssCoeff/PfssTrunc) 状态机 flush/finalize。
+- **任务状态机（`include/runtime/phase_tasks.hpp`）**：  
+  - `TruncTask`：open masked x̂ → PFSS trunc（faithful/GapARS）。  
+  - `CubicPolyTask`：open x̂ → PFSS 取 coeff → 3×Beaver mul + 2×Trunc（SiLU/nExp/Recip）或 reference spec。  
+  - `RsqrtTask`：PFSS 仿射初值 + NR（3 mul/iter + trunc）。  
+  - `LayerNormTask`：mean/var trunc + rsqrt 迭代 + 行广播 mul + affine（可在 ReferenceBackend 下直接明文重构，便于调试）。  
+  - `PhaseExecutor`：多任务循环，驱动 Open/coeff/trunc flush_eval + finalize，记录 flush/job/opened_words 统计。
+- **NN 路径**：`nn/attention_block.cpp`（任务化 softmax/recip/nexp + matmul trunc 计划 + KV cache），`nn/mlp_block.cpp`（两段 matmul trunc + SiLU CubicPolyTask），`nn/transformer_layer.cpp`（两次 LayerNormTask + attention + MLP + 残差），`nn/layer_context.hpp` 记录 hoist/rescale/trunc 计划与 PfssSuperBatch。
+
+## 测试与当前结果
+
+- `ctest`（`build`）覆盖：`test_softmax_task_{correctness,flush_counts}`、`test_trunc_task`、`test_layernorm_task`、`test_matmul_and_attention_executor`、`test_matmul_executor` —— **全部通过**。
+- 重要补充：`test_compile_pfss`、`test_mask_rewrite`、`test_sigmafast`、`test_composite_runtime`、`sim_harness`（ReluARS/GeLU 随机 2000 轮）均通过。
+
+## 后续建议
+
+1. 若需 bit-for-bit，收紧 demo 容差并沿 LN/rsqrt/attention 追踪舍入差异。  
+2. 继续 Milestone 11 剩余项：全图 rescale-hoist、范围驱动 trunc 选择、packing/flush 计数约束、LN 范围绑定。  
+3. 性能化：SigmaFast PRG/packing 真实实现、Beaver/三元组缓存与 GPU/SoA 批处理。

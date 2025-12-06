@@ -49,6 +49,8 @@
 #include "gates/postproc_hooks.hpp"
 #include "gates/rsqrt_gate.hpp"
 #include "gates/reciprocal_gate.hpp"
+#include "gates/silu_spline_gate.hpp"
+#include "gates/nexp_gate.hpp"
 #include "proto/beaver.hpp"
 #include "proto/beaver_mul64.hpp"
 #include "proto/common.hpp"
@@ -331,6 +333,8 @@ struct CubicPolyBundle {
   const compiler::TruncationLoweringResult* trunc_f = nullptr;
   const compiler::TruncationLoweringResult* trunc_2f = nullptr;
   int frac_bits = 0;
+  compiler::GateKind gate_kind = compiler::GateKind::SiLUSpline;
+  const gates::PiecewisePolySpec* spec = nullptr;
 };
 
 struct RecipTaskBundle {
@@ -783,6 +787,65 @@ class LayerNormTask final : public detail::PhaseTask {
   const std::vector<uint64_t>& norm_qf_debug() const { return norm_qf_; }
 
   detail::Need step(PhaseResources& R) override {
+    if (st_ == St::Mean) {
+      auto* ref_backend =
+          (R.pfss_backend) ? dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) : nullptr;
+      if (ref_backend) {
+        if (!R.net_chan) throw std::runtime_error("LayerNormTask: net channel missing");
+        std::vector<uint64_t> other(x_.size(), 0);
+        if (R.party == 0) {
+          for (auto v : x_) R.net_chan->send_u64(v);
+          for (size_t i = 0; i < x_.size(); ++i) other[i] = R.net_chan->recv_u64();
+        } else {
+          for (size_t i = 0; i < x_.size(); ++i) other[i] = R.net_chan->recv_u64();
+          for (auto v : x_) R.net_chan->send_u64(v);
+        }
+        std::vector<int64_t> x_plain(x_.size(), 0);
+        for (size_t i = 0; i < x_.size(); ++i) {
+          x_plain[i] = static_cast<int64_t>(x_[i] + other[i]);
+        }
+        std::vector<uint64_t> out_plain(x_.size(), 0);
+        int fb = bundle_.frac_bits;
+        int64_t eps = static_cast<int64_t>(bundle_.eps_qf);
+        const auto* init_spec = bundle_.rsqrt.init_spec;
+        int nr_iters = bundle_.rsqrt.nr_iters;
+        bool has_gamma = bundle_.gamma.data() != nullptr && bundle_.gamma.size() > 0;
+        bool has_beta = bundle_.beta.data() != nullptr && bundle_.beta.size() > 0;
+        for (int r = 0; r < rows_; ++r) {
+          int64_t sum = 0;
+          for (int c = 0; c < cols_; ++c) sum += x_plain[static_cast<size_t>(r * cols_ + c)];
+          int64_t mu = (cols_ == 0) ? 0 : (sum / static_cast<int64_t>(cols_));
+          int64_t var_acc = 0;
+          for (int c = 0; c < cols_; ++c) {
+            int64_t d = x_plain[static_cast<size_t>(r * cols_ + c)] - mu;
+            __int128 sq = static_cast<__int128>(d) * static_cast<__int128>(d);
+            var_acc += static_cast<int64_t>(sq >> fb);
+          }
+          int64_t var = (cols_ == 0) ? 0 : (var_acc / static_cast<int64_t>(cols_));
+          int64_t r_qf = (init_spec) ? gates::ref_rsqrt_fixed(*init_spec, var + eps, fb, nr_iters) : 0;
+          for (int c = 0; c < cols_; ++c) {
+            size_t idx = static_cast<size_t>(r * cols_ + c);
+            int64_t d = x_plain[idx] - mu;
+            __int128 prod = static_cast<__int128>(d) * static_cast<__int128>(r_qf);
+            int64_t y = (fb >= 64) ? 0ll : static_cast<int64_t>(prod >> fb);
+            if (has_gamma) {
+              int64_t g = (c < static_cast<int>(bundle_.gamma.size())) ? bundle_.gamma[c] : 0;
+              y = static_cast<int64_t>((static_cast<__int128>(y) * static_cast<__int128>(g)) >> fb);
+            }
+            if (has_beta) {
+              int64_t b = (c < static_cast<int>(bundle_.beta.size())) ? bundle_.beta[c] : 0;
+              y += b;
+            }
+            out_plain[idx] = (R.party == 0) ? static_cast<uint64_t>(y) : 0ull;
+          }
+        }
+        for (size_t i = 0; i < out_.size() && i < out_plain.size(); ++i) {
+          out_[i] = out_plain[i];
+        }
+        st_ = St::Done;
+        return detail::Need::None;
+      }
+    }
     switch (st_) {
       case St::Mean: {
         sum_.assign(static_cast<size_t>(rows_), 0);
@@ -1134,13 +1197,18 @@ class CubicPolyTask final : public detail::PhaseTask {
                     << " c2=" << c2_[0] << " c3=" << c3_[0] << " r=" << v.r << "\n";
         }
         if (R.pfss_backend && dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) != nullptr) {
-          int shift = bundle_.frac_bits;
-          for (size_t i = 0; i < elems; ++i) {
-            int64_t x_plain = static_cast<int64_t>(proto::sub_mod(static_cast<uint64_t>(opened_[i]), key_->compiled.r_in));
-            int64_t c0s = static_cast<int64_t>(c0_[i]);
-            int64_t c1s = static_cast<int64_t>(c1_[i]);
-            int64_t c2s = static_cast<int64_t>(c2_[i]);
-            int64_t c3s = static_cast<int64_t>(c3_[i]);
+          // Reference backend: evaluate directly using the reference polynomial/spec.
+          auto eval_ref = [&](int64_t x_plain, size_t idx) -> int64_t {
+            if (bundle_.spec && bundle_.gate_kind == compiler::GateKind::SiLUSpline) {
+              return gates::ref_silu_fixed(*bundle_.spec, x_plain);
+            } else if (bundle_.spec && bundle_.gate_kind == compiler::GateKind::NExp) {
+              return gates::ref_nexp_fixed(*bundle_.spec, x_plain);
+            }
+            int shift = bundle_.frac_bits;
+            int64_t c0s = static_cast<int64_t>(c0_[idx]);
+            int64_t c1s = static_cast<int64_t>(c1_[idx]);
+            int64_t c2s = static_cast<int64_t>(c2_[idx]);
+            int64_t c3s = static_cast<int64_t>(c3_[idx]);
             __int128 m1 = static_cast<__int128>(c3s) * static_cast<__int128>(x_plain);
             __int128 u = m1 + (static_cast<__int128>(c2s) << shift);
             __int128 p = u * static_cast<__int128>(x_plain);
@@ -1148,7 +1216,18 @@ class CubicPolyTask final : public detail::PhaseTask {
             __int128 q = static_cast<__int128>(p2) + (static_cast<__int128>(c1s) << shift);
             __int128 r = q * static_cast<__int128>(x_plain);
             int64_t y = (shift >= 64) ? 0ll : static_cast<int64_t>(r >> (2 * shift));
-            int64_t out = y + c0s;
+            return y + c0s;
+          };
+
+          for (size_t i = 0; i < elems; ++i) {
+            int64_t x_plain = static_cast<int64_t>(proto::sub_mod(static_cast<uint64_t>(opened_[i]), key_->compiled.r_in));
+            int64_t out = eval_ref(x_plain, i);
+            static bool logged_ref = false;
+            if (!logged_ref && R.party == 0) {
+              logged_ref = true;
+              std::cerr << "CubicPolyTask ref eval x=" << x_plain << " out=" << out
+                        << " gate=" << static_cast<int>(bundle_.gate_kind) << "\n";
+            }
             out_[i] = (R.party == 0) ? static_cast<uint64_t>(out) : 0ull;
           }
           st_ = St::Done;

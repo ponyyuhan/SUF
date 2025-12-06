@@ -57,7 +57,8 @@ inline RecipTaskMaterial dealer_make_recip_task_material(proto::PfssBackendBatch
   auto spec = make_recip_affine_init_spec(frac_bits, /*nmax=*/1024.0);
   auto suf_gate = suf::build_silu_suf_from_piecewise(spec);
   std::vector<uint64_t> r_out(static_cast<size_t>(suf_gate.r_out), 0ull);
-  auto kp = gates::composite_gen_backend_with_masks(suf_gate, backend, rng, rng(), r_out, batch_N);
+  auto kp = gates::composite_gen_backend_with_masks(
+      suf_gate, backend, rng, /*r_in=*/0ull, r_out, batch_N, compiler::GateKind::Reciprocal);
   kp.k0.compiled.gate_kind = compiler::GateKind::Reciprocal;
   kp.k1.compiled.gate_kind = compiler::GateKind::Reciprocal;
 

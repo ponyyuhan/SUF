@@ -181,11 +181,13 @@ inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t
                                                          std::mt19937_64& rng,
                                                          uint64_t r_in,
                                                          const std::vector<uint64_t>& r_out,
-                                                         size_t batch_N = 1) {
+                                                         size_t batch_N = 1,
+                                                         compiler::GateKind gate_kind = compiler::GateKind::SiLUSpline) {
   if (r_out.size() != static_cast<size_t>(F.r_out)) {
     throw std::runtime_error("composite_gen_backend_with_masks: r_out size mismatch");
   }
-  auto compiled = compiler::compile_suf_to_pfss_two_programs(F, r_in, r_out, compiler::CoeffMode::kStepDcf);
+  auto compiled = compiler::compile_suf_to_pfss_two_programs(
+      F, r_in, r_out, compiler::CoeffMode::kStepDcf, gate_kind);
 
   auto split_add = [&](uint64_t v) {
     uint64_t s0 = rng();
@@ -363,11 +365,12 @@ inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t
 inline CompositeKeyPair composite_gen_backend(const suf::SUF<uint64_t>& F,
                                               proto::PfssBackend& backend,
                                               std::mt19937_64& rng,
-                                              size_t batch_N = 1) {
+                                              size_t batch_N = 1,
+                                              compiler::GateKind gate_kind = compiler::GateKind::SiLUSpline) {
   uint64_t r_in = rng();
   std::vector<uint64_t> r_out(F.r_out);
   for (auto& v : r_out) v = rng();
-  return composite_gen_backend_with_masks(F, backend, rng, r_in, r_out, batch_N);
+  return composite_gen_backend_with_masks(F, backend, rng, r_in, r_out, batch_N, gate_kind);
 }
 
 // Specialized generator for truncation/ARS gates: fixes r_low used in predicates and

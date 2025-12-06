@@ -272,6 +272,7 @@ std::vector<int64_t> ref_layernorm(const std::vector<int64_t>& x,
                                    int rows,
                                    int cols,
                                    int fb,
+                                   const gates::PiecewisePolySpec& rsqrt_spec,
                                    double eps,
                                    int nr_iters) {
   std::vector<int64_t> out(x.size(), 0);
@@ -288,15 +289,7 @@ std::vector<int64_t> ref_layernorm(const std::vector<int64_t>& x,
     }
     int64_t var = var_acc / cols;
     int64_t var_eps = var + static_cast<int64_t>(std::llround(eps * std::ldexp(1.0, fb)));
-    int64_t rcp_sqrt = static_cast<int64_t>(uint64_t(1) << fb);  // const init
-    for (int i = 0; i < nr_iters; ++i) {
-      int64_t y2 = gates::mul_rescale_ring(rcp_sqrt, rcp_sqrt, fb);
-      int64_t xy2 = gates::mul_rescale_ring(var_eps, y2, fb);
-      int64_t half_xy2 = gates::arith_shift_signed(xy2, 1);
-      int64_t onept5 = static_cast<int64_t>(uint64_t(3) << (fb - 1));
-      int64_t t = onept5 - half_xy2;
-      rcp_sqrt = gates::mul_rescale_ring(rcp_sqrt, t, fb);
-    }
+    int64_t rcp_sqrt = gates::ref_rsqrt_fixed(rsqrt_spec, var_eps, fb, nr_iters);
     for (int c = 0; c < cols; ++c) {
       int64_t d = x[static_cast<size_t>(r * cols + c)] - mu;
       __int128 prod = static_cast<__int128>(d) * static_cast<__int128>(rcp_sqrt);
@@ -498,6 +491,7 @@ auto run_party = [&](int party, const runtime::RsqrtTaskBundle& rsqrt_bundle,
       rows,
       cols,
       fb,
+      rsqrt_mat.init_spec,
       eps,
       rsqrt_iters);
 
