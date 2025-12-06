@@ -271,7 +271,8 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   if (!ctx || !ctx->trunc_ctx) {
     throw std::runtime_error("transformer_layer_forward: LayerContext with trunc_ctx required");
   }
-  if (ctx->pfss_batch == nullptr) ctx->pfss_batch = &pe->pfss_trunc_batch();
+  // Share a single PFSS batch for coeff+trunc to maximize fusion.
+  if (ctx->pfss_batch == nullptr) ctx->pfss_batch = &pe->pfss_coeff_batch();
   ctx->enable_hoist = true;
   ctx->open_collector = &pe->open_collector();
   proto::PfssBackendBatch& backend = ctx->trunc_ctx->backend();
@@ -300,7 +301,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   R.pfss_backend = &backend;
   R.pfss_chan = &pch;
   R.pfss_coeff = &pe->pfss_coeff_batch();
-  R.pfss_trunc = &pe->pfss_trunc_batch();
+  R.pfss_trunc = &pe->pfss_coeff_batch();  // share batch for trunc + coeff
   R.opens = &pe->open_collector();
 
   int rows = static_cast<int>(B * T);

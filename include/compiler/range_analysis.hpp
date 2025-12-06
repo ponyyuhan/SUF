@@ -81,6 +81,17 @@ inline GateKind select_trunc_kind(const RangeInterval& r, int frac_bits) {
   return GateKind::FaithfulARS;
 }
 
+// Lightweight GapARS certificate helper.
+inline bool has_gap_cert(const RangeInterval& r) {
+  constexpr uint64_t kGapBound = (uint64_t(1) << 62);
+  if (!r.is_signed) return false;
+  auto abs64 = [](int64_t v) -> uint64_t { return (v < 0) ? static_cast<uint64_t>(-v) : static_cast<uint64_t>(v); };
+  uint64_t abs_lo = abs64(r.lo);
+  uint64_t abs_hi = abs64(r.hi);
+  uint64_t abs_max = std::max(abs_lo, abs_hi);
+  return abs_max < kGapBound;
+}
+
 // Repeat-add an interval `count` times (conservative clamp to int64_t limits).
 inline RangeInterval repeat_add(const RangeInterval& a, size_t count) {
   RangeInterval out;

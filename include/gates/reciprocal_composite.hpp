@@ -63,8 +63,11 @@ inline RecipTaskMaterial dealer_make_recip_task_material(proto::PfssBackendBatch
   kp.k1.compiled.gate_kind = compiler::GateKind::Reciprocal;
 
   compiler::GateParams p;
-  p.kind = compiler::GateKind::GapARS;  // recip input is positive and bounded
+  p.kind = compiler::GateKind::AutoTrunc;  // recip input is positive and bounded
   p.frac_bits = frac_bits;
+  p.range_hint = compiler::RangeInterval{0,
+                                         static_cast<int64_t>(1ll << (2 * frac_bits)),
+                                         true};
   auto trunc_fb = compiler::lower_truncation_gate(backend, rng, p, batch_N);
 
   // Two muls per NR iter: y*x and y*(2 - xy). Each mul needs a trunc back to Qf.

@@ -16,6 +16,8 @@ struct MatmulRescaleSite {
   size_t N = 0;
   RangeInterval x_range = RangeInterval::whole(true);
   RangeInterval w_range = RangeInterval::whole(true);
+  RangeInterval accum_range = RangeInterval::whole(true);
+  bool prefer_gapars = false;
 };
 
 // Future extension: linop/activation rescale sites could be added here.

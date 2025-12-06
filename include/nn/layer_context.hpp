@@ -66,7 +66,7 @@ inline compiler::RangeInterval clamp_silu_range(int frac_bits) {
 inline compiler::RangeInterval clamp_nexp_range(int frac_bits) {
   // nExp output in (0, 1]; represent as [0, 1<<frac_bits].
   compiler::RangeInterval r;
-  r.is_signed = false;
+  r.is_signed = true;
   r.lo = 0;
   r.hi = static_cast<int64_t>(1ll << frac_bits);
   return r;
@@ -75,7 +75,7 @@ inline compiler::RangeInterval clamp_nexp_range(int frac_bits) {
 inline compiler::RangeInterval clamp_recip_range(int frac_bits, double max_in) {
   // Reciprocal of [1, max_in] lies in [1/max_in, 1].
   compiler::RangeInterval r;
-  r.is_signed = false;
+  r.is_signed = true;
   int64_t hi = static_cast<int64_t>(1ll << frac_bits);
   int64_t lo = static_cast<int64_t>(std::llround((1.0 / std::max(max_in, 1.0)) * std::ldexp(1.0, frac_bits)));
   r.lo = lo;
@@ -86,7 +86,7 @@ inline compiler::RangeInterval clamp_recip_range(int frac_bits, double max_in) {
 inline compiler::RangeInterval clamp_softmax_range(int frac_bits) {
   // Softmax probabilities in [0,1].
   compiler::RangeInterval r;
-  r.is_signed = false;
+  r.is_signed = true;
   r.lo = 0;
   r.hi = static_cast<int64_t>(1ll << frac_bits);
   return r;

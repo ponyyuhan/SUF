@@ -7,6 +7,7 @@
 #include "gates/silu_composite.hpp"
 #include "runtime/pfss_superbatch.hpp"
 #include "runtime/phase_tasks.hpp"
+#include "runtime/pfss_phase_planner.hpp"
 #include "proto/pfss_utils.hpp"
 #include "compiler/matmul_truncation.hpp"
 #include "runtime/phase_executor.hpp"
@@ -127,9 +128,19 @@ void mlp_forward(const MLPConfig& cfg,
     R.pfss_backend = &ctx->trunc_ctx->backend();
     R.pfss_chan = &pch;
     R.net_chan = &ch;
+    // Share a single PFSS batch for coeff/trunc to fuse flushes.
     R.pfss_coeff = &pe->pfss_coeff_batch();
-    R.pfss_trunc = &pe->pfss_trunc_batch();
+    R.pfss_trunc = R.pfss_coeff;
     R.opens = &pe->open_collector();
+    runtime::PfssSuperBatch::Limits pfss_lim;
+    pfss_lim.max_pending_jobs = 1ull << 16;
+    pfss_lim.max_pending_hatx_words = 1ull << 24;
+    pfss_lim.max_flushes = 1ull << 12;
+    pe->pfss_coeff_batch().set_limits(pfss_lim);
+    runtime::OpenCollector::Limits open_lim;
+    open_lim.max_pending_words = 1ull << 22;
+    pe->open_collector().set_limits(open_lim);
+    pe->set_max_flushes(1ull << 12);
   }
 
   if (use_phase) {
@@ -185,21 +196,19 @@ void mlp_forward(const MLPConfig& cfg,
     compiler::RangeInterval silu_range = clamp_silu_range(cfg.frac_bits);
     mat2_x_range = silu_range;
 
+    runtime::PfssPhasePlanner pfss_phase_planner;
+    pfss_phase_planner.bind(R.pfss_coeff, R.pfss_trunc);
     // First wave: trunc hidden matmul accum to Qf.
     pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
     pe->add_task(std::move(trunc_task1));
     pe->run(R);
-    pe->pfss_coeff_batch().clear();
-    pe->pfss_trunc_batch().clear();
-    pe->open_collector().clear();
+    pe->finalize_pfss_once(party, *R.pfss_backend, *R.pfss_chan);
 
     // Second wave: apply SiLU cubic on the truncated hidden.
     pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
     pe->add_task(std::move(silu_task));
     pe->run(R);
-    pe->pfss_coeff_batch().clear();
-    pe->pfss_trunc_batch().clear();
-    pe->open_collector().clear();
+    pe->finalize_pfss_once(party, *R.pfss_backend, *R.pfss_chan);
 
     // Linear 2 on the updated hidden.
     matmul_publicW(view2(hidden_scaled.data(), B * T, H),
@@ -216,9 +225,7 @@ void mlp_forward(const MLPConfig& cfg,
         &plan2.bundle, std::span<const uint64_t>(Y_share.data, Y_share.numel()),
         std::span<uint64_t>(y_scaled.data(), y_scaled.size())));
     pe->run(R);
-    pe->pfss_coeff_batch().clear();
-    pe->pfss_trunc_batch().clear();
-    pe->open_collector().clear();
+    pe->finalize_pfss_once(party, *R.pfss_backend, *R.pfss_chan);
     for (size_t i = 0; i < Y_share.numel() && i < y_scaled.size(); ++i) {
       Y_share.data[i] = y_scaled[i];
     }

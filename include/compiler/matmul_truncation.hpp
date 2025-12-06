@@ -30,11 +30,15 @@ inline MatmulTruncationPlan compile_matmul_truncation(proto::PfssBackendBatch& b
                                                       size_t N,
                                                       int frac_bits,
                                                       const RangeInterval& x_range = RangeInterval::whole(true),
-                                                      const RangeInterval& w_range = RangeInterval::whole(true)) {
+                                                      const RangeInterval& w_range = RangeInterval::whole(true),
+                                                      bool prefer_gapars = false) {
   RangeInterval accum = matmul_accum_range(x_range, w_range, K);
   GateParams params;
   params.frac_bits = frac_bits;
   params.kind = select_trunc_kind(accum, frac_bits);
+  if (prefer_gapars && has_gap_cert(accum)) {
+    params.kind = GateKind::GapARS;
+  }
   size_t total = M * N;
   MatmulTruncationPlan plan;
   plan.kind = params.kind;

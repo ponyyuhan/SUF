@@ -239,6 +239,11 @@ void LayerGraph::propagate_ranges() {
       default:
         break;
     }
+    // After each assignment, refresh gap certificate.
+    for (int out : op.outputs) {
+      if (out < 0 || static_cast<size_t>(out) >= tensors_.size()) continue;
+      tensors_[static_cast<size_t>(out)].gap_cert = has_gap_cert(tensors_[static_cast<size_t>(out)].range);
+    }
   }
 }
 
@@ -287,9 +292,10 @@ void LayerGraph::hoist_rescales() {
 
   // Hoist identical rescales over add/sub when safe: if both inputs are rescale
   // outputs with the same from/to frac and signedness, replace with one rescale
-  // after the add/sub.
+  // after the add/sub. Extend to BiasAdd and Hadamard when the sides match.
   for (auto& op : ops_) {
-    if (op.kind != OpKind::kAdd && op.kind != OpKind::kSub) continue;
+    bool is_addlike = (op.kind == OpKind::kAdd || op.kind == OpKind::kSub || op.kind == OpKind::kBiasAdd);
+    if (!is_addlike) continue;
     if (op.inputs.size() != 2) continue;
     int a_tid = op.inputs[0];
     int b_tid = op.inputs[1];
@@ -323,7 +329,9 @@ void LayerGraph::hoist_rescales() {
         tensors_[static_cast<size_t>(b_prod.inputs[0])].scale.is_signed;
     RangeInterval ra = tensors_[static_cast<size_t>(op.inputs[0])].range;
     RangeInterval rb = tensors_[static_cast<size_t>(op.inputs[1])].range;
-    RangeInterval sum_range = (op.kind == OpKind::kAdd) ? add_range(ra, rb) : sub_range(ra, rb);
+    RangeInterval sum_range = (op.kind == OpKind::kAdd) ? add_range(ra, rb)
+                              : (op.kind == OpKind::kSub) ? sub_range(ra, rb)
+                                                           : add_range(ra, rb);
     tensors_[static_cast<size_t>(op.outputs[0])].range = sum_range;
 
     // Insert a new rescale op after the add/sub to restore expected frac_bits.
@@ -340,6 +348,56 @@ void LayerGraph::hoist_rescales() {
     // Redirect the original consumer output to the new rescale output.
     op.outputs[0] = new_rescale.outputs[0];
     // Producer map is now stale; rebuild to keep further hoists consistent.
+    producer = rebuild_producer();
+  }
+
+  // Hoist identical rescales over Hadamard mul when both inputs have the same rescale.
+  for (auto& op : ops_) {
+    if (op.kind != OpKind::kHadamard) continue;
+    if (op.inputs.size() != 2) continue;
+    int a_tid = op.inputs[0];
+    int b_tid = op.inputs[1];
+    if (a_tid < 0 || b_tid < 0) continue;
+    if (static_cast<size_t>(a_tid) >= producer.size() ||
+        static_cast<size_t>(b_tid) >= producer.size()) continue;
+    int a_prod_idx = producer[static_cast<size_t>(a_tid)];
+    int b_prod_idx = producer[static_cast<size_t>(b_tid)];
+    if (a_prod_idx < 0 || b_prod_idx < 0) continue;
+    auto& a_prod = ops_[static_cast<size_t>(a_prod_idx)];
+    auto& b_prod = ops_[static_cast<size_t>(b_prod_idx)];
+    if (a_prod.kind != OpKind::kRescale || b_prod.kind != OpKind::kRescale) continue;
+    const auto& ar = a_prod.rescale;
+    const auto& br = b_prod.rescale;
+    bool same_shift = (ar.from_frac == br.from_frac) && (ar.to_frac == br.to_frac);
+    bool same_sign = (tensors_[static_cast<size_t>(a_prod.outputs[0])].scale.is_signed ==
+                      tensors_[static_cast<size_t>(b_prod.outputs[0])].scale.is_signed);
+    if (!same_shift || !same_sign) continue;
+    int from_frac = ar.from_frac ? ar.from_frac
+                                 : tensors_[static_cast<size_t>(a_prod.inputs[0])].scale.frac_bits;
+    int to_frac = ar.to_frac ? ar.to_frac
+                             : tensors_[static_cast<size_t>(op.outputs[0])].scale.frac_bits;
+    op.inputs[0] = a_prod.inputs[0];
+    op.inputs[1] = b_prod.inputs[0];
+    tensors_[static_cast<size_t>(op.outputs[0])].scale.frac_bits = from_frac;
+    tensors_[static_cast<size_t>(op.outputs[0])].scale.is_signed =
+        tensors_[static_cast<size_t>(a_prod.inputs[0])].scale.is_signed ||
+        tensors_[static_cast<size_t>(b_prod.inputs[0])].scale.is_signed;
+    RangeInterval ra = tensors_[static_cast<size_t>(op.inputs[0])].range;
+    RangeInterval rb = tensors_[static_cast<size_t>(op.inputs[1])].range;
+    RangeInterval prod = mul_range(ra, rb);
+    tensors_[static_cast<size_t>(op.outputs[0])].range = prod;
+
+    OpNode new_rescale;
+    new_rescale.kind = OpKind::kRescale;
+    new_rescale.inputs = {op.outputs[0]};
+    new_rescale.outputs = {add_tensor(tensors_[static_cast<size_t>(op.outputs[0])].scale,
+                                      shift_down(prod, from_frac - to_frac))};
+    new_rescale.rescale.from_frac = from_frac;
+    new_rescale.rescale.to_frac = to_frac;
+    new_rescale.rescale.signed_ars = ar.signed_ars;
+    new_rescale.rescale.prefer_gapars = ar.prefer_gapars || br.prefer_gapars;
+    ops_.push_back(new_rescale);
+    op.outputs[0] = new_rescale.outputs[0];
     producer = rebuild_producer();
   }
 }
@@ -375,6 +433,8 @@ TruncationPassResult LayerGraph::lower_truncations(TruncationPassContext& ctx,
     site.N = matmul.N;
     site.x_range = tensors_[static_cast<size_t>(ops_[op.rescale.matmul_op].inputs[0])].range;
     site.w_range = matmul.w_range;
+    site.accum_range = matmul_accum_range(site.x_range, site.w_range, matmul.K);
+    site.prefer_gapars = tensors_[static_cast<size_t>(ops_[op.rescale.matmul_op].inputs[0])].gap_cert;
     cfg.matmuls.push_back(site);
   }
   return run_truncation_pass(cfg, ctx);

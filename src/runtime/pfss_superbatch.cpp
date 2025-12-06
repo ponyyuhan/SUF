@@ -37,30 +37,13 @@ PfssHandle PfssSuperBatch::enqueue_truncation(const compiler::TruncationLowering
                                               gates::PostProcHook& hook,
                                               std::vector<uint64_t> hatx_public,
                                               nn::TensorView<uint64_t> out) {
-  size_t hatx_words = hatx_public.size();
-  size_t new_pending_jobs = pending_jobs_ + 1;
-  size_t new_pending_hatx = pending_hatx_words_ + hatx_words;
-  if (limits_.max_pending_jobs > 0 && new_pending_jobs > limits_.max_pending_jobs) {
-    throw std::runtime_error("PfssSuperBatch: pending job limit exceeded");
-  }
-  if (limits_.max_pending_hatx_words > 0 && new_pending_hatx > limits_.max_pending_hatx_words) {
-    throw std::runtime_error("PfssSuperBatch: pending hatx packing limit exceeded");
-  }
-  pending_jobs_ = new_pending_jobs;
-  pending_hatx_words_ = new_pending_hatx;
-  stats_.pending_jobs = pending_jobs_;
-  stats_.pending_hatx = pending_hatx_words_;
   PreparedCompositeJob job;
   job.suf = &bundle.suf;
   job.key = &key;
   job.hook = &hook;
   job.hatx_public = std::move(hatx_public);
   job.out = out;
-  job.token = completed_.size();
-  completed_.push_back(CompletedJob{});
-  jobs_.push_back(std::move(job));
-  flushed_ = false;
-  return PfssHandle{job.token};
+  return enqueue_composite(std::move(job));
 }
 
 bool PfssSuperBatch::ready(const PfssHandle& h) const {

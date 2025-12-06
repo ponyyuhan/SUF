@@ -16,6 +16,7 @@
 #include "gates/nexp_composite.hpp"
 #include "gates/softmax_composite.hpp"
 #include "nn/softmax_block_task.hpp"
+#include "runtime/pfss_phase_planner.hpp"
 #include "runtime/pfss_superbatch.hpp"
 #include "runtime/phase_tasks.hpp"
 
@@ -213,11 +214,13 @@ void attention_forward(const AttentionConfig& cfg,
     qkv_attrs.x_range = x_range;
     qkv_attrs.row_l1_max = row_l1_max(Wqkv_public, qkv_attrs.w_transposed);
     qkv_attrs.w_range = range_from_public_weights(Wqkv_public);
-    auto qkv_acc = record_matmul(
-        ctx, x_t, qkv_attrs, make_scale(2 * fb, true),
+    compiler::RangeInterval qkv_accum_range =
         qkv_attrs.row_l1_max > 0
             ? compiler::propagate_matmul_accum_rowl1(x_range, qkv_attrs.row_l1_max)
-            : compiler::propagate_matmul_accum(x_range, qkv_attrs.w_range, qkv_attrs.K),
+            : compiler::propagate_matmul_accum(x_range, qkv_attrs.w_range, qkv_attrs.K);
+    auto qkv_acc = record_matmul(
+        ctx, x_t, qkv_attrs, make_scale(2 * fb, true),
+        qkv_accum_range,
         view2(qkv.data(), B * T, 3 * D));
 
     compiler::RescaleAttrs qkv_rescale_attrs;
@@ -278,10 +281,14 @@ void attention_forward(const AttentionConfig& cfg,
                  Wqkv_public,
                  view2(qkv.data(), B * T, 3 * D),
                  mp);
+  runtime::PfssPhasePlanner pfss_phase_planner;
+  pfss_phase_planner.bind(&pe->pfss_coeff_batch(), &pe->pfss_trunc_batch());
   // Truncate qkv accum (Q2f -> Qf) via composite truncation (no local shift).
   compiler::GateParams trunc_params_qkv;
-  trunc_params_qkv.kind = compiler::select_trunc_kind(compiler::RangeInterval::whole(true), fb);
+  trunc_params_qkv.kind = compiler::GateKind::AutoTrunc;
   trunc_params_qkv.frac_bits = fb;
+  trunc_params_qkv.range_hint = compiler::matmul_accum_range(
+      q_range, range_from_public_weights(Wqkv_public), D);
   std::mt19937_64 rng_qkv(123);
   auto trunc_qkv_bundle =
       compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng_qkv, trunc_params_qkv, qkv.size());
@@ -292,8 +299,17 @@ void attention_forward(const AttentionConfig& cfg,
     truncR.net_chan = &ch;
     truncR.pfss_backend = &ctx->trunc_ctx->backend();
     truncR.pfss_chan = &pch;
-    truncR.pfss_trunc = &pe->pfss_trunc_batch();
+    truncR.pfss_trunc = &pe->pfss_coeff_batch();  // share batch for trunc + coeff
     truncR.opens = &pe->open_collector();
+    runtime::PfssSuperBatch::Limits pfss_lim;
+    pfss_lim.max_pending_jobs = 1ull << 16;
+    pfss_lim.max_pending_hatx_words = 1ull << 24;
+    pfss_lim.max_flushes = 1ull << 12;
+    pe->pfss_trunc_batch().set_limits(pfss_lim);
+    runtime::OpenCollector::Limits open_lim;
+    open_lim.max_pending_words = 1ull << 22;
+    pe->open_collector().set_limits(open_lim);
+    pe->set_max_flushes(1ull << 12);
     pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
     auto trunc_task = std::make_unique<runtime::TruncTask>(
         &trunc_qkv_bundle,
@@ -301,6 +317,7 @@ void attention_forward(const AttentionConfig& cfg,
         std::span<uint64_t>(qkv.data(), qkv.size()));
     pe->add_task(std::move(trunc_task));
     pe->run(truncR);
+    pe->finalize_pfss_once(party, *truncR.pfss_backend, *truncR.pfss_chan);
   }
 
   std::vector<uint64_t> ctx_shares(B * T * H * Dh, 0);
@@ -335,6 +352,16 @@ void attention_forward(const AttentionConfig& cfg,
   runtime::ProtoChanFromNet pch(ch);
   std::mt19937_64 rng(123);
   if (use_phase_softmax) {
+    runtime::PfssSuperBatch::Limits pfss_lim;
+    pfss_lim.max_pending_jobs = 1ull << 16;
+    pfss_lim.max_pending_hatx_words = 1ull << 24;
+    pfss_lim.max_flushes = 1ull << 12;
+    pe->pfss_coeff_batch().set_limits(pfss_lim);
+    pe->pfss_trunc_batch().set_limits(pfss_lim);
+    runtime::OpenCollector::Limits open_lim;
+    open_lim.max_pending_words = 1ull << 22;
+    pe->open_collector().set_limits(open_lim);
+    pe->set_max_flushes(1ull << 12);
     size_t triple_need = 3 * cache.S_max * B * H;
     nexp_mat = gates::dealer_make_nexp_task_material(ctx->trunc_ctx->backend(),
                                                      nexp_params,
@@ -349,8 +376,9 @@ void attention_forward(const AttentionConfig& cfg,
                                                        static_cast<size_t>(B * H));
     recip_bundle = gates::make_recip_bundle(*recip_mat);
     compiler::GateParams gap_p;
-    gap_p.kind = compiler::GateKind::GapARS;
+    gap_p.kind = compiler::GateKind::AutoTrunc;
     gap_p.frac_bits = fb;
+    gap_p.range_hint = clamp_softmax_range(fb);
     prob_gapars = compiler::lower_truncation_gate(
         ctx->trunc_ctx->backend(), rng, gap_p, static_cast<size_t>(B * H * cache.S_max));
     compiler::GateParams faithful_p;
@@ -365,7 +393,7 @@ void attention_forward(const AttentionConfig& cfg,
     phase_R.pfss_backend = &ctx->trunc_ctx->backend();
     phase_R.pfss_chan = &pch;
     phase_R.pfss_coeff = &pe->pfss_coeff_batch();
-    phase_R.pfss_trunc = &pe->pfss_trunc_batch();
+    phase_R.pfss_trunc = phase_R.pfss_coeff;
     phase_R.opens = &pe->open_collector();
   }
 
@@ -597,13 +625,8 @@ void attention_forward(const AttentionConfig& cfg,
       plan.recip = recip_bundle;
       plan.prob_trunc = choice;
       plan.row_triples = &row_triples;
-      compiler::RangeInterval prob_range;
-      prob_range.lo = 0;
-      prob_range.hi = static_cast<int64_t>(1) << fb;
-      prob_range.is_signed = false;
-      plan.prob_range = prob_range;
-      // Clamp softmax prob range for downstream uses.
-      prob_range = clamp_softmax_range(fb);
+      plan.prob_range = clamp_softmax_range(fb);
+      compiler::RangeInterval prob_range = plan.prob_range.value();
       // Clamp reciprocal init/output range based on max sum bound if provided.
       compiler::RangeInterval recip_range = clamp_recip_range(fb, cfg.recip_max_sum);
       (void)recip_range;  // clamp available for future range-aware selection
@@ -612,7 +635,7 @@ void attention_forward(const AttentionConfig& cfg,
     compiler::GateParams ctx_trunc_p;
     ctx_trunc_p.kind = compiler::GateKind::AutoTrunc;
     ctx_trunc_p.frac_bits = fb;
-    ctx_trunc_p.range_hint = compiler::RangeInterval{0, static_cast<int64_t>(1ll << fb), false};
+    ctx_trunc_p.range_hint = clamp_softmax_range(fb);
       std::mt19937_64 rng_ctx(77);
       auto ctx_trunc = compiler::lower_truncation_gate(
           ctx->trunc_ctx->backend(), rng_ctx, ctx_trunc_p, rows * Dh);
@@ -829,14 +852,17 @@ void attention_forward(const AttentionConfig& cfg,
     truncR.net_chan = &ch;
     truncR.pfss_backend = &ctx->trunc_ctx->backend();
     truncR.pfss_chan = &pch;
-    truncR.pfss_trunc = &pe->pfss_trunc_batch();
+    truncR.pfss_trunc = &pe->pfss_coeff_batch();  // share batch for trunc + coeff
     truncR.opens = &pe->open_collector();
+    runtime::PfssPhasePlanner planner;
+    planner.bind(&pe->pfss_coeff_batch(), truncR.pfss_trunc);
     pe->begin_phase(runtime::PhaseExecutor::Phase::kOutProj);
     pe->add_task(std::make_unique<runtime::TruncTask>(
         &trunc_out_bundle,
         std::span<const uint64_t>(Y_share.data, Y_share.numel()),
         std::span<uint64_t>(Y_share.data, Y_share.numel())));
     pe->run(truncR);
+    planner.finalize_phase(party, *truncR.pfss_backend, *truncR.pfss_chan);
   }
 }
 

@@ -6,7 +6,14 @@ TruncationPassResult run_truncation_pass(const TruncationPassConfig& cfg,
                                          TruncationPassContext& ctx) {
   for (const auto& m : cfg.matmuls) {
     if (!m.params) continue;
-    wire_matmul_truncation(*m.params, ctx, m.M, m.K, m.N, m.x_range, m.w_range);
+    wire_matmul_truncation(*m.params,
+                           ctx,
+                           m.M,
+                           m.K,
+                           m.N,
+                           m.x_range,
+                           m.w_range,
+                           m.prefer_gapars || has_gap_cert(m.accum_range));
   }
   return ctx.finalize();
 }

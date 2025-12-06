@@ -88,6 +88,17 @@ class PhaseExecutor {
     opens_.reset_stats();
   }
 
+  template <typename PfssChanT>
+  void finalize_pfss_once(int party, proto::PfssBackendBatch& backend, PfssChanT& pfss_ch) {
+    auto flush_once = [&](PfssSuperBatch& b) {
+      if (b.has_pending()) b.flush_eval(party, backend, pfss_ch);
+      if (b.has_flushed()) b.finalize_all(party, pfss_ch);
+      b.clear();
+    };
+    flush_once(pfss_coeff_);
+    if (&pfss_trunc_ != &pfss_coeff_) flush_once(pfss_trunc_);
+  }
+
   void run(PhaseResources& R) {
     size_t flush_guard = 0;
     for (;;) {

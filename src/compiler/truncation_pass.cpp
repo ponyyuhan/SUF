@@ -14,8 +14,10 @@ void wire_matmul_truncation(nn::MatmulBeaverParams& params,
                             size_t K,
                             size_t N,
                             const RangeInterval& x_range,
-                            const RangeInterval& w_range) {
-  const auto& plan = ctx.add_matmul_plan(M, K, N, params.frac_bits, x_range, w_range);
+                            const RangeInterval& w_range,
+                            bool prefer_gapars) {
+  const auto& plan =
+      ctx.add_matmul_plan(M, K, N, params.frac_bits, x_range, w_range, prefer_gapars);
   attach_matmul_plan(params, ctx.backend(), plan, x_range, w_range);
 }
 
