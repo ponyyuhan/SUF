@@ -4,6 +4,7 @@
 
 #include "runtime/pfss_superbatch.hpp"
 #include "runtime/open_collector.hpp"
+#include "runtime/pfss_phase_planner.hpp"
 
 namespace runtime {
 
@@ -15,6 +16,7 @@ struct PhaseResources {
   PfssSuperBatch* pfss_coeff = nullptr;
   PfssSuperBatch* pfss_trunc = nullptr;
   OpenCollector* opens = nullptr;
+  PfssPhasePlanner* pfss_planner = nullptr;  // optional single-flush planner per phase
 };
 
 // Multi-wave phase executor: drives PhaseTasks that enqueue PFSS/open work.
@@ -124,6 +126,18 @@ class PhaseExecutor {
         R.opens->flush(R.party, *R.net_chan);
         flush_guard++;
         progressed = true;
+      }
+      if (R.pfss_planner && (want_pfss_coeff || want_pfss_trunc)) {
+        if (!R.pfss_backend || !R.pfss_chan) {
+          throw std::runtime_error("PhaseExecutor: PFSS planner missing backend/channel");
+        }
+        if (flush_guard + 1 > max_flushes_) {
+          throw std::runtime_error("PhaseExecutor: planner flush budget exceeded");
+        }
+        R.pfss_planner->finalize_phase(R.party, *R.pfss_backend, *R.pfss_chan);
+        flush_guard++;
+        progressed = true;
+        continue;
       }
       if (want_pfss_coeff && R.pfss_coeff && R.pfss_backend && R.pfss_chan &&
           (R.pfss_coeff->has_pending() || R.pfss_coeff->has_flushed())) {

@@ -301,6 +301,7 @@ void attention_forward(const AttentionConfig& cfg,
     truncR.pfss_chan = &pch;
     truncR.pfss_trunc = &pe->pfss_coeff_batch();  // share batch for trunc + coeff
     truncR.opens = &pe->open_collector();
+    truncR.pfss_planner = &pfss_phase_planner;
     runtime::PfssSuperBatch::Limits pfss_lim;
     pfss_lim.max_pending_jobs = 1ull << 16;
     pfss_lim.max_pending_hatx_words = 1ull << 24;
@@ -317,7 +318,6 @@ void attention_forward(const AttentionConfig& cfg,
         std::span<uint64_t>(qkv.data(), qkv.size()));
     pe->add_task(std::move(trunc_task));
     pe->run(truncR);
-    pe->finalize_pfss_once(party, *truncR.pfss_backend, *truncR.pfss_chan);
   }
 
   std::vector<uint64_t> ctx_shares(B * T * H * Dh, 0);
@@ -350,6 +350,7 @@ void attention_forward(const AttentionConfig& cfg,
   phase_R.party = party;
   phase_R.net_chan = &ch;
   runtime::ProtoChanFromNet pch(ch);
+  runtime::PfssPhasePlanner phase_planner;
   std::mt19937_64 rng(123);
   if (use_phase_softmax) {
     runtime::PfssSuperBatch::Limits pfss_lim;
@@ -395,6 +396,8 @@ void attention_forward(const AttentionConfig& cfg,
     phase_R.pfss_coeff = &pe->pfss_coeff_batch();
     phase_R.pfss_trunc = phase_R.pfss_coeff;
     phase_R.opens = &pe->open_collector();
+    phase_planner.bind(phase_R.pfss_coeff, phase_R.pfss_trunc);
+    phase_R.pfss_planner = &phase_planner;
   }
 
   int64_t inv_sqrt = static_cast<int64_t>(
@@ -534,9 +537,6 @@ void attention_forward(const AttentionConfig& cfg,
       pe->add_task(std::move(score_task));
     }
     pe->run(phase_R);
-    pe->pfss_coeff_batch().clear();
-    pe->pfss_trunc_batch().clear();
-    pe->open_collector().clear();
 
     // Rescale scores Q2f -> Qf via truncation (no inline shift).
     std::vector<uint64_t> score_qf(score_share.size(), 0);
@@ -557,9 +557,6 @@ void attention_forward(const AttentionConfig& cfg,
           std::span<uint64_t>(score_qf.data(), score_qf.size()));
       pe->add_task(std::move(trunc_task));
       pe->run(phase_R);
-      pe->pfss_coeff_batch().clear();
-      pe->pfss_trunc_batch().clear();
-      pe->open_collector().clear();
     }
 
     // Scale by inv_sqrt (public Qf): score_qf (Qf) * inv_sqrt (Qf) -> Q2f, then trunc to Qf.
@@ -578,9 +575,6 @@ void attention_forward(const AttentionConfig& cfg,
           std::span<uint64_t>(score_scaled_qf.data(), score_scaled_qf.size()));
       pe->add_task(std::move(trunc_task));
       pe->run(phase_R);
-      pe->pfss_coeff_batch().clear();
-      pe->pfss_trunc_batch().clear();
-      pe->open_collector().clear();
     }
 
     // Scale scores by inv_sqrt (public scalar) and prepare softmax inputs.
@@ -815,9 +809,6 @@ void attention_forward(const AttentionConfig& cfg,
                                                      party,
                                                      fb));
       pe->run(phase_R);
-      pe->pfss_coeff_batch().clear();
-      pe->pfss_trunc_batch().clear();
-      pe->open_collector().clear();
     }
   }
 
@@ -856,13 +847,13 @@ void attention_forward(const AttentionConfig& cfg,
     truncR.opens = &pe->open_collector();
     runtime::PfssPhasePlanner planner;
     planner.bind(&pe->pfss_coeff_batch(), truncR.pfss_trunc);
+    truncR.pfss_planner = &planner;
     pe->begin_phase(runtime::PhaseExecutor::Phase::kOutProj);
     pe->add_task(std::make_unique<runtime::TruncTask>(
         &trunc_out_bundle,
         std::span<const uint64_t>(Y_share.data, Y_share.numel()),
         std::span<uint64_t>(Y_share.data, Y_share.numel())));
     pe->run(truncR);
-    planner.finalize_phase(party, *truncR.pfss_backend, *truncR.pfss_chan);
   }
 }
 

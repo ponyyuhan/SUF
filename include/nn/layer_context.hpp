@@ -54,12 +54,14 @@ struct SecretTensor {
 };
 
 inline compiler::RangeInterval clamp_silu_range(int frac_bits) {
-  // SiLU is bounded in [-6,6] input in typical LUT; output in roughly [-6,6].
-  int64_t bound = static_cast<int64_t>(6ll << frac_bits);
+  // SiLU with typical LUT input clamp [-6, 6]; output is non-expansive on the
+  // negative side (min near -0.3), so tighten the negative bound to ~-1.
+  int64_t pos_bound = static_cast<int64_t>(6ll << frac_bits);
+  int64_t neg_bound = static_cast<int64_t>(1ll << frac_bits);
   compiler::RangeInterval r;
   r.is_signed = true;
-  r.lo = -bound;
-  r.hi = bound;
+  r.lo = -neg_bound;
+  r.hi = pos_bound;
   return r;
 }
 

@@ -196,19 +196,15 @@ void mlp_forward(const MLPConfig& cfg,
     compiler::RangeInterval silu_range = clamp_silu_range(cfg.frac_bits);
     mat2_x_range = silu_range;
 
-    runtime::PfssPhasePlanner pfss_phase_planner;
-    pfss_phase_planner.bind(R.pfss_coeff, R.pfss_trunc);
     // First wave: trunc hidden matmul accum to Qf.
     pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
     pe->add_task(std::move(trunc_task1));
     pe->run(R);
-    pe->finalize_pfss_once(party, *R.pfss_backend, *R.pfss_chan);
 
     // Second wave: apply SiLU cubic on the truncated hidden.
     pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
     pe->add_task(std::move(silu_task));
     pe->run(R);
-    pe->finalize_pfss_once(party, *R.pfss_backend, *R.pfss_chan);
 
     // Linear 2 on the updated hidden.
     matmul_publicW(view2(hidden_scaled.data(), B * T, H),
@@ -225,7 +221,6 @@ void mlp_forward(const MLPConfig& cfg,
         &plan2.bundle, std::span<const uint64_t>(Y_share.data, Y_share.numel()),
         std::span<uint64_t>(y_scaled.data(), y_scaled.size())));
     pe->run(R);
-    pe->finalize_pfss_once(party, *R.pfss_backend, *R.pfss_chan);
     for (size_t i = 0; i < Y_share.numel() && i < y_scaled.size(); ++i) {
       Y_share.data[i] = y_scaled[i];
     }
