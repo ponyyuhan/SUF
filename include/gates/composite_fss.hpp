@@ -172,13 +172,15 @@ inline std::vector<uint64_t> xor_bits_to_additive(const std::vector<uint64_t>& b
   return out;
 }
 
-inline CompositeKeyPair composite_gen_backend(const suf::SUF<uint64_t>& F,
-                                              proto::PfssBackend& backend,
-                                              std::mt19937_64& rng,
-                                              size_t batch_N = 1) {
-  uint64_t r_in = rng();
-  std::vector<uint64_t> r_out(F.r_out);
-  for (auto& v : r_out) v = rng();
+inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t>& F,
+                                                         proto::PfssBackend& backend,
+                                                         std::mt19937_64& rng,
+                                                         uint64_t r_in,
+                                                         const std::vector<uint64_t>& r_out,
+                                                         size_t batch_N = 1) {
+  if (r_out.size() != static_cast<size_t>(F.r_out)) {
+    throw std::runtime_error("composite_gen_backend_with_masks: r_out size mismatch");
+  }
   auto compiled = compiler::compile_suf_to_pfss_two_programs(F, r_in, r_out, compiler::CoeffMode::kStepDcf);
 
   auto split_add = [&](uint64_t v) {
@@ -332,6 +334,16 @@ inline CompositeKeyPair composite_gen_backend(const suf::SUF<uint64_t>& F,
     out.k1.bit_triples[i] = {a1, b1, c1};
   }
   return out;
+}
+
+inline CompositeKeyPair composite_gen_backend(const suf::SUF<uint64_t>& F,
+                                              proto::PfssBackend& backend,
+                                              std::mt19937_64& rng,
+                                              size_t batch_N = 1) {
+  uint64_t r_in = rng();
+  std::vector<uint64_t> r_out(F.r_out);
+  for (auto& v : r_out) v = rng();
+  return composite_gen_backend_with_masks(F, backend, rng, r_in, r_out, batch_N);
 }
 
 // Specialized generator for truncation/ARS gates: fixes r_low used in predicates and
@@ -704,7 +716,10 @@ inline std::vector<uint64_t> composite_eval_share_backend(int party,
   bool is_trunc_gate = (compiled.gate_kind == compiler::GateKind::FaithfulTR ||
                         compiled.gate_kind == compiler::GateKind::FaithfulARS ||
                         compiled.gate_kind == compiler::GateKind::GapARS);
-  if (!is_trunc_gate && dynamic_cast<proto::ClearBackend*>(&backend) != nullptr) {
+  // Only shortcut to ref-eval for true scalar gates; payload-producing gates (r>1 or degree==0)
+  // must fall through to the generic path so callers can run their own postproc.
+  if (!is_trunc_gate && compiled.r == 1 && compiled.degree > 0 &&
+      dynamic_cast<proto::ClearBackend*>(&backend) != nullptr) {
     uint64_t x = proto::sub_mod(hatx, compiled.r_in);
     auto ref = suf::eval_suf_ref(F, x);
     int stride = compiled.degree + 1;

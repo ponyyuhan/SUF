@@ -34,6 +34,10 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
   }
 
   bool done() const override { return st_ == St::Done; }
+  const std::vector<uint64_t>& exp_qf_debug() const { return exp_qf_; }
+  const std::vector<uint64_t>& sum_qf_debug() const { return sum_qf_; }
+  const std::vector<uint64_t>& inv_qf_debug() const { return inv_qf_; }
+  const std::vector<uint64_t>& prod_q2f_debug() const { return prod_q2f_; }
 
   runtime::detail::Need step(runtime::PhaseResources& R) override {
     switch (st_) {
@@ -79,8 +83,10 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
             std::span<const int>(plan_.valid_lens),
             std::span<uint64_t>(prod_q2f_.data(), prod_q2f_.size()),
             plan_.row_triples);
-        // Set a conservative range for prob (Q2f): |exp|<=1, |inv| bounded by sum<=cols
-        prob_range_ = compiler::RangeInterval::from_lo_hi(0, static_cast<int64_t>(plan_.cols) << plan_.frac_bits);
+        // Probabilities are non-negative and <=1; keep a tight bound so GapARS can be chosen.
+        prob_range_.lo = 0;
+        prob_range_.hi = static_cast<int64_t>(1) << plan_.frac_bits;
+        prob_range_.is_signed = false;
         st_ = St::MulRun;
         return runtime::detail::Need::None;
       }
@@ -127,4 +133,3 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
 };
 
 }  // namespace nn
-

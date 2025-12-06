@@ -6,11 +6,14 @@
 #include <optional>
 #include <random>
 #include <vector>
+#include <unordered_map>
+#include "compiler/truncation_lowering.hpp"
 #include "gates/nexp_gate.hpp"
 #include "gates/reciprocal_gate.hpp"
 #include "gates/reciprocal_composite.hpp"
 #include "gates/nexp_composite.hpp"
 #include "gates/softmax_composite.hpp"
+#include "nn/softmax_block_task.hpp"
 #include "runtime/pfss_superbatch.hpp"
 #include "runtime/phase_tasks.hpp"
 
@@ -20,73 +23,6 @@ namespace {
 
 inline int64_t to_signed(uint64_t v) { return static_cast<int64_t>(v); }
 inline uint64_t to_ring(int64_t v) { return static_cast<uint64_t>(v); }
-
-// Lightweight reciprocal task: opens a scalar (or small vector) and produces
-// public reciprocal shares (party0 gets value, party1 gets 0). Uses PhaseExecutor
-// waves so the open can batch with other tasks.
-class ReciprocalTask : public runtime::detail::PhaseTask {
- public:
-  ReciprocalTask(std::span<const uint64_t> in_share,
-                 std::span<uint64_t> out_share,
-                 const gates::PiecewisePolySpec* init_spec,
-                 int frac_bits,
-                 int nr_iters)
-      : in_(in_share), out_(out_share), spec_(init_spec), frac_bits_(frac_bits), iters_(nr_iters) {
-    if (in_.size() != out_.size()) throw std::runtime_error("ReciprocalTask: size mismatch");
-    if (!spec_) throw std::runtime_error("ReciprocalTask: init spec null");
-  }
-
-  bool done() const override { return st_ == St::Done; }
-
-  runtime::detail::Need step(runtime::PhaseResources& R) override {
-    switch (st_) {
-      case St::Open: {
-        if (!R.net_chan) throw std::runtime_error("ReciprocalTask: net channel missing");
-        if (R.opens) {
-          h_ = R.opens->enqueue(std::vector<uint64_t>(in_.begin(), in_.end()));
-          st_ = St::WaitOpen;
-          return runtime::detail::Need::Open;
-        }
-        opened_.assign(in_.begin(), in_.end());
-        st_ = St::Compute;
-        [[fallthrough]];
-      }
-      case St::WaitOpen: {
-        if (st_ == St::WaitOpen) {
-          if (!R.opens) throw std::runtime_error("ReciprocalTask: no OpenCollector");
-          if (!R.opens->ready(h_)) return runtime::detail::Need::Open;
-          auto v = R.opens->view(h_);
-          opened_.assign(v.begin(), v.end());
-          st_ = St::Compute;
-        }
-        [[fallthrough]];
-      }
-      case St::Compute: {
-        for (size_t i = 0; i < opened_.size(); ++i) {
-          int64_t x = to_signed(static_cast<uint64_t>(opened_[i]));
-          int64_t inv = gates::ref_reciprocal_fixed(*spec_, x, frac_bits_, iters_);
-          // public result: party0 takes inv, party1 takes 0.
-          out_[i] = (R.party == 0) ? to_ring(inv) : 0ull;
-        }
-        st_ = St::Done;
-        return runtime::detail::Need::None;
-      }
-      case St::Done:
-        return runtime::detail::Need::None;
-    }
-    return runtime::detail::Need::None;
-  }
-
- private:
-  enum class St { Open, WaitOpen, Compute, Done } st_ = St::Open;
-  std::span<const uint64_t> in_;
-  std::span<uint64_t> out_;
-  const gates::PiecewisePolySpec* spec_ = nullptr;
-  int frac_bits_ = 0;
-  int iters_ = 1;
-  std::vector<int64_t> opened_;
-  runtime::OpenHandle h_{};
-};
 
 static inline void rescale_buffer(std::vector<uint64_t>& buf, int frac_bits) {
   if (frac_bits <= 0) return;
@@ -105,6 +41,7 @@ static inline void rescale_view(const TensorView<uint64_t>& t, int frac_bits) {
   }
 }
 
+// Temporary helper to open shares to plaintext (will be removed once score/prob path is fully taskified).
 void open_to_plain(int party,
                    net::Chan& ch,
                    const uint64_t* local,
@@ -124,6 +61,104 @@ void open_to_plain(int party,
   }
 }
 
+struct RowBroadcastTripleMaterial {
+  int rows = 0;
+  int cols = 0;
+  std::vector<uint64_t> A0, A1;
+  std::vector<uint64_t> B0, B1;
+  std::vector<uint64_t> C0, C1;
+};
+
+RowBroadcastTripleMaterial make_row_broadcast_triples(int rows, int cols, std::mt19937_64& rng) {
+  RowBroadcastTripleMaterial mat;
+  mat.rows = rows;
+  mat.cols = cols;
+  size_t count = static_cast<size_t>(rows) * static_cast<size_t>(cols);
+  mat.A0.resize(count);
+  mat.A1.resize(count);
+  mat.B0.resize(static_cast<size_t>(rows));
+  mat.B1.resize(static_cast<size_t>(rows));
+  mat.C0.resize(count);
+  mat.C1.resize(count);
+
+  std::vector<uint64_t> B(rows);
+  for (int r = 0; r < rows; ++r) {
+    uint64_t b = rng();
+    uint64_t b0 = rng();
+    uint64_t b1 = b - b0;
+    B[static_cast<size_t>(r)] = b;
+    mat.B0[static_cast<size_t>(r)] = b0;
+    mat.B1[static_cast<size_t>(r)] = b1;
+  }
+  for (int r = 0; r < rows; ++r) {
+    for (int c = 0; c < cols; ++c) {
+      size_t idx = static_cast<size_t>(r * cols + c);
+      uint64_t a = rng();
+      uint64_t a0 = rng();
+      uint64_t a1 = a - a0;
+      uint64_t c_val = proto::mul_mod(a, B[static_cast<size_t>(r)]);
+      uint64_t c0 = rng();
+      uint64_t c1 = c_val - c0;
+      mat.A0[idx] = a0;
+      mat.A1[idx] = a1;
+      mat.C0[idx] = c0;
+      mat.C1[idx] = c1;
+    }
+  }
+  return mat;
+}
+
+class RowBroadcastTripleProviderImpl : public runtime::RowBroadcastTripleProvider {
+ public:
+  RowBroadcastTripleProviderImpl(const RowBroadcastTripleMaterial& mat, int party)
+      : mat_(mat), party_(party) {}
+
+  runtime::RowBroadcastTriple reserve_mul(int rows, int cols) override {
+    if (rows != mat_.rows || cols != mat_.cols) {
+      throw std::runtime_error("RowBroadcastTripleProviderImpl: shape mismatch");
+    }
+    size_t count = static_cast<size_t>(rows) * static_cast<size_t>(cols);
+    const auto& A = (party_ == 0) ? mat_.A0 : mat_.A1;
+    const auto& B = (party_ == 0) ? mat_.B0 : mat_.B1;
+    const auto& C = (party_ == 0) ? mat_.C0 : mat_.C1;
+    return {std::span<const uint64_t>(A.data(), count),
+            std::span<const uint64_t>(B.data(), static_cast<size_t>(rows)),
+            std::span<const uint64_t>(C.data(), count)};
+  }
+
+ private:
+  const RowBroadcastTripleMaterial& mat_;
+  int party_ = 0;
+};
+
+class CachedRowBroadcastTripleProvider : public runtime::RowBroadcastTripleProvider {
+ public:
+  explicit CachedRowBroadcastTripleProvider(int party) : party_(party) {}
+
+  runtime::RowBroadcastTriple reserve_mul(int rows, int cols) override {
+    const uint64_t key = (static_cast<uint64_t>(rows) << 32) | static_cast<uint32_t>(cols);
+    auto it = cache_.find(key);
+    if (it == cache_.end()) {
+      // Deterministic per-shape seed so both parties build identical materials and only keep per-shape cache.
+      std::mt19937_64 rng(base_seed_ ^ key);
+      auto mat = make_row_broadcast_triples(rows, cols, rng);
+      it = cache_.emplace(key, std::move(mat)).first;
+    }
+    const auto& mat = it->second;
+    const auto& A = (party_ == 0) ? mat.A0 : mat.A1;
+    const auto& B = (party_ == 0) ? mat.B0 : mat.B1;
+    const auto& C = (party_ == 0) ? mat.C0 : mat.C1;
+    return {std::span<const uint64_t>(A.data(), A.size()),
+            std::span<const uint64_t>(B.data(), B.size()),
+            std::span<const uint64_t>(C.data(), C.size())};
+  }
+
+ private:
+  static constexpr uint64_t base_seed_ = 0x9e3779b97f4a7c15ull;
+  int party_ = 0;
+  std::unordered_map<uint64_t, RowBroadcastTripleMaterial> cache_;
+};
+
 }  // namespace
 
 void attention_forward(const AttentionConfig& cfg,
@@ -142,9 +177,7 @@ void attention_forward(const AttentionConfig& cfg,
   size_t H = cfg.H;
   size_t Dh = cfg.Dh;
   int fb = cfg.frac_bits;
-  runtime::OpenCollector* opens = pe ? &pe->open_collector() : nullptr;
-  bool use_legacy_softmax = cfg.legacy_softmax || (ctx == nullptr);
-  bool use_phase_softmax = !use_legacy_softmax && pe && ctx && ctx->trunc_ctx;
+  bool use_phase_softmax = !cfg.legacy_softmax && pe && ctx && ctx->trunc_ctx;
 
   std::vector<uint64_t> qkv(B * T * 3 * D, 0);
 
@@ -225,6 +258,13 @@ void attention_forward(const AttentionConfig& cfg,
   }
 
   std::vector<uint64_t> ctx_shares(B * T * H * Dh, 0);
+  // Triple cache for secret matmul paths.
+  auto ensure_triples = [&](size_t need) {
+    if (ctx && ctx->trunc_ctx) {
+      auto& kp = *ctx->trunc_ctx;  // reuse trunc_ctx backend for triple generation if needed
+      (void)kp;  // placeholder; in real impl we would pull from a triple provider
+    }
+  };
   size_t init_len = cache.cur_len;
 
   gates::NExpGateParams nexp_params;
@@ -237,8 +277,15 @@ void attention_forward(const AttentionConfig& cfg,
   runtime::CubicPolyBundle nexp_bundle{};
   std::optional<gates::RecipTaskMaterial> recip_mat;
   runtime::RecipTaskBundle recip_bundle{};
+  std::optional<compiler::TruncationLoweringResult> prob_gapars;
+  std::optional<compiler::TruncationLoweringResult> prob_faithful;
+  runtime::TruncChoice prob_choice{};
+  runtime::PhaseResources phase_R;
+  runtime::ProtoChanFromNet pch(ch);
+  phase_R.party = party;
+  phase_R.net_chan = &ch;
+  std::mt19937_64 rng(123);
   if (use_phase_softmax) {
-    std::mt19937_64 rng(123);
     size_t triple_need = 3 * cache.S_max * B * H;
     nexp_mat = gates::dealer_make_nexp_task_material(ctx->trunc_ctx->backend(),
                                                      nexp_params,
@@ -247,6 +294,22 @@ void attention_forward(const AttentionConfig& cfg,
     nexp_bundle = gates::make_nexp_cubic_bundle(*nexp_mat, fb);
     recip_mat = gates::dealer_make_recip_task_material(ctx->trunc_ctx->backend(), fb, /*nr_iters=*/1, rng);
     recip_bundle = gates::make_recip_bundle(*recip_mat);
+    compiler::GateParams gap_p;
+    gap_p.kind = compiler::GateKind::GapARS;
+    gap_p.frac_bits = fb;
+    prob_gapars = compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng, gap_p);
+    compiler::GateParams faithful_p;
+    faithful_p.kind = compiler::GateKind::FaithfulTR;
+    faithful_p.frac_bits = fb;
+    prob_faithful = compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng, faithful_p);
+    prob_choice.gapars = prob_gapars ? &*prob_gapars : nullptr;
+    prob_choice.faithful = prob_faithful ? &*prob_faithful : nullptr;
+    prob_choice.shift_bits = fb;
+    prob_choice.signed_value = false;  // probabilities are non-negative
+    phase_R.pfss_backend = &ctx->trunc_ctx->backend();
+    phase_R.pfss_chan = &pch;
+    phase_R.pfss = &pe->pfss_batch();
+    phase_R.opens = &pe->open_collector();
   }
 
   int64_t inv_sqrt = static_cast<int64_t>(
@@ -272,175 +335,281 @@ void attention_forward(const AttentionConfig& cfg,
     kv_append_token(cache, view3(stepK.data(), B, H, Dh), view3(stepV.data(), B, H, Dh));
     size_t cur_len = cache.cur_len;
 
-    struct HeadState {
-      size_t b = 0;
-      size_t h = 0;
-      size_t cur_len = 0;
-      std::vector<int64_t> q_plain;
-      std::vector<int64_t> k_plain;
-      std::vector<int64_t> v_plain;
-      std::vector<int64_t> scores;
-      int64_t max_sc = 0;
-      std::vector<uint64_t> diff_share;
-      std::vector<uint64_t> exp_share;
-      std::vector<int64_t> expv;
-    };
-    std::vector<HeadState> heads;
-    if (use_phase_softmax) {
-      pe->begin_phase(runtime::PhaseExecutor::Phase::kSoftmax);
+    size_t rows = B * H;
+    size_t cols = cur_len;
+
+    if (!use_phase_softmax) {
+      // Legacy plaintext softmax path: open Q/K/V and compute context locally, keeping shares simple.
+      for (size_t b = 0; b < B; ++b) {
+        size_t q_base = (b * T + t) * 3 * D;
+        const uint64_t* q_ptr = qkv.data() + q_base;
+        for (size_t h = 0; h < H; ++h) {
+          std::vector<int64_t> q_plain;
+          open_to_plain(party, ch, q_ptr + h * Dh, Dh, q_plain);
+
+          const uint64_t* k_head = kv_head_ptr(cache, b, h);
+          const uint64_t* v_head = kv_head_ptr_v(cache, b, h);
+          std::vector<int64_t> k_plain, v_plain;
+          open_to_plain(party, ch, k_head, cur_len * Dh, k_plain);
+          open_to_plain(party, ch, v_head, cur_len * Dh, v_plain);
+
+          std::vector<int64_t> scores(cur_len, 0);
+          for (size_t s = 0; s < cur_len; ++s) {
+            __int128 acc = 0;
+            for (size_t d = 0; d < Dh; ++d) {
+              acc += static_cast<__int128>(q_plain[d]) *
+                     static_cast<__int128>(k_plain[s * Dh + d]);
+            }
+            acc >>= fb;
+            acc = (acc * static_cast<__int128>(inv_sqrt)) >> fb;
+            scores[s] = static_cast<int64_t>(acc);
+          }
+
+          int64_t max_sc = scores.empty() ? 0 : *std::max_element(scores.begin(), scores.end());
+          std::vector<int64_t> expv(cur_len, 0);
+          int64_t sum = 0;
+          for (size_t s = 0; s < cur_len; ++s) {
+            int64_t diff = max_sc - scores[s];
+            expv[s] = gates::ref_nexp_fixed(nexp_spec, diff);
+            sum += expv[s];
+          }
+          if (sum == 0) sum = 1;
+          int64_t inv = gates::ref_reciprocal_fixed(recip_spec, sum, fb, 1);
+
+          std::vector<int64_t> prob(cur_len, 0);
+          for (size_t s = 0; s < cur_len; ++s) {
+            __int128 p = static_cast<__int128>(expv[s]) * static_cast<__int128>(inv);
+            prob[s] = static_cast<int64_t>(p >> fb);
+          }
+
+          size_t ctx_base = ((b * T + t) * H + h) * Dh;
+          for (size_t d = 0; d < Dh; ++d) {
+            __int128 acc = 0;
+            for (size_t s = 0; s < cur_len; ++s) {
+              acc += static_cast<__int128>(prob[s]) *
+                     static_cast<__int128>(v_plain[s * Dh + d]);
+            }
+            int64_t ctx_plain = static_cast<int64_t>(acc >> fb);
+            ctx_shares[ctx_base + d] = (party == 0) ? to_ring(ctx_plain) : 0;
+          }
+        }
+      }
+      continue;
     }
 
+    std::vector<uint64_t> t_share;
+    std::vector<int> plan_valid_lens;
+    if (use_phase_softmax && rows > 0) {
+      t_share.resize(rows * cols, 0);
+      // Track the valid prefix length for each row (causal masking).
+      // Softmax task will skip work beyond valid_lens[r].
+      plan_valid_lens.resize(rows, static_cast<int>(cur_len));
+    }
+
+    // Compute scores = (Q*K^T) / sqrt(Dh) on shares using MatmulTask.
+    // Shapes: Q [rows x Dh], K [rows x cur_len x Dh] stored as contiguous per head.
+    std::vector<uint64_t> q_mat(rows * Dh, 0);
+    std::vector<uint64_t> k_mat(rows * cur_len * Dh, 0);
+    std::vector<uint64_t> score_share(rows * cur_len, 0);
+    // Fill Q/K share matrices.
     for (size_t b = 0; b < B; ++b) {
       size_t q_base = (b * T + t) * 3 * D;
       const uint64_t* q_ptr = qkv.data() + q_base;
       for (size_t h = 0; h < H; ++h) {
+        size_t row = b * H + h;
+        for (size_t d = 0; d < Dh; ++d) {
+          q_mat[row * Dh + d] = q_ptr[h * Dh + d];
+        }
         const uint64_t* k_head = kv_head_ptr(cache, b, h);
-        const uint64_t* v_head = kv_head_ptr_v(cache, b, h);
-
-        HeadState st;
-        st.b = b;
-        st.h = h;
-        st.cur_len = cur_len;
-        open_to_plain(party, ch, q_ptr + h * Dh, Dh, st.q_plain);
-        open_to_plain(party, ch, k_head, cur_len * Dh, st.k_plain);
-        open_to_plain(party, ch, v_head, cur_len * Dh, st.v_plain);
-
-        st.scores.resize(cur_len, 0);
         for (size_t s = 0; s < cur_len; ++s) {
-          __int128 acc = 0;
           for (size_t d = 0; d < Dh; ++d) {
-            acc += static_cast<__int128>(st.q_plain[d]) * static_cast<__int128>(st.k_plain[s * Dh + d]);
+            size_t idx = (row * cur_len + s) * Dh + d;
+            k_mat[idx] = k_head[s * Dh + d];
           }
-          acc >>= fb;
-          acc = (acc * static_cast<__int128>(inv_sqrt)) >> fb;
-          st.scores[s] = static_cast<int64_t>(acc);
         }
-        st.max_sc = st.scores.empty() ? 0 : *std::max_element(st.scores.begin(), st.scores.end());
-
-        st.expv.resize(cur_len, 0);
-        if (use_phase_softmax) {
-          st.diff_share.resize(cur_len, 0);
-          st.exp_share.resize(cur_len, 0);
-          for (size_t i = 0; i < cur_len; ++i) {
-            int64_t diff = st.max_sc - st.scores[i];
-            st.diff_share[i] = (party == 0) ? to_ring(diff) : 0ull;
-          }
-          pe->add_task(std::make_unique<runtime::CubicPolyTask>(
-              nexp_bundle,
-              std::span<const uint64_t>(st.diff_share.data(), st.diff_share.size()),
-              std::span<uint64_t>(st.exp_share.data(), st.exp_share.size())));
-        }
-        heads.push_back(std::move(st));
       }
     }
 
-    if (use_phase_softmax && !heads.empty()) {
-      runtime::PhaseResources R;
-      runtime::ProtoChanFromNet pch(ch);
-      R.party = party;
-      R.pfss_backend = &ctx->trunc_ctx->backend();
-      R.pfss_chan = &pch;
-      R.net_chan = &ch;
-      R.pfss = &pe->pfss_batch();
-      R.opens = &pe->open_collector();
-      pe->run(R);
-      pe->pfss_batch().clear();
-      pe->open_collector().clear();
+    // MatmulTask expects A[M x K], B[K x N]. We reshape K as [Dh x (rows*cur_len)] then transpose logic.
+    // Flatten B as [Dh x (rows*cur_len)] column-major per K dimension.
+    std::vector<uint64_t> k_mat_reshaped(Dh * rows * cur_len, 0);
+    for (size_t row = 0; row < rows; ++row) {
+      for (size_t s = 0; s < cur_len; ++s) {
+        for (size_t d = 0; d < Dh; ++d) {
+          size_t dst = d * (rows * cur_len) + (row * cur_len + s);
+          size_t src = (row * cur_len + s) * Dh + d;
+          k_mat_reshaped[dst] = k_mat[src];
+        }
+      }
     }
 
-    // Second wave: sum and reciprocal on shares (scalar) with PFSS/Open batching.
-    std::vector<uint64_t> sum_shares;
-    std::vector<uint64_t> inv_shares;
-    if (use_phase_softmax && !heads.empty()) {
+    // Need Dh * (rows*cur_len) triples for the matmul products.
+    std::vector<proto::BeaverTriple64Share> score_triples(rows * cur_len * Dh);
+    {
+      std::mt19937_64 rng_local(42 + t);
+      for (auto& tri : score_triples) {
+        uint64_t a = rng_local();
+        uint64_t b = rng_local();
+        uint64_t c = proto::mul_mod(a, b);
+        uint64_t a0 = rng_local();
+        uint64_t b0 = rng_local();
+        uint64_t c0 = rng_local();
+        tri = (party == 0) ? proto::BeaverTriple64Share{a0, b0, c0}
+                           : proto::BeaverTriple64Share{a - a0, b - b0, c - c0};
+      }
+    }
+
+    pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
+    auto score_task = std::make_unique<runtime::MatmulTask>(
+        static_cast<int>(rows), static_cast<int>(Dh), static_cast<int>(cur_len),
+        std::span<const uint64_t>(q_mat.data(), q_mat.size()),
+        std::span<const uint64_t>(k_mat_reshaped.data(), k_mat_reshaped.size()),
+        std::span<uint64_t>(score_share.data(), score_share.size()),
+        std::span<const proto::BeaverTriple64Share>(score_triples.data(), score_triples.size()));
+    pe->add_task(std::move(score_task));
+    pe->run(phase_R);
+    pe->pfss_batch().clear();
+    pe->open_collector().clear();
+
+    // Scale scores by inv_sqrt (public scalar) and prepare softmax inputs.
+    for (size_t row = 0; row < rows; ++row) {
+      uint64_t max_share = 0;
+      for (size_t s = 0; s < cur_len; ++s) {
+        size_t idx = row * cur_len + s;
+        uint64_t v = score_share[idx];
+        __int128 scaled = static_cast<__int128>(to_signed(v)) * static_cast<__int128>(inv_sqrt);
+        score_share[idx] = to_ring(static_cast<int64_t>(scaled >> fb));
+        if (score_share[idx] > max_share) max_share = score_share[idx];
+      }
+      if (use_phase_softmax) {
+        int64_t cap = static_cast<int64_t>(16ll << fb);
+        size_t base = row * cols;
+        for (size_t s = 0; s < cur_len; ++s) {
+          int64_t diff = to_signed(max_share) - to_signed(score_share[base + s]);
+          if (diff < 0) diff = 0;
+          if (diff > cap) diff = cap;
+          t_share[base + s] = (party == 0) ? to_ring(diff) : 0ull;
+        }
+      }
+    }
+
+    std::vector<uint64_t> prob_shares;
+    if (use_phase_softmax && rows > 0) {
+      static CachedRowBroadcastTripleProvider row_triples_p0(/*party=*/0);
+      static CachedRowBroadcastTripleProvider row_triples_p1(/*party=*/1);
+      auto& row_triples = (party == 0) ? row_triples_p0 : row_triples_p1;
+
+      runtime::TruncChoice choice = prob_choice;
+      if (!choice.faithful) choice.faithful = recip_bundle.trunc_fb;
+      if (!choice.gapars) choice.gapars = choice.faithful;
+
+      prob_shares.resize(rows * cols, 0);
+      nn::SoftmaxPlan plan;
+      plan.frac_bits = fb;
+      plan.rows = static_cast<int>(rows);
+      plan.cols = static_cast<int>(cols);
+      plan.valid_lens = plan_valid_lens;
+      plan.nexp = nexp_bundle;
+      plan.recip = recip_bundle;
+      plan.prob_trunc = choice;
+      plan.row_triples = &row_triples;
+
       pe->begin_phase(runtime::PhaseExecutor::Phase::kSoftmax);
-      sum_shares.resize(heads.size(), 0);
-      inv_shares.resize(heads.size(), 0);
-      for (size_t idx = 0; idx < heads.size(); ++idx) {
-        uint64_t acc = 0;
-        for (auto v : heads[idx].exp_share) acc = proto::add_mod(acc, v);
-        sum_shares[idx] = acc;
-        pe->add_task(std::make_unique<runtime::RecipTask>(
-            recip_bundle,
-            std::span<const uint64_t>(&sum_shares[idx], 1),
-            std::span<uint64_t>(&inv_shares[idx], 1)));
-      }
-      runtime::PhaseResources R;
-      runtime::ProtoChanFromNet pch(ch);
-      R.party = party;
-      R.pfss_backend = &ctx->trunc_ctx->backend();
-      R.pfss_chan = &pch;
-      R.net_chan = &ch;
-      R.pfss = &pe->pfss_batch();
-      R.opens = &pe->open_collector();
-      pe->run(R);
+      pe->add_task(std::make_unique<nn::SoftmaxBlockTask>(
+          plan,
+          std::span<const uint64_t>(t_share.data(), t_share.size()),
+          std::span<uint64_t>(prob_shares.data(), prob_shares.size())));
+      pe->run(phase_R);
       pe->pfss_batch().clear();
       pe->open_collector().clear();
     }
 
-    for (size_t idx = 0; idx < heads.size(); ++idx) {
-      auto& st = heads[idx];
-      uint64_t sum_share = 0;
-      if (use_phase_softmax) {
-        sum_share = sum_shares[idx];
-      } else {
-        for (size_t s = 0; s < st.cur_len; ++s) {
-          int64_t diff = st.max_sc - st.scores[s];
-          st.expv[s] = gates::ref_nexp_fixed(nexp_spec, diff);
-          sum_share = proto::add_mod(sum_share, to_ring(st.expv[s]));
+    if (use_phase_softmax) {
+      // Build faithful trunc bundle for prob*V (Q2f -> Qf).
+      compiler::GateParams ctx_trunc_p;
+      ctx_trunc_p.kind = compiler::GateKind::FaithfulTR;
+      ctx_trunc_p.frac_bits = fb;
+      std::mt19937_64 rng_ctx(77);
+      auto ctx_trunc = compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng_ctx, ctx_trunc_p);
+
+      // Reuse SeqTask helper (trunc -> none) from MLP-style chaining.
+      class SeqTask final : public runtime::detail::PhaseTask {
+       public:
+        SeqTask(std::unique_ptr<runtime::detail::PhaseTask> first,
+                std::unique_ptr<runtime::detail::PhaseTask> second)
+            : first_(std::move(first)), second_(std::move(second)) {}
+        bool done() const override { return state_ == St::Done; }
+        runtime::detail::Need step(runtime::PhaseResources& R) override {
+          switch (state_) {
+            case St::First: {
+              auto need = first_->step(R);
+              if (!first_->done()) return need;
+              state_ = St::Second;
+              return runtime::detail::Need::None;
+            }
+            case St::Second: {
+              auto need = second_->step(R);
+              if (!second_->done()) return need;
+              state_ = St::Done;
+              return runtime::detail::Need::None;
+            }
+            case St::Done:
+              return runtime::detail::Need::None;
+          }
+          return runtime::detail::Need::None;
         }
-        if (sum_share == 0) sum_share = 1;
+
+       private:
+        enum class St { First, Second, Done } state_ = St::First;
+        std::unique_ptr<runtime::detail::PhaseTask> first_;
+        std::unique_ptr<runtime::detail::PhaseTask> second_;
+      };
+
+      pe->begin_phase(runtime::PhaseExecutor::Phase::kSoftmax);
+      for (size_t row = 0; row < rows; ++row) {
+        size_t head_idx = row;
+        // prob row span
+        std::span<const uint64_t> prob_row(prob_shares.data() + row * cols, cols);
+        // V share for this head
+        size_t b = row / H;
+        size_t h = row % H;
+        const uint64_t* v_head = kv_head_ptr_v(cache, b, h);
+        std::vector<uint64_t> v_mat(cur_len * Dh, 0);
+        for (size_t s = 0; s < cur_len; ++s) {
+          for (size_t d = 0; d < Dh; ++d) {
+            v_mat[s * Dh + d] = v_head[s * Dh + d];
+          }
+        }
+        // Triples for this matmul
+        std::vector<proto::BeaverTriple64Share> triples(cur_len * Dh);
+        std::mt19937_64 rng_local(100 + head_idx);
+        for (auto& tri : triples) {
+          uint64_t a = rng_local();
+          uint64_t bval = rng_local();
+          uint64_t c = proto::mul_mod(a, bval);
+          uint64_t a0 = rng_local();
+          uint64_t b0 = rng_local();
+          uint64_t c0 = rng_local();
+          tri = (party == 0) ? proto::BeaverTriple64Share{a0, b0, c0}
+                             : proto::BeaverTriple64Share{a - a0, bval - b0, c - c0};
+        }
+        // Output buffer slice
+        size_t ctx_off = ((b * T + t) * H + h) * Dh;
+        std::span<uint64_t> ctx_row(ctx_shares.data() + ctx_off, Dh);
+        auto mm = std::make_unique<runtime::MatmulTask>(
+            1, static_cast<int>(cur_len), static_cast<int>(Dh), prob_row,
+            std::span<const uint64_t>(v_mat.data(), v_mat.size()), ctx_row,
+            std::span<const proto::BeaverTriple64Share>(triples.data(), triples.size()));
+        std::vector<uint64_t> trunc_buf(Dh, 0);
+        auto trunc = std::make_unique<runtime::TruncTask>(
+            &ctx_trunc, std::span<const uint64_t>(ctx_row.data(), ctx_row.size()),
+            std::span<uint64_t>(ctx_row.data(), ctx_row.size()));
+        pe->add_task(std::make_unique<SeqTask>(std::move(mm), std::move(trunc)));
       }
 
-      uint64_t inv_share = 0;
-      if (use_phase_softmax) {
-        inv_share = inv_shares[idx];
-      } else {
-        int64_t inv = gates::ref_reciprocal_fixed(recip_spec, to_signed(sum_share), fb, 1);
-        inv_share = (party == 0) ? to_ring(inv) : 0ull;
-      }
-
-      std::vector<int64_t> prob(st.cur_len, 0);
-      if (use_phase_softmax) {
-        // secret (exp_share) * public (inv_share) => local mul then faithful trunc.
-        std::vector<uint64_t> prod(st.cur_len, 0);
-        for (size_t s = 0; s < st.cur_len; ++s) {
-          __int128 p = static_cast<__int128>(to_signed(st.exp_share[s])) * static_cast<__int128>(to_signed(inv_share));
-          prod[s] = to_ring(p);
-        }
-        // Truncate Q2f -> Qf via TruncTask (GapARS bundle).
-        runtime::PhaseResources R;
-        runtime::ProtoChanFromNet pch(ch);
-        R.party = party;
-        R.pfss_backend = &ctx->trunc_ctx->backend();
-        R.pfss_chan = &pch;
-        R.net_chan = &ch;
-        R.pfss = &pe->pfss_batch();
-        R.opens = &pe->open_collector();
-        pe->begin_phase(runtime::PhaseExecutor::Phase::kSoftmax);
-        pe->add_task(std::make_unique<runtime::TruncTask>(
-            recip_bundle.trunc_fb,
-            std::span<const uint64_t>(prod.data(), prod.size()),
-            std::span<uint64_t>(prod.data(), prod.size())));
-        pe->run(R);
-        pe->pfss_batch().clear();
-        pe->open_collector().clear();
-        for (size_t s = 0; s < st.cur_len; ++s) prob[s] = to_signed(prod[s]);
-      } else {
-        for (size_t s = 0; s < st.cur_len; ++s) {
-          __int128 p = static_cast<__int128>(st.expv[s]) * static_cast<__int128>(to_signed(inv_share));
-          prob[s] = static_cast<int64_t>(p >> fb);
-        }
-      }
-
-      for (size_t d = 0; d < Dh; ++d) {
-        __int128 acc = 0;
-        for (size_t s = 0; s < st.cur_len; ++s) {
-          acc += static_cast<__int128>(prob[s]) * static_cast<__int128>(st.v_plain[s * Dh + d]);
-        }
-        int64_t ctx_val = static_cast<int64_t>(acc >> fb);
-        size_t ctx_idx = ((st.b * T + t) * H + st.h) * Dh + d;
-        ctx_shares[ctx_idx] = to_ring((party == 0) ? ctx_val : 0);
-      }
+      pe->run(phase_R);
+      pe->pfss_batch().clear();
+      pe->open_collector().clear();
     }
   }
 

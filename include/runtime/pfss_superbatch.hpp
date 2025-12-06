@@ -151,6 +151,15 @@ class PfssSuperBatch {
   // Access raw PFSS outputs (arith/bool shares) for a completed handle.
   PfssResultView view(const PfssHandle& h) const;
 
+  struct Stats {
+    size_t flushes = 0;
+    size_t jobs = 0;
+    size_t arith_words = 0;
+    size_t pred_bits = 0;
+  };
+  const Stats& stats() const { return stats_; }
+  void reset_stats() { stats_ = Stats{}; }
+
  private:
   struct GroupResult {
     const suf::SUF<uint64_t>* suf = nullptr;
@@ -177,6 +186,7 @@ class PfssSuperBatch {
   std::vector<CompletedJob> completed_;
   std::vector<JobSlice> slices_;
   bool flushed_ = false;
+  Stats stats_;
 };
 
 // Convenience: run a truncation bundle immediately on a flat vector of shares.

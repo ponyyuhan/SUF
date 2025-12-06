@@ -29,7 +29,8 @@ inline void ensure_recips_triples(gates::CompositeKeyPair& kp,
                                   size_t per_iter_need,
                                   int nr_iters,
                                   std::mt19937_64& rng) {
-  size_t need = per_iter_need * static_cast<size_t>(nr_iters);
+  // One mul for the affine init plus per-iter muls.
+  size_t need = per_iter_need * static_cast<size_t>(nr_iters) + 1;
   auto fill = [&](std::vector<proto::BeaverTriple64Share>& dst0,
                   std::vector<proto::BeaverTriple64Share>& dst1) {
     while (dst0.size() < need || dst1.size() < need) {
@@ -53,9 +54,8 @@ inline RecipTaskMaterial dealer_make_recip_task_material(proto::PfssBackendBatch
                                                          std::mt19937_64& rng) {
   auto spec = make_recip_affine_init_spec(frac_bits, /*nmax=*/1024.0);
   auto suf_gate = suf::build_silu_suf_from_piecewise(spec);
-  auto kp = gates::composite_gen_backend(suf_gate, backend, rng);
-  std::fill(kp.k0.r_out_share.begin(), kp.k0.r_out_share.end(), 0ull);
-  std::fill(kp.k1.r_out_share.begin(), kp.k1.r_out_share.end(), 0ull);
+  std::vector<uint64_t> r_out(static_cast<size_t>(suf_gate.r_out), 0ull);
+  auto kp = gates::composite_gen_backend_with_masks(suf_gate, backend, rng, rng(), r_out);
   kp.k0.compiled.gate_kind = compiler::GateKind::Reciprocal;
   kp.k1.compiled.gate_kind = compiler::GateKind::Reciprocal;
 

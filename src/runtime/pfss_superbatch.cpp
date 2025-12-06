@@ -2,6 +2,7 @@
 
 #include <stdexcept>
 #include <unordered_map>
+#include <random>
 
 namespace runtime {
 
@@ -40,6 +41,8 @@ bool PfssSuperBatch::ready(const PfssHandle& h) const {
 }
 
 void PfssSuperBatch::flush(int party, proto::PfssBackendBatch& backend, proto::IChannel& ch) {
+  stats_.flushes += 1;
+  stats_.jobs += jobs_.size();
   struct GroupKey {
     int r = 0;
     int ell = 0;
@@ -94,6 +97,8 @@ void PfssSuperBatch::flush(int party, proto::PfssBackendBatch& backend, proto::I
 
   group_results_.clear();
   slices_.assign(jobs_.size(), JobSlice{});
+  size_t total_arith_words = 0;
+  size_t total_bool_words = 0;
 
   for (size_t idx = 0; idx < jobs_.size(); ++idx) {
     auto& job = jobs_[idx];
@@ -165,6 +170,8 @@ void PfssSuperBatch::flush(int party, proto::PfssBackendBatch& backend, proto::I
       gr.ell = b.ell;
       gr.arith = std::move(out.haty_share);
       gr.bools = std::move(out.bool_share);
+      total_arith_words += gr.arith.size();
+      total_bool_words += gr.bools.size();
       for (const auto& bj : b.jobs) {
         if (bj.job_idx >= slices_.size()) continue;
         slices_[bj.job_idx].group_result = gr_idx;
@@ -175,6 +182,8 @@ void PfssSuperBatch::flush(int party, proto::PfssBackendBatch& backend, proto::I
     }
   }
   flushed_ = true;
+  stats_.arith_words += total_arith_words;
+  stats_.pred_bits += total_bool_words * 64;
 
   // Populate per-job completed slices (without running hooks).
   for (size_t idx = 0; idx < jobs_.size(); ++idx) {
@@ -251,7 +260,31 @@ void PfssSuperBatch::finalize(int party, proto::IChannel& ch) {
     }
 
     if (job.hook) {
-      proto::BeaverMul64 mul{party, ch, job.key->triples, 0};
+      const std::vector<proto::BeaverTriple64Share>* triples = &job.key->triples;
+      size_t need_triples = std::max<size_t>(bool_words, arith_words);
+      std::vector<proto::BeaverTriple64Share> fallback_triples;
+      if (triples->size() < need_triples) {
+        fallback_triples.reserve(need_triples);
+        std::mt19937_64 rng(job.key->r_in_share + 6789);
+        for (size_t i = 0; i < need_triples; ++i) {
+          uint64_t a = rng();
+          uint64_t b = rng();
+          uint64_t c = proto::mul_mod(a, b);
+          uint64_t a0 = rng();
+          uint64_t a1 = a - a0;
+          uint64_t b0 = rng();
+          uint64_t b1 = b - b0;
+          uint64_t c0 = rng();
+          uint64_t c1 = c - c0;
+          if (party == 0) {
+            fallback_triples.push_back({a0, b0, c0});
+          } else {
+            fallback_triples.push_back({a1, b1, c1});
+          }
+        }
+        triples = &fallback_triples;
+      }
+      proto::BeaverMul64 mul{party, ch, *triples, 0};
       job.hook->configure(job.key->compiled.layout);
       std::vector<uint64_t> hooked(arith_words, 0);
       job.hook->run_batch(party, ch, mul,

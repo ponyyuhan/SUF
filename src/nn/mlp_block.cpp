@@ -123,10 +123,53 @@ void mlp_forward(const MLPConfig& cfg,
                  view2(hidden.data(), B * T, H),
                  mp);
 
-  bool has_trunc = (ctx && ctx->trunc_ctx);
-  std::vector<uint64_t> hidden_scaled;
-  if (has_trunc) {
-    // Faithful truncation via composite (no local shift).
+  bool use_phase = (ctx && pe && ctx->trunc_ctx);
+  std::vector<uint64_t> hidden_scaled = hidden;
+  runtime::PhaseResources R;
+  runtime::ProtoChanFromNet pch(ch);
+  // Helper to run two dependent tasks in a single executor pass.
+  class SeqTask final : public runtime::detail::PhaseTask {
+   public:
+    SeqTask(std::unique_ptr<runtime::detail::PhaseTask> first,
+            std::unique_ptr<runtime::detail::PhaseTask> second)
+        : first_(std::move(first)), second_(std::move(second)) {}
+    bool done() const override { return state_ == St::Done; }
+    runtime::detail::Need step(runtime::PhaseResources& R) override {
+      switch (state_) {
+        case St::First: {
+          auto need = first_->step(R);
+          if (!first_->done()) return need;
+          state_ = St::Second;
+          return runtime::detail::Need::None;
+        }
+        case St::Second: {
+          auto need = second_->step(R);
+          if (!second_->done()) return need;
+          state_ = St::Done;
+          return runtime::detail::Need::None;
+        }
+        case St::Done:
+          return runtime::detail::Need::None;
+      }
+      return runtime::detail::Need::None;
+    }
+
+   private:
+    enum class St { First, Second, Done } state_ = St::First;
+    std::unique_ptr<runtime::detail::PhaseTask> first_;
+    std::unique_ptr<runtime::detail::PhaseTask> second_;
+  };
+  if (use_phase) {
+    R.party = party;
+    R.pfss_backend = &ctx->trunc_ctx->backend();
+    R.pfss_chan = &pch;
+    R.net_chan = &ch;
+    R.pfss = &pe->pfss_batch();
+    R.opens = &pe->open_collector();
+  }
+
+  if (use_phase) {
+    // Faithful truncation via composite (no local shift) batched in phase executor.
     std::mt19937_64 rng(0);
     auto plan1 = compiler::compile_matmul_truncation(ctx->trunc_ctx->backend(),
                                                      rng,
@@ -136,44 +179,26 @@ void mlp_forward(const MLPConfig& cfg,
                                                      cfg.frac_bits,
                                                      mat1_x_range,
                                                      mat1_w_range);
-    runtime::ProtoChanFromNet pch(ch);
-    runtime::run_truncation_now(party,
-                                ctx->trunc_ctx->backend(),
-                                pch,
-                                plan1.bundle,
-                                hidden,
-                                hidden_scaled);
-  } else {
-    hidden_scaled = hidden;
-    if (!mp.local_rescale) rescale_buffer(hidden_scaled, cfg.frac_bits);
-  }
-
-  bool use_phase_silu = (ctx && pe && ctx->trunc_ctx);
-  if (use_phase_silu) {
-    std::mt19937_64 rng(0);
+    auto trunc_task = std::make_unique<runtime::TruncTask>(
+        &plan1.bundle, std::span<const uint64_t>(hidden.data(), hidden.size()),
+        std::span<uint64_t>(hidden_scaled.data(), hidden_scaled.size()));
+    std::mt19937_64 rng2(0);
     auto mat = gates::dealer_make_silu_task_material(
-        ctx->trunc_ctx->backend(), cfg.frac_bits, rng, 3 * hidden_scaled.size());
+        ctx->trunc_ctx->backend(), cfg.frac_bits, rng2, 3 * hidden_scaled.size());
     runtime::CubicPolyBundle bundle{
         &mat.suf, &mat.keys.k0, &mat.keys.k1, &mat.trunc_f, &mat.trunc_2f, cfg.frac_bits};
-
-    runtime::PhaseResources R;
-    runtime::ProtoChanFromNet pch(ch);
-    R.party = party;
-    R.pfss_backend = &ctx->trunc_ctx->backend();
-    R.pfss_chan = &pch;
-    R.net_chan = &ch;
-    R.pfss = &pe->pfss_batch();
-    R.opens = &pe->open_collector();
-
-    pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
-    pe->add_task(std::make_unique<runtime::CubicPolyTask>(
+    auto silu_task = std::make_unique<runtime::CubicPolyTask>(
         bundle,
         std::span<const uint64_t>(hidden_scaled.data(), hidden_scaled.size()),
-        std::span<uint64_t>(hidden_scaled.data(), hidden_scaled.size())));
+        std::span<uint64_t>(hidden_scaled.data(), hidden_scaled.size()));
+
+    pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
+    pe->add_task(std::make_unique<SeqTask>(std::move(trunc_task), std::move(silu_task)));
     pe->run(R);
     pe->pfss_batch().clear();
     pe->open_collector().clear();
   } else {
+    if (!mp.local_rescale) rescale_buffer(hidden_scaled, cfg.frac_bits);
     auto silu_spec = make_silu_spec({cfg.frac_bits, 16});
     for (size_t i = 0; i < hidden_scaled.size(); ++i) {
       int64_t v = to_signed(hidden_scaled[i]);
@@ -186,7 +211,7 @@ void mlp_forward(const MLPConfig& cfg,
                  view2(Y_share.data, B * T, D),
                  mp);
 
-  if (has_trunc) {
+  if (use_phase) {
     std::mt19937_64 rng(1);
     auto plan2 = compiler::compile_matmul_truncation(ctx->trunc_ctx->backend(),
                                                      rng,
@@ -196,15 +221,15 @@ void mlp_forward(const MLPConfig& cfg,
                                                      cfg.frac_bits,
                                                      mat2_x_range,
                                                      mat2_w_range);
-    std::vector<uint64_t> y_scaled;
-    runtime::ProtoChanFromNet pch(ch);
     std::vector<uint64_t> y_vec(Y_share.data, Y_share.data + Y_share.numel());
-    runtime::run_truncation_now(party,
-                                ctx->trunc_ctx->backend(),
-                                pch,
-                                plan2.bundle,
-                                y_vec,
-                                y_scaled);
+    std::vector<uint64_t> y_scaled(Y_share.numel(), 0);
+    pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
+    pe->add_task(std::make_unique<runtime::TruncTask>(
+        &plan2.bundle, std::span<const uint64_t>(y_vec.data(), y_vec.size()),
+        std::span<uint64_t>(y_scaled.data(), y_scaled.size())));
+    pe->run(R);
+    pe->pfss_batch().clear();
+    pe->open_collector().clear();
     for (size_t i = 0; i < Y_share.numel() && i < y_scaled.size(); ++i) {
       Y_share.data[i] = y_scaled[i];
     }

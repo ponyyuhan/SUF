@@ -48,6 +48,11 @@ struct OpenHandle {
 // as a structural step toward phase-level open fusion.
 class OpenCollector {
  public:
+  struct Stats {
+    size_t flushes = 0;
+    size_t opened_words = 0;
+  };
+
   // Enqueue a buffer of local shares to be opened; returns a handle to view later.
   OpenHandle enqueue(const std::vector<uint64_t>& diff);
 
@@ -63,6 +68,9 @@ class OpenCollector {
 
   void clear();
 
+  const Stats& stats() const { return stats_; }
+  void reset_stats() { stats_ = Stats{}; }
+
  private:
   struct Request {
     std::vector<uint64_t> diff;
@@ -72,6 +80,7 @@ class OpenCollector {
   std::vector<Request> requests_;
   std::vector<int64_t> opened_;
   bool opened_valid_ = false;
+  Stats stats_;
 };
 
 }  // namespace runtime

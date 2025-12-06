@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
 project(suf_fss LANGUAGES C CXX)
+enable_testing()
 
 set(CMAKE_CXX_EXTENSIONS ON)
 # OpenMP (needed for myl7/fss); if missing, targets will not link.
@@ -200,6 +201,14 @@ add_executable(test_truncation src/demo/test_truncation.cpp)
 target_include_directories(test_truncation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_truncation PRIVATE compiler_passes suf_fss ${MYL7_LINK_LIBS})
 
+add_executable(test_softmax_task src/demo/test_softmax_task.cpp)
+target_include_directories(test_softmax_task PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_softmax_task PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
+
+add_executable(test_trunc_task src/demo/test_trunc_task.cpp)
+target_include_directories(test_trunc_task PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_trunc_task PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
+
 add_executable(bench_gemm src/bench/bench_gemm.cpp)
 target_include_directories(bench_gemm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(bench_gemm PRIVATE nn_ops suf_fss ${MYL7_LINK_LIBS})
@@ -210,6 +219,14 @@ target_link_libraries(bench_truncation PRIVATE suf_fss ${MYL7_LINK_LIBS})
 
 if(HAVE_MYL7_FSS)
 add_executable(test_myl7_bit_order src/demo/test_myl7_bit_order.cpp)
-target_include_directories(test_myl7_bit_order PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_myl7_bit_order PRIVATE suf_fss ${MYL7_LINK_LIBS})
+  target_include_directories(test_myl7_bit_order PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  target_link_libraries(test_myl7_bit_order PRIVATE suf_fss ${MYL7_LINK_LIBS})
 endif()
+
+add_test(NAME test_softmax_task_correctness COMMAND test_softmax_task)
+add_test(NAME test_softmax_task_flush_counts COMMAND test_softmax_task)
+add_test(NAME test_trunc_task COMMAND test_trunc_task)
+
+# Placeholder executor coverage for MLP/attention (reuse existing binaries for smoke until dedicated harnesses are added).
+add_test(NAME test_matmul_and_attention_executor COMMAND test_matmul_and_attention)
+add_test(NAME test_matmul_executor COMMAND test_matmul)

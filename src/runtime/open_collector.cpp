@@ -20,6 +20,7 @@ OpenHandle OpenCollector::enqueue(const std::vector<uint64_t>& diff) {
 
 void OpenCollector::flush(int party, net::Chan& ch) {
   if (requests_.empty()) return;
+  size_t total_words = 0;
   for (const auto& req : requests_) {
     if (req.offset + req.len > opened_.size()) {
       throw std::runtime_error("OpenCollector: request out of range");
@@ -35,9 +36,12 @@ void OpenCollector::flush(int party, net::Chan& ch) {
       }
       for (auto v : req.diff) ch.send_u64(v);
     }
+    total_words += req.len;
   }
   requests_.clear();
   opened_valid_ = true;
+  stats_.flushes += 1;
+  stats_.opened_words += total_words;
 }
 
 std::span<const int64_t> OpenCollector::view(const OpenHandle& h) const {

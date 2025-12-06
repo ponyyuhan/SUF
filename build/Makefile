@@ -57,13 +57,23 @@ RM = /usr/bin/cmake -E rm -f
 EQUALS = =
 
 # The top-level source directory on which CMake was run.
-CMAKE_SOURCE_DIR = /home/yuhan/SUF/SUF
+CMAKE_SOURCE_DIR = /home/yuhan/new/SUF
 
 # The top-level build directory on which CMake was run.
-CMAKE_BINARY_DIR = /home/yuhan/SUF/SUF/build
+CMAKE_BINARY_DIR = /home/yuhan/new/SUF/build
 
 #=============================================================================
 # Targets provided globally by CMake.
+
+# Special rule for the target test
+test:
+	@$(CMAKE_COMMAND) -E cmake_echo_color --switch=$(COLOR) --cyan "Running tests..."
+	/usr/bin/ctest --force-new-ctest-process $(ARGS)
+.PHONY : test
+
+# Special rule for the target test
+test/fast: test
+.PHONY : test/fast
 
 # Special rule for the target edit_cache
 edit_cache:
@@ -87,9 +97,9 @@ rebuild_cache/fast: rebuild_cache
 
 # The main all target
 all: cmake_check_build_system
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/yuhan/SUF/SUF/build/CMakeFiles /home/yuhan/SUF/SUF/build//CMakeFiles/progress.marks
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/yuhan/new/SUF/build/CMakeFiles /home/yuhan/new/SUF/build//CMakeFiles/progress.marks
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 all
-	$(CMAKE_COMMAND) -E cmake_progress_start /home/yuhan/SUF/SUF/build/CMakeFiles 0
+	$(CMAKE_COMMAND) -E cmake_progress_start /home/yuhan/new/SUF/build/CMakeFiles 0
 .PHONY : all
 
 # The main clean target
@@ -414,6 +424,32 @@ test_truncation: cmake_check_build_system
 test_truncation/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_truncation.dir/build.make CMakeFiles/test_truncation.dir/build
 .PHONY : test_truncation/fast
+
+#=============================================================================
+# Target rules for targets named test_softmax_task
+
+# Build rule for target.
+test_softmax_task: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_softmax_task
+.PHONY : test_softmax_task
+
+# fast build rule for target.
+test_softmax_task/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_softmax_task.dir/build.make CMakeFiles/test_softmax_task.dir/build
+.PHONY : test_softmax_task/fast
+
+#=============================================================================
+# Target rules for targets named test_trunc_task
+
+# Build rule for target.
+test_trunc_task: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_trunc_task
+.PHONY : test_trunc_task
+
+# fast build rule for target.
+test_trunc_task/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_trunc_task.dir/build.make CMakeFiles/test_trunc_task.dir/build
+.PHONY : test_trunc_task/fast
 
 #=============================================================================
 # Target rules for targets named bench_gemm
@@ -1054,6 +1090,30 @@ src/demo/test_sigmafast.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_sigmafast.dir/build.make CMakeFiles/test_sigmafast.dir/src/demo/test_sigmafast.cpp.s
 .PHONY : src/demo/test_sigmafast.cpp.s
 
+src/demo/test_softmax_task.o: src/demo/test_softmax_task.cpp.o
+.PHONY : src/demo/test_softmax_task.o
+
+# target to build an object file
+src/demo/test_softmax_task.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_softmax_task.dir/build.make CMakeFiles/test_softmax_task.dir/src/demo/test_softmax_task.cpp.o
+.PHONY : src/demo/test_softmax_task.cpp.o
+
+src/demo/test_softmax_task.i: src/demo/test_softmax_task.cpp.i
+.PHONY : src/demo/test_softmax_task.i
+
+# target to preprocess a source file
+src/demo/test_softmax_task.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_softmax_task.dir/build.make CMakeFiles/test_softmax_task.dir/src/demo/test_softmax_task.cpp.i
+.PHONY : src/demo/test_softmax_task.cpp.i
+
+src/demo/test_softmax_task.s: src/demo/test_softmax_task.cpp.s
+.PHONY : src/demo/test_softmax_task.s
+
+# target to generate assembly for a file
+src/demo/test_softmax_task.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_softmax_task.dir/build.make CMakeFiles/test_softmax_task.dir/src/demo/test_softmax_task.cpp.s
+.PHONY : src/demo/test_softmax_task.cpp.s
+
 src/demo/test_suf_ref_eval.o: src/demo/test_suf_ref_eval.cpp.o
 .PHONY : src/demo/test_suf_ref_eval.o
 
@@ -1078,6 +1138,30 @@ src/demo/test_suf_ref_eval.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_suf_ref_eval.dir/build.make CMakeFiles/test_suf_ref_eval.dir/src/demo/test_suf_ref_eval.cpp.s
 .PHONY : src/demo/test_suf_ref_eval.cpp.s
 
+src/demo/test_trunc_task.o: src/demo/test_trunc_task.cpp.o
+.PHONY : src/demo/test_trunc_task.o
+
+# target to build an object file
+src/demo/test_trunc_task.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_trunc_task.dir/build.make CMakeFiles/test_trunc_task.dir/src/demo/test_trunc_task.cpp.o
+.PHONY : src/demo/test_trunc_task.cpp.o
+
+src/demo/test_trunc_task.i: src/demo/test_trunc_task.cpp.i
+.PHONY : src/demo/test_trunc_task.i
+
+# target to preprocess a source file
+src/demo/test_trunc_task.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_trunc_task.dir/build.make CMakeFiles/test_trunc_task.dir/src/demo/test_trunc_task.cpp.i
+.PHONY : src/demo/test_trunc_task.cpp.i
+
+src/demo/test_trunc_task.s: src/demo/test_trunc_task.cpp.s
+.PHONY : src/demo/test_trunc_task.s
+
+# target to generate assembly for a file
+src/demo/test_trunc_task.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_trunc_task.dir/build.make CMakeFiles/test_trunc_task.dir/src/demo/test_trunc_task.cpp.s
+.PHONY : src/demo/test_trunc_task.cpp.s
+
 src/demo/test_truncation.o: src/demo/test_truncation.cpp.o
 .PHONY : src/demo/test_truncation.o
 
@@ -1101,6 +1185,30 @@ src/demo/test_truncation.s: src/demo/test_truncation.cpp.s
 src/demo/test_truncation.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_truncation.dir/build.make CMakeFiles/test_truncation.dir/src/demo/test_truncation.cpp.s
 .PHONY : src/demo/test_truncation.cpp.s
+
+src/gates/postproc_hooks.o: src/gates/postproc_hooks.cpp.o
+.PHONY : src/gates/postproc_hooks.o
+
+# target to build an object file
+src/gates/postproc_hooks.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/gates/postproc_hooks.cpp.o
+.PHONY : src/gates/postproc_hooks.cpp.o
+
+src/gates/postproc_hooks.i: src/gates/postproc_hooks.cpp.i
+.PHONY : src/gates/postproc_hooks.i
+
+# target to preprocess a source file
+src/gates/postproc_hooks.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/gates/postproc_hooks.cpp.i
+.PHONY : src/gates/postproc_hooks.cpp.i
+
+src/gates/postproc_hooks.s: src/gates/postproc_hooks.cpp.s
+.PHONY : src/gates/postproc_hooks.s
+
+# target to generate assembly for a file
+src/gates/postproc_hooks.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/gates/postproc_hooks.cpp.s
+.PHONY : src/gates/postproc_hooks.cpp.s
 
 src/nn/attention_block.o: src/nn/attention_block.cpp.o
 .PHONY : src/nn/attention_block.o
@@ -1246,6 +1354,30 @@ src/nn/transformer_layer.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/transformer_layer.cpp.s
 .PHONY : src/nn/transformer_layer.cpp.s
 
+src/runtime/open_collector.o: src/runtime/open_collector.cpp.o
+.PHONY : src/runtime/open_collector.o
+
+# target to build an object file
+src/runtime/open_collector.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/runtime/open_collector.cpp.o
+.PHONY : src/runtime/open_collector.cpp.o
+
+src/runtime/open_collector.i: src/runtime/open_collector.cpp.i
+.PHONY : src/runtime/open_collector.i
+
+# target to preprocess a source file
+src/runtime/open_collector.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/runtime/open_collector.cpp.i
+.PHONY : src/runtime/open_collector.cpp.i
+
+src/runtime/open_collector.s: src/runtime/open_collector.cpp.s
+.PHONY : src/runtime/open_collector.s
+
+# target to generate assembly for a file
+src/runtime/open_collector.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/runtime/open_collector.cpp.s
+.PHONY : src/runtime/open_collector.cpp.s
+
 src/runtime/pfss_superbatch.o: src/runtime/pfss_superbatch.cpp.o
 .PHONY : src/runtime/pfss_superbatch.o
 
@@ -1269,6 +1401,30 @@ src/runtime/pfss_superbatch.s: src/runtime/pfss_superbatch.cpp.s
 src/runtime/pfss_superbatch.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/runtime/pfss_superbatch.cpp.s
 .PHONY : src/runtime/pfss_superbatch.cpp.s
+
+src/runtime/phase_executor.o: src/runtime/phase_executor.cpp.o
+.PHONY : src/runtime/phase_executor.o
+
+# target to build an object file
+src/runtime/phase_executor.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/runtime/phase_executor.cpp.o
+.PHONY : src/runtime/phase_executor.cpp.o
+
+src/runtime/phase_executor.i: src/runtime/phase_executor.cpp.i
+.PHONY : src/runtime/phase_executor.i
+
+# target to preprocess a source file
+src/runtime/phase_executor.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/runtime/phase_executor.cpp.i
+.PHONY : src/runtime/phase_executor.cpp.i
+
+src/runtime/phase_executor.s: src/runtime/phase_executor.cpp.s
+.PHONY : src/runtime/phase_executor.s
+
+# target to generate assembly for a file
+src/runtime/phase_executor.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/runtime/phase_executor.cpp.s
+.PHONY : src/runtime/phase_executor.cpp.s
 
 third_party/myl7_fss/src/group/bytes.o: third_party/myl7_fss/src/group/bytes.c.o
 .PHONY : third_party/myl7_fss/src/group/bytes.o
@@ -1350,6 +1506,7 @@ help:
 	@echo "... depend"
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
+	@echo "... test"
 	@echo "... bench_attention"
 	@echo "... bench_gemm"
 	@echo "... bench_llm_gates"
@@ -1374,7 +1531,9 @@ help:
 	@echo "... test_postproc_hooks"
 	@echo "... test_pred_semantics"
 	@echo "... test_sigmafast"
+	@echo "... test_softmax_task"
 	@echo "... test_suf_ref_eval"
+	@echo "... test_trunc_task"
 	@echo "... test_truncation"
 	@echo "... src/bench/bench_attention.o"
 	@echo "... src/bench/bench_attention.i"
@@ -1451,12 +1610,21 @@ help:
 	@echo "... src/demo/test_sigmafast.o"
 	@echo "... src/demo/test_sigmafast.i"
 	@echo "... src/demo/test_sigmafast.s"
+	@echo "... src/demo/test_softmax_task.o"
+	@echo "... src/demo/test_softmax_task.i"
+	@echo "... src/demo/test_softmax_task.s"
 	@echo "... src/demo/test_suf_ref_eval.o"
 	@echo "... src/demo/test_suf_ref_eval.i"
 	@echo "... src/demo/test_suf_ref_eval.s"
+	@echo "... src/demo/test_trunc_task.o"
+	@echo "... src/demo/test_trunc_task.i"
+	@echo "... src/demo/test_trunc_task.s"
 	@echo "... src/demo/test_truncation.o"
 	@echo "... src/demo/test_truncation.i"
 	@echo "... src/demo/test_truncation.s"
+	@echo "... src/gates/postproc_hooks.o"
+	@echo "... src/gates/postproc_hooks.i"
+	@echo "... src/gates/postproc_hooks.s"
 	@echo "... src/nn/attention_block.o"
 	@echo "... src/nn/attention_block.i"
 	@echo "... src/nn/attention_block.s"
@@ -1475,9 +1643,15 @@ help:
 	@echo "... src/nn/transformer_layer.o"
 	@echo "... src/nn/transformer_layer.i"
 	@echo "... src/nn/transformer_layer.s"
+	@echo "... src/runtime/open_collector.o"
+	@echo "... src/runtime/open_collector.i"
+	@echo "... src/runtime/open_collector.s"
 	@echo "... src/runtime/pfss_superbatch.o"
 	@echo "... src/runtime/pfss_superbatch.i"
 	@echo "... src/runtime/pfss_superbatch.s"
+	@echo "... src/runtime/phase_executor.o"
+	@echo "... src/runtime/phase_executor.i"
+	@echo "... src/runtime/phase_executor.s"
 	@echo "... third_party/myl7_fss/src/group/bytes.o"
 	@echo "... third_party/myl7_fss/src/group/bytes.i"
 	@echo "... third_party/myl7_fss/src/group/bytes.s"

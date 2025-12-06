@@ -1,1 +1,0 @@
-/usr/bin/c++ CMakeFiles/demo_proto_reluars.dir/src/demo/demo_proto_reluars.cpp.o -o demo_proto_reluars 

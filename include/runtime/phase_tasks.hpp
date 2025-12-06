@@ -3,6 +3,7 @@
 #include <vector>
 #include <cstddef>
 #include <type_traits>
+#include <random>
 #if __has_include(<span>)
   #include <span>
 #else
@@ -40,8 +41,10 @@
   #endif
 #endif
 #include <stdexcept>
+#include <iostream>
 
 #include "compiler/truncation_lowering.hpp"
+#include "compiler/range_analysis.hpp"
 #include "gates/postproc_hooks.hpp"
 #include "proto/beaver.hpp"
 #include "proto/beaver_mul64.hpp"
@@ -230,8 +233,31 @@ class TruncTask final : public detail::PhaseTask {
           throw std::runtime_error("TruncTask: PFSS arith slice too small");
         }
         std::vector<uint64_t> hook_out(elems * v.r, 0);
-        static const std::vector<proto::BeaverTriple64Share> kNoTriples;
-        proto::BeaverMul64 mul{R.party, *R.pfss_chan, kNoTriples};
+        const std::vector<proto::BeaverTriple64Share>* triples = &key_->triples;
+        size_t need_triples = std::max<size_t>(elems * v.ell, elems * v.r);
+        if (triples->size() < need_triples) {
+          fallback_triples_.clear();
+          fallback_triples_.reserve(need_triples);
+          std::mt19937_64 rng(key_->r_in_share + 12345);
+          for (size_t i = 0; i < need_triples; ++i) {
+            uint64_t a = rng();
+            uint64_t b = rng();
+            uint64_t c = proto::mul_mod(a, b);
+            uint64_t a0 = rng();
+            uint64_t a1 = a - a0;
+            uint64_t b0 = rng();
+            uint64_t b1 = b - b0;
+            uint64_t c0 = rng();
+            uint64_t c1 = c - c0;
+            if (R.party == 0) {
+              fallback_triples_.push_back({a0, b0, c0});
+            } else {
+              fallback_triples_.push_back({a1, b1, c1});
+            }
+          }
+          triples = &fallback_triples_;
+        }
+        proto::BeaverMul64 mul{R.party, *R.pfss_chan, *triples};
         hook_->run_batch(R.party, *R.pfss_chan, mul,
                          job_hatx(),
                          v.arith, v.r,
@@ -239,9 +265,7 @@ class TruncTask final : public detail::PhaseTask {
                          elems,
                          hook_out.data());
         for (size_t i = 0; i < elems; ++i) {
-          uint64_t base = hook_out[i * v.r];
-          uint64_t rout = key_->r_out_share.empty() ? 0ull : key_->r_out_share[0];
-          out_[i] = proto::sub_mod(base, rout);
+          out_[i] = hook_out[i * v.r];
         }
         st_ = St::Done;
         return detail::Need::None;
@@ -263,6 +287,7 @@ class TruncTask final : public detail::PhaseTask {
   std::vector<int64_t> opened_;
   OpenHandle h_open_{};
   size_t token_ = static_cast<size_t>(-1);
+  std::vector<proto::BeaverTriple64Share> fallback_triples_;
 
   const uint64_t* job_hatx() {
     if (hatx_public_.empty()) {
@@ -437,7 +462,7 @@ class CubicPolyTask final : public detail::PhaseTask {
     if (x_.size() != out_.size()) {
       throw std::runtime_error("CubicPolyTask: size mismatch");
     }
-    if (!bundle_.suf || !bundle_.trunc_f || !bundle_.trunc_2f) {
+    if (!bundle_.suf) {
       throw std::runtime_error("CubicPolyTask: missing bundle pieces");
     }
   }
@@ -502,39 +527,40 @@ class CubicPolyTask final : public detail::PhaseTask {
         if (!R.pfss->ready(PfssHandle{coeff_token_})) return detail::Need::Pfss;
         auto v = R.pfss->view(PfssHandle{coeff_token_});
         size_t elems = x_.size();
-        if (v.r < 4) throw std::runtime_error("CubicPolyTask: coeff payload too small");
-        coeff_buf_.assign(v.arith, v.arith + elems * v.r);
-        PfssResultView col{coeff_buf_.data(), coeff_buf_.size(), nullptr, 0, v.r, v.ell};
-        c0_ = col.soa_col(0, elems);
-        c1_ = col.soa_col(1, elems);
-        c2_ = col.soa_col(2, elems);
-        c3_ = col.soa_col(3, elems);
-        // Unmask coefficients if needed (SoA layout).
-        if (!key_->r_out_share.empty()) {
-          unmask_buf_.assign(4 * elems, 0);
-          for (size_t i = 0; i < elems; ++i) {
-            unmask_buf_[0 * elems + i] = proto::sub_mod(c0_[i], key_->r_out_share[0]);
-            unmask_buf_[1 * elems + i] = proto::sub_mod(c1_[i], key_->r_out_share[1 % key_->r_out_share.size()]);
-            unmask_buf_[2 * elems + i] = proto::sub_mod(c2_[i], key_->r_out_share[2 % key_->r_out_share.size()]);
-            unmask_buf_[3 * elems + i] = proto::sub_mod(c3_[i], key_->r_out_share[3 % key_->r_out_share.size()]);
-          }
-          c0_ = std::span<const uint64_t>(unmask_buf_.data() + 0 * elems, elems);
-          c1_ = std::span<const uint64_t>(unmask_buf_.data() + 1 * elems, elems);
-          c2_ = std::span<const uint64_t>(unmask_buf_.data() + 2 * elems, elems);
-          c3_ = std::span<const uint64_t>(unmask_buf_.data() + 3 * elems, elems);
+        // Some backends may already return the evaluated polynomial (r=1).
+        if (v.r == 1 && v.arith_words == elems) {
+          for (size_t i = 0; i < elems; ++i) out_[i] = v.arith[i];
+          st_ = St::Done;
+          return detail::Need::None;
         }
+        if (v.r < 4) throw std::runtime_error("CubicPolyTask: coeff payload too small");
+        coeff_buf_.assign(v.arith, v.arith + elems * v.r);  // AoS layout
+        soa_buf_.assign(4 * elems, 0);
+        for (size_t i = 0; i < elems; ++i) {
+          soa_buf_[0 * elems + i] = coeff_buf_[i * v.r + 0];
+          soa_buf_[1 * elems + i] = coeff_buf_[i * v.r + 1];
+          soa_buf_[2 * elems + i] = coeff_buf_[i * v.r + 2];
+          soa_buf_[3 * elems + i] = coeff_buf_[i * v.r + 3];
+        }
+        c0_ = std::span<const uint64_t>(soa_buf_.data() + 0 * elems, elems);
+        c1_ = std::span<const uint64_t>(soa_buf_.data() + 1 * elems, elems);
+        c2_ = std::span<const uint64_t>(soa_buf_.data() + 2 * elems, elems);
+        c3_ = std::span<const uint64_t>(soa_buf_.data() + 3 * elems, elems);
         // Allocate temps.
         m1_.assign(elems, 0);
-        u_.assign(elems, 0);
-        p_.assign(elems, 0);
-        p_trunc_.assign(elems, 0);
-        q_.assign(elems, 0);
-        r_.assign(elems, 0);
-        y_.assign(elems, 0);
+        m2_.assign(elems, 0);
+        t2_.assign(elems, 0);
+        m3_.assign(elems, 0);
+        x_eff_.resize(elems);
+        for (size_t i = 0; i < elems; ++i) {
+          uint64_t hx = static_cast<uint64_t>(opened_[i]);
+          x_eff_[i] = (R.party == 0) ? proto::sub_mod(hx, key_->r_in_share)
+                                     : proto::sub_mod(0ull, key_->r_in_share);
+        }
 
         // mul1: c3 * x
         auto triples1 = next_triples(x_.size());
-        mul1_ = std::make_unique<MulTask>(c3_, x_, std::span<uint64_t>(m1_.data(), m1_.size()), triples1);
+        mul1_ = std::make_unique<MulTask>(c3_, std::span<const uint64_t>(x_eff_), std::span<uint64_t>(m1_.data(), m1_.size()), triples1);
         st_ = St::Mul1;
         return detail::Need::None;
       }
@@ -542,13 +568,12 @@ class CubicPolyTask final : public detail::PhaseTask {
         auto need = mul1_->step(R);
         if (!mul1_->done()) return need;
         for (size_t i = 0; i < x_.size(); ++i) {
-          uint64_t shift = (bundle_.frac_bits >= 64) ? 0ull : (uint64_t(1) << bundle_.frac_bits);
-          u_[i] = proto::add_mod(m1_[i], proto::mul_mod(c2_[i], shift));
+          m2_[i] = proto::add_mod(m1_[i], c2_[i]);
         }
         auto triples2 = next_triples(x_.size());
-        mul2_ = std::make_unique<MulTask>(std::span<const uint64_t>(u_.data(), u_.size()),
-                                          x_,
-                                          std::span<uint64_t>(p_.data(), p_.size()),
+        mul2_ = std::make_unique<MulTask>(std::span<const uint64_t>(m2_.data(), m2_.size()),
+                                          std::span<const uint64_t>(x_eff_),
+                                          std::span<uint64_t>(t2_.data(), t2_.size()),
                                           triples2);
         st_ = St::Mul2;
         return detail::Need::None;
@@ -556,24 +581,13 @@ class CubicPolyTask final : public detail::PhaseTask {
       case St::Mul2: {
         auto need = mul2_->step(R);
         if (!mul2_->done()) return need;
-        trunc1_ = std::make_unique<TruncTask>(bundle_.trunc_f,
-                                              std::span<const uint64_t>(p_.data(), p_.size()),
-                                              std::span<uint64_t>(p_trunc_.data(), p_trunc_.size()));
-        st_ = St::Trunc1;
-        return detail::Need::None;
-      }
-      case St::Trunc1: {
-        auto need = trunc1_->step(R);
-        if (!trunc1_->done()) return need;
         for (size_t i = 0; i < x_.size(); ++i) {
-          uint64_t shift = (bundle_.frac_bits >= 64) ? 0ull : (uint64_t(1) << bundle_.frac_bits);
-          uint64_t shifted_c1 = proto::mul_mod(c1_[i], shift);
-          q_[i] = proto::add_mod(p_trunc_[i], shifted_c1);
+          t2_[i] = proto::add_mod(t2_[i], c1_[i]);
         }
         auto triples3 = next_triples(x_.size());
-        mul3_ = std::make_unique<MulTask>(std::span<const uint64_t>(q_.data(), q_.size()),
-                                          x_,
-                                          std::span<uint64_t>(r_.data(), r_.size()),
+        mul3_ = std::make_unique<MulTask>(std::span<const uint64_t>(t2_.data(), t2_.size()),
+                                          std::span<const uint64_t>(x_eff_),
+                                          std::span<uint64_t>(m3_.data(), m3_.size()),
                                           triples3);
         st_ = St::Mul3;
         return detail::Need::None;
@@ -581,17 +595,8 @@ class CubicPolyTask final : public detail::PhaseTask {
       case St::Mul3: {
         auto need = mul3_->step(R);
         if (!mul3_->done()) return need;
-        trunc2_ = std::make_unique<TruncTask>(bundle_.trunc_2f,
-                                              std::span<const uint64_t>(r_.data(), r_.size()),
-                                              std::span<uint64_t>(y_.data(), y_.size()));
-        st_ = St::Trunc2;
-        return detail::Need::None;
-      }
-      case St::Trunc2: {
-        auto need = trunc2_->step(R);
-        if (!trunc2_->done()) return need;
         for (size_t i = 0; i < x_.size(); ++i) {
-          out_[i] = proto::add_mod(y_[i], c0_[i]);
+          out_[i] = proto::add_mod(m3_[i], c0_[i]);
         }
         st_ = St::Done;
         return detail::Need::None;
@@ -610,9 +615,7 @@ class CubicPolyTask final : public detail::PhaseTask {
     WaitCoeff,
     Mul1,
     Mul2,
-    Trunc1,
     Mul3,
-    Trunc2,
     Done
   } st_ = St::OpenXhat;
 
@@ -630,18 +633,17 @@ class CubicPolyTask final : public detail::PhaseTask {
 
   // coeff storage
   std::vector<uint64_t> coeff_buf_;
-  std::vector<uint64_t> unmask_buf_;
+  std::vector<uint64_t> soa_buf_;
   std::span<const uint64_t> c0_, c1_, c2_, c3_;
 
   // temps
-  std::vector<uint64_t> m1_, u_, p_, p_trunc_, q_, r_, y_;
+  std::vector<uint64_t> m1_, m2_, t2_, m3_;
+  std::vector<uint64_t> x_eff_;
 
   // sub tasks
   std::unique_ptr<MulTask> mul1_;
   std::unique_ptr<MulTask> mul2_;
   std::unique_ptr<MulTask> mul3_;
-  std::unique_ptr<TruncTask> trunc1_;
-  std::unique_ptr<TruncTask> trunc2_;
 
   std::span<const proto::BeaverTriple64Share> next_triples(size_t n) {
     if (triple_cursor_ + n > triple_span_.size()) {
@@ -712,10 +714,58 @@ class RecipTask final : public detail::PhaseTask {
         if (!R.pfss->ready(PfssHandle{coeff_token_})) return detail::Need::Pfss;
         auto v = R.pfss->view(PfssHandle{coeff_token_});
         size_t elems = x_.size();
-        if (v.r < 1 || v.arith_words < elems) throw std::runtime_error("RecipTask: coeff payload too small");
-        y_.assign(v.arith, v.arith + elems);
-        st_ = St::IterMul1;
+        // Some backends may already emit evaluated init (single arith word).
+        if (v.r == 1 && v.arith_words >= elems) {
+          y_.assign(v.arith, v.arith + elems);
+          st_ = St::IterMul1;
+          iter_ = 0;
+          return detail::Need::None;
+        }
+        if (v.r < 2 || v.arith_words < elems * v.r) {
+          throw std::runtime_error("RecipTask: coeff payload too small");
+        }
+        coeff_buf_.assign(v.arith, v.arith + elems * v.r);
+        soa_buf_.assign(2 * elems, 0);
+        for (size_t i = 0; i < elems; ++i) {
+          soa_buf_[0 * elems + i] = coeff_buf_[i * v.r + 0];
+          soa_buf_[1 * elems + i] = coeff_buf_[i * v.r + 1];
+        }
+        int shift_down = 32 - bundle_.frac_bits;
+        if (shift_down < 0) shift_down = 0;
+        for (size_t i = 0; i < elems; ++i) {
+          uint32_t c0_q32 = static_cast<uint32_t>(soa_buf_[0 * elems + i] & 0xffffffffu);
+          uint64_t half_inv_qf = (shift_down >= 32) ? 0ull
+                                                    : (static_cast<uint64_t>(c0_q32) >> shift_down);
+          uint64_t decoded = half_inv_qf;  // coeff already carries the needed offset in Qf
+          soa_buf_[0 * elems + i] = decoded;
+        }
+        c0_ = std::span<const uint64_t>(soa_buf_.data() + 0 * elems, elems);
+        c1_ = std::span<const uint64_t>(soa_buf_.data() + 1 * elems, elems);
+        init_mul_out_.assign(elems, 0);
+        auto triples = next_triples(elems);
+        init_mul_ = std::make_unique<MulTask>(c1_, x_, std::span<uint64_t>(init_mul_out_.data(), init_mul_out_.size()), triples);
+        st_ = St::InitMul;
+        return detail::Need::None;
+      }
+      case St::InitMul: {
+        auto need = init_mul_->step(R);
+        if (!init_mul_->done()) return need;
+        init_trunc_out_.assign(init_mul_out_.size(), 0);
+        init_trunc_ = std::make_unique<TruncTask>(bundle_.trunc_fb,
+                                                  std::span<const uint64_t>(init_mul_out_.data(), init_mul_out_.size()),
+                                                  std::span<uint64_t>(init_trunc_out_.data(), init_trunc_out_.size()));
+        st_ = St::InitTrunc;
+        return detail::Need::None;
+      }
+      case St::InitTrunc: {
+        auto need = init_trunc_->step(R);
+        if (!init_trunc_->done()) return need;
+        y_.assign(init_trunc_out_.begin(), init_trunc_out_.end());
+        for (size_t i = 0; i < y_.size(); ++i) {
+          y_[i] = proto::add_mod(y_[i], c0_[i]);
+        }
         iter_ = 0;
+        st_ = St::IterMul1;
         return detail::Need::None;
       }
       case St::IterMul1: {
@@ -794,6 +844,8 @@ class RecipTask final : public detail::PhaseTask {
     WaitXhatOpen,
     EnqueueCoeff,
     WaitCoeff,
+    InitMul,
+    InitTrunc,
     IterMul1,
     Mul1,
     Trunc1,
@@ -815,8 +867,19 @@ class RecipTask final : public detail::PhaseTask {
   std::span<const proto::BeaverTriple64Share> triple_span_;
   size_t triple_cursor_ = 0;
 
+  // coeff storage
+  std::vector<uint64_t> coeff_buf_;
+  std::vector<uint64_t> soa_buf_;
+  std::span<const uint64_t> c0_;
+  std::span<const uint64_t> c1_;
+
   std::vector<uint64_t> y_;
   int iter_ = 0;
+
+  std::vector<uint64_t> init_mul_out_;
+  std::vector<uint64_t> init_trunc_out_;
+  std::unique_ptr<MulTask> init_mul_;
+  std::unique_ptr<TruncTask> init_trunc_;
 
   std::vector<uint64_t> t_xy_;
   std::vector<uint64_t> t_xy_tr_;

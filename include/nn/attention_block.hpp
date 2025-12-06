@@ -10,6 +10,8 @@
 #include "nn/layer_context.hpp"
 #include "runtime/phase_executor.hpp"
 #include "runtime/pfss_superbatch.hpp"
+#include "runtime/phase_tasks.hpp"
+#include "runtime/matmul_task.hpp"
 
 namespace nn {
 
