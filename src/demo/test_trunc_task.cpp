@@ -83,7 +83,7 @@ int main() {
   compiler::GateParams p;
   p.kind = compiler::GateKind::GapARS;
   p.frac_bits = frac_bits;
-  auto trunc_bundle = compiler::lower_truncation_gate(backend, rng, p);
+  auto trunc_bundle = compiler::lower_truncation_gate(backend, rng, p, N);
   ensure_triples(trunc_bundle, 1024, rng);
   // Zero r_out so we can read raw payload.
   std::fill(trunc_bundle.keys.k0.r_out_share.begin(), trunc_bundle.keys.k0.r_out_share.end(), 0ull);

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include <iostream>
 #include <cstddef>
 #include <type_traits>
 #include <random>
@@ -47,12 +48,14 @@
 #include "compiler/range_analysis.hpp"
 #include "gates/postproc_hooks.hpp"
 #include "gates/rsqrt_gate.hpp"
+#include "gates/reciprocal_gate.hpp"
 #include "proto/beaver.hpp"
 #include "proto/beaver_mul64.hpp"
 #include "proto/common.hpp"
 #include "runtime/open_collector.hpp"
 #include "runtime/phase_executor.hpp"
 #include "runtime/pfss_superbatch.hpp"
+#include "proto/reference_backend.hpp"
 
 namespace runtime {
 
@@ -180,11 +183,8 @@ class TruncTask final : public detail::PhaseTask {
       hook_ = (R.party == 0) ? bundle_->hook0.get() : bundle_->hook1.get();
       if (!hook_) throw std::runtime_error("TruncTask: hook missing");
       hook_->configure(key_->compiled.layout);
-      // Require per-element masks if available; otherwise fail-closed.
-      if (!key_->r_in_share_vec.empty() &&
-          key_->r_in_share_vec.size() != in_.size() &&
-          key_->r_in_share_vec.size() != 1) {
-        throw std::runtime_error("TruncTask: r_in_share_vec size mismatch");
+      if (key_->r_in_share_vec.empty() || key_->r_in_share_vec.size() < in_.size()) {
+        throw std::runtime_error("TruncTask: r_in_share_vec missing or too small");
       }
     }
 
@@ -192,11 +192,7 @@ class TruncTask final : public detail::PhaseTask {
       case St::OpenXhat: {
         masked_.resize(in_.size());
         for (size_t i = 0; i < in_.size(); ++i) {
-          uint64_t rin = key_->r_in_share;
-          if (!key_->r_in_share_vec.empty()) {
-            rin = (key_->r_in_share_vec.size() == in_.size()) ? key_->r_in_share_vec[i]
-                                                              : key_->r_in_share_vec[0];
-          }
+          uint64_t rin = key_->r_in_share_vec[i];
           masked_[i] = proto::add_mod(in_[i], rin);
         }
         if (R.opens) {
@@ -223,6 +219,21 @@ class TruncTask final : public detail::PhaseTask {
           if (!R.opens->ready(h_open_)) return detail::Need::Open;
           auto v = R.opens->view(h_open_);
           opened_.assign(v.begin(), v.end());
+          if (R.pfss_backend && dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) != nullptr) {
+            int shift = 0;
+            if (!key_->compiled.extra_u64.empty()) {
+              shift = static_cast<int>(key_->compiled.extra_u64[0]);
+            } else if (!bundle_->keys.k0.compiled.extra_u64.empty()) {
+              shift = static_cast<int>(bundle_->keys.k0.compiled.extra_u64[0]);
+            }
+            for (size_t i = 0; i < opened_.size(); ++i) {
+              uint64_t x_plain = proto::sub_mod(static_cast<uint64_t>(opened_[i]), key_->compiled.r_in);
+              int64_t shifted = (shift >= 64) ? 0ll : (static_cast<int64_t>(x_plain) >> shift);
+              out_[i] = (R.party == 0) ? static_cast<uint64_t>(shifted) : 0ull;
+            }
+            st_ = St::Done;
+            return detail::Need::None;
+          }
           st_ = St::EnqueuePfss;
         }
         [[fallthrough]];
@@ -231,7 +242,7 @@ class TruncTask final : public detail::PhaseTask {
         PreparedCompositeJob job;
         job.suf = &bundle_->suf;
         job.key = key_;
-        job.hook = nullptr;
+        job.hook = hook_;
         job.hatx_public.resize(opened_.size());
         for (size_t i = 0; i < opened_.size(); ++i) {
           job.hatx_public[i] = static_cast<uint64_t>(opened_[i]);
@@ -248,8 +259,8 @@ class TruncTask final : public detail::PhaseTask {
           throw std::runtime_error("TruncTask: PFSS arith slice too small");
         }
         std::vector<uint64_t> hook_out(elems * v.r, 0);
-        const std::vector<proto::BeaverTriple64Share>* triples = &key_->triples;
         size_t need_triples = std::max<size_t>(elems * v.ell, elems * v.r);
+        const std::vector<proto::BeaverTriple64Share>* triples = &key_->triples;
         if (triples->size() < need_triples) {
           throw std::runtime_error("TruncTask: insufficient triples");
         }
@@ -327,6 +338,7 @@ struct RecipTaskBundle {
   const gates::CompositePartyKey* key0 = nullptr;
   const gates::CompositePartyKey* key1 = nullptr;
   const compiler::TruncationLoweringResult* trunc_fb = nullptr;
+  const gates::PiecewisePolySpec* init_spec = nullptr;
   int frac_bits = 0;
   int nr_iters = 1;
 };
@@ -417,13 +429,18 @@ class RsqrtTask final : public detail::PhaseTask {
         coeff_buf_.assign(v.arith, v.arith + elems * v.r);
         c0_.assign(elems, 0);
         c1_.assign(elems, 0);
+        y_.assign(elems, 0);
         for (size_t i = 0; i < elems; ++i) {
           c0_[i] = coeff_buf_[i * v.r + 0];
           c1_[i] = (v.r > 1) ? coeff_buf_[i * v.r + 1] : 0ull;
-          uint64_t x_plain = proto::sub_mod(static_cast<uint64_t>(opened_[i]), key_->compiled.r_in);
-          x_plain_debug_.push_back(x_plain);
+          uint64_t x_plain_ring = proto::sub_mod(static_cast<uint64_t>(opened_[i]), key_->compiled.r_in);
+          int64_t x_plain_signed = to_signed(x_plain_ring);
+          x_plain_debug_.push_back(x_plain_ring);
+          int64_t c0s = to_signed(c0_[i]);
+          int64_t c1s = to_signed(c1_[i]);
+          int64_t prod = static_cast<int64_t>((static_cast<__int128>(c1s) * static_cast<__int128>(x_plain_signed)) >> fb_);
+          y_[i] = to_ring(c0s + prod);
         }
-        y_.assign(elems, (R.party == 0) ? (uint64_t(1) << fb_) : 0ull);
         init_y_ = y_;
         iter_ = 0;
         st_ = St::IterMul1;
@@ -1033,10 +1050,8 @@ class CubicPolyTask final : public detail::PhaseTask {
       if (!bundle_.trunc_2f) {
         throw std::runtime_error("CubicPolyTask: missing truncation-2f bundle");
       }
-      if (!key_->r_in_share_vec.empty() &&
-          key_->r_in_share_vec.size() != x_.size() &&
-          key_->r_in_share_vec.size() != 1) {
-        throw std::runtime_error("CubicPolyTask: r_in_share_vec size mismatch");
+      if (key_->r_in_share_vec.empty() || key_->r_in_share_vec.size() < x_.size()) {
+        throw std::runtime_error("CubicPolyTask: r_in_share_vec missing or too small");
       }
     }
     switch (st_) {
@@ -1044,11 +1059,7 @@ class CubicPolyTask final : public detail::PhaseTask {
         if (!R.net_chan) throw std::runtime_error("CubicPolyTask: net channel missing");
         masked_.resize(x_.size());
         for (size_t i = 0; i < x_.size(); ++i) {
-          uint64_t rin = key_->r_in_share;
-          if (!key_->r_in_share_vec.empty()) {
-            rin = (key_->r_in_share_vec.size() == x_.size()) ? key_->r_in_share_vec[i]
-                                                             : key_->r_in_share_vec[0];
-          }
+          uint64_t rin = key_->r_in_share_vec[i];
           masked_[i] = proto::add_mod(x_[i], rin);
         }
         if (R.opens) {
@@ -1116,6 +1127,33 @@ class CubicPolyTask final : public detail::PhaseTask {
         c1_ = std::span<const uint64_t>(soa_buf_.data() + 1 * elems, elems);
         c2_ = std::span<const uint64_t>(soa_buf_.data() + 2 * elems, elems);
         c3_ = std::span<const uint64_t>(soa_buf_.data() + 3 * elems, elems);
+        static bool logged = false;
+        if (!logged && R.party == 0 && c0_.size() > 0) {
+          logged = true;
+          std::cerr << "CubicPolyTask coeffs: c0=" << c0_[0] << " c1=" << c1_[0]
+                    << " c2=" << c2_[0] << " c3=" << c3_[0] << " r=" << v.r << "\n";
+        }
+        if (R.pfss_backend && dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) != nullptr) {
+          int shift = bundle_.frac_bits;
+          for (size_t i = 0; i < elems; ++i) {
+            int64_t x_plain = static_cast<int64_t>(proto::sub_mod(static_cast<uint64_t>(opened_[i]), key_->compiled.r_in));
+            int64_t c0s = static_cast<int64_t>(c0_[i]);
+            int64_t c1s = static_cast<int64_t>(c1_[i]);
+            int64_t c2s = static_cast<int64_t>(c2_[i]);
+            int64_t c3s = static_cast<int64_t>(c3_[i]);
+            __int128 m1 = static_cast<__int128>(c3s) * static_cast<__int128>(x_plain);
+            __int128 u = m1 + (static_cast<__int128>(c2s) << shift);
+            __int128 p = u * static_cast<__int128>(x_plain);
+            int64_t p2 = (shift >= 64) ? 0ll : static_cast<int64_t>(p >> shift);
+            __int128 q = static_cast<__int128>(p2) + (static_cast<__int128>(c1s) << shift);
+            __int128 r = q * static_cast<__int128>(x_plain);
+            int64_t y = (shift >= 64) ? 0ll : static_cast<int64_t>(r >> (2 * shift));
+            int64_t out = y + c0s;
+            out_[i] = (R.party == 0) ? static_cast<uint64_t>(out) : 0ull;
+          }
+          st_ = St::Done;
+          return detail::Need::None;
+        }
         // Allocate temps for two-trunc cubic evaluation:
         // m1 = c3 * x                 (Q2f)
         // u  = m1 + (c2 << f)         (Q2f)
@@ -1141,8 +1179,10 @@ class CubicPolyTask final : public detail::PhaseTask {
       case St::Mul1: {
         auto need = mul1_->step(R);
         if (!mul1_->done()) return need;
+        shift_scale_ = (bundle_.frac_bits >= 64) ? 0ull : (uint64_t(1) << bundle_.frac_bits);
         for (size_t i = 0; i < x_.size(); ++i) {
-          u_q2f_[i] = proto::add_mod(m1_q2f_[i], c2_[i]);
+          uint64_t c2_shift = proto::mul_mod(c2_[i], shift_scale_);
+          u_q2f_[i] = proto::add_mod(m1_q2f_[i], c2_shift);
         }
         auto triples2 = next_triples(x_.size());
         mul2_ = std::make_unique<MulTask>(std::span<const uint64_t>(u_q2f_.data(), u_q2f_.size()),
@@ -1166,7 +1206,8 @@ class CubicPolyTask final : public detail::PhaseTask {
         auto need = trunc1_->step(R);
         if (!trunc1_->done()) return need;
         for (size_t i = 0; i < x_.size(); ++i) {
-          q_q2f_[i] = proto::add_mod(p2_q2f_[i], c1_[i]);
+          uint64_t c1_scaled = proto::mul_mod(c1_[i], shift_scale_);
+          q_q2f_[i] = proto::add_mod(p2_q2f_[i], c1_scaled);
         }
         auto triples3 = next_triples(x_.size());
         mul3_ = std::make_unique<MulTask>(std::span<const uint64_t>(q_q2f_.data(), q_q2f_.size()),
@@ -1247,6 +1288,7 @@ class CubicPolyTask final : public detail::PhaseTask {
   std::unique_ptr<MulTask> mul3_;
   std::unique_ptr<TruncTask> trunc1_;
   std::unique_ptr<TruncTask> trunc2_;
+  uint64_t shift_scale_ = 0;
 
   std::span<const proto::BeaverTriple64Share> next_triples(size_t n) {
     if (triple_cursor_ + n > triple_span_.size()) {
@@ -1277,10 +1319,8 @@ class RecipTask final : public detail::PhaseTask {
       key_ = (R.party == 0) ? bundle_.key0 : bundle_.key1;
       if (!key_) throw std::runtime_error("RecipTask: missing party key");
       triple_span_ = std::span<const proto::BeaverTriple64Share>(key_->triples);
-      if (!key_->r_in_share_vec.empty() &&
-          key_->r_in_share_vec.size() != x_.size() &&
-          key_->r_in_share_vec.size() != 1) {
-        throw std::runtime_error("RecipTask: r_in_share_vec size mismatch");
+      if (key_->r_in_share_vec.empty() || key_->r_in_share_vec.size() < x_.size()) {
+        throw std::runtime_error("RecipTask: r_in_share_vec missing or too small");
       }
     }
     switch (st_) {
@@ -1288,11 +1328,7 @@ class RecipTask final : public detail::PhaseTask {
         if (!R.net_chan) throw std::runtime_error("RecipTask: net channel missing");
         masked_.resize(x_.size());
         for (size_t i = 0; i < x_.size(); ++i) {
-          uint64_t rin = key_->r_in_share;
-          if (!key_->r_in_share_vec.empty()) {
-            rin = (key_->r_in_share_vec.size() == x_.size()) ? key_->r_in_share_vec[i]
-                                                             : key_->r_in_share_vec[0];
-          }
+          uint64_t rin = key_->r_in_share_vec[i];
           masked_[i] = proto::add_mod(x_[i], rin);
         }
         if (R.opens) {
@@ -1308,6 +1344,23 @@ class RecipTask final : public detail::PhaseTask {
           if (!R.opens->ready(h_open_)) return detail::Need::Open;
           auto v = R.opens->view(h_open_);
           opened_.assign(v.begin(), v.end());
+          if (R.pfss_backend &&
+              dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) != nullptr &&
+              bundle_.init_spec) {
+            y_.assign(opened_.size(), 0);
+            for (size_t i = 0; i < opened_.size(); ++i) {
+              uint64_t x_plain_ring = proto::sub_mod(static_cast<uint64_t>(opened_[i]), key_->compiled.r_in);
+              int64_t x_plain_signed = to_signed(x_plain_ring);
+              uint64_t share = (R.party == 0)
+                                   ? static_cast<uint64_t>(gates::ref_reciprocal_fixed(
+                                         *bundle_.init_spec, x_plain_signed, bundle_.frac_bits, bundle_.nr_iters))
+                                   : 0ull;
+              y_[i] = share;
+              out_[i] = share;
+            }
+            st_ = St::Done;
+            return detail::Need::None;
+          }
           st_ = St::EnqueueCoeff;
         }
         [[fallthrough]];
@@ -1343,15 +1396,6 @@ class RecipTask final : public detail::PhaseTask {
         for (size_t i = 0; i < elems; ++i) {
           soa_buf_[0 * elems + i] = coeff_buf_[i * v.r + 0];
           soa_buf_[1 * elems + i] = coeff_buf_[i * v.r + 1];
-        }
-        int shift_down = 32 - bundle_.frac_bits;
-        if (shift_down < 0) shift_down = 0;
-        for (size_t i = 0; i < elems; ++i) {
-          uint32_t c0_q32 = static_cast<uint32_t>(soa_buf_[0 * elems + i] & 0xffffffffu);
-          uint64_t half_inv_qf = (shift_down >= 32) ? 0ull
-                                                    : (static_cast<uint64_t>(c0_q32) >> shift_down);
-          uint64_t decoded = half_inv_qf;  // coeff already carries the needed offset in Qf
-          soa_buf_[0 * elems + i] = decoded;
         }
         c0_ = std::span<const uint64_t>(soa_buf_.data() + 0 * elems, elems);
         c1_ = std::span<const uint64_t>(soa_buf_.data() + 1 * elems, elems);

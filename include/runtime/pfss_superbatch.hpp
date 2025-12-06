@@ -133,6 +133,7 @@ class PfssSuperBatch {
 
   bool empty() const { return jobs_.empty(); }
   bool has_pending() const { return !jobs_.empty() && !flushed_; }
+  bool has_flushed() const { return flushed_; }
   // Ready check for callers using multi-wave task scheduling.
   bool ready(const PfssHandle& h) const;
 

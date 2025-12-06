@@ -77,11 +77,12 @@ inline NexpCompositeKeys dealer_make_nexp_composite_keys(proto::PfssBackend& bac
 inline NexpTaskMaterial dealer_make_nexp_task_material(proto::PfssBackendBatch& backend,
                                                        const NExpGateParams& params,
                                                        std::mt19937_64& rng,
-                                                       size_t triple_need = 0) {
+                                                       size_t triple_need = 0,
+                                                       size_t batch_N = 1) {
   auto spec = make_nexp_spec(params);
   auto suf_gate = suf::build_silu_suf_from_piecewise(spec);
   std::vector<uint64_t> r_out(static_cast<size_t>(suf_gate.r_out), 0ull);
-  auto kp = gates::composite_gen_backend_with_masks(suf_gate, backend, rng, rng(), r_out);
+  auto kp = gates::composite_gen_backend_with_masks(suf_gate, backend, rng, rng(), r_out, batch_N);
   kp.k0.compiled.gate_kind = compiler::GateKind::NExp;
   kp.k1.compiled.gate_kind = compiler::GateKind::NExp;
 
@@ -89,9 +90,9 @@ inline NexpTaskMaterial dealer_make_nexp_task_material(proto::PfssBackendBatch& 
   // nExp input is clamped to [0,16]; downstream products stay well within GapARS margin.
   p.kind = compiler::GateKind::GapARS;
   p.frac_bits = params.frac_bits;
-  auto trunc_f = compiler::lower_truncation_gate(backend, rng, p);
+  auto trunc_f = compiler::lower_truncation_gate(backend, rng, p, batch_N);
   p.frac_bits = 2 * params.frac_bits;
-  auto trunc_2f = compiler::lower_truncation_gate(backend, rng, p);
+  auto trunc_2f = compiler::lower_truncation_gate(backend, rng, p, batch_N);
 
   if (triple_need > 0) {
     ensure_beaver_triples(kp, triple_need, rng);

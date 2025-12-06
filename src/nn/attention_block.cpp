@@ -196,10 +196,12 @@ void attention_forward(const AttentionConfig& cfg,
 
   std::vector<uint64_t> qkv(B * T * 3 * D, 0);
 
+  compiler::RangeInterval q_range = compiler::RangeInterval::whole(true);
   if (ctx) {
     compiler::Scale q_scale = make_scale(fb, true);
     compiler::RangeInterval x_range = compiler::RangeInterval::whole(true);
     SecretTensor x_t = make_secret_tensor(ctx, X_share, q_scale, x_range);
+    q_range = x_range;
 
     compiler::MatmulAttrs qkv_attrs;
     qkv_attrs.M = B * T;
@@ -227,6 +229,7 @@ void attention_forward(const AttentionConfig& cfg,
     SecretTensor qkv_t =
         record_rescale(ctx, qkv_acc, qkv_rescale_attrs, q_scale, qkv_range,
                        view2(qkv.data(), B * T, 3 * D));
+    q_range = qkv_t.range;
 
     compiler::MatmulAttrs out_attrs;
     out_attrs.M = B * T;
@@ -252,6 +255,9 @@ void attention_forward(const AttentionConfig& cfg,
     compiler::RangeInterval out_range =
         compiler::propagate_matmul_out(qkv_t.range, out_attrs.w_range, out_attrs.K, fb);
     (void)record_rescale(ctx, out_acc, out_rescale_attrs, q_scale, out_range, Y_share);
+    (void)out_range;
+    // q_range persists for downstream range use.
+    (void)q_range;
   }
 
   assert(D == H * Dh);
@@ -330,18 +336,25 @@ void attention_forward(const AttentionConfig& cfg,
     nexp_mat = gates::dealer_make_nexp_task_material(ctx->trunc_ctx->backend(),
                                                      nexp_params,
                                                      rng,
-                                                     triple_need);
+                                                     triple_need,
+                                                     static_cast<size_t>(B * H * cache.S_max));
     nexp_bundle = gates::make_nexp_cubic_bundle(*nexp_mat, fb);
-    recip_mat = gates::dealer_make_recip_task_material(ctx->trunc_ctx->backend(), fb, /*nr_iters=*/1, rng);
+    recip_mat = gates::dealer_make_recip_task_material(ctx->trunc_ctx->backend(),
+                                                       fb,
+                                                       /*nr_iters=*/1,
+                                                       rng,
+                                                       static_cast<size_t>(B * H));
     recip_bundle = gates::make_recip_bundle(*recip_mat);
     compiler::GateParams gap_p;
     gap_p.kind = compiler::GateKind::GapARS;
     gap_p.frac_bits = fb;
-    prob_gapars = compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng, gap_p);
+    prob_gapars = compiler::lower_truncation_gate(
+        ctx->trunc_ctx->backend(), rng, gap_p, static_cast<size_t>(B * H * cache.S_max));
     compiler::GateParams faithful_p;
     faithful_p.kind = compiler::GateKind::FaithfulTR;
     faithful_p.frac_bits = fb;
-    prob_faithful = compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng, faithful_p);
+    prob_faithful = compiler::lower_truncation_gate(
+        ctx->trunc_ctx->backend(), rng, faithful_p, static_cast<size_t>(B * H * cache.S_max));
     prob_choice.gapars = prob_gapars ? &*prob_gapars : nullptr;
     prob_choice.faithful = prob_faithful ? &*prob_faithful : nullptr;
     prob_choice.shift_bits = fb;
@@ -490,6 +503,7 @@ void attention_forward(const AttentionConfig& cfg,
     auto& score_cache = (party == 0) ? score_cache_p0 : score_cache_p1;
     auto& score_triples = ensure_cached_triples(score_cache, 0x73636f72u /*"scor"*/, rows * cur_len * Dh, party);
 
+    // Phase: score matmul (unscaled Q2f).
     pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
     auto score_task = std::make_unique<runtime::MatmulTask>(
         static_cast<int>(rows), static_cast<int>(Dh), static_cast<int>(cur_len),
@@ -503,16 +517,59 @@ void attention_forward(const AttentionConfig& cfg,
     pe->pfss_trunc_batch().clear();
     pe->open_collector().clear();
 
+    // Rescale scores Q2f -> Qf via truncation (no inline shift).
+    std::vector<uint64_t> score_qf(score_share.size(), 0);
+    compiler::GateParams score_trunc_p;
+    score_trunc_p.frac_bits = fb;
+    compiler::RangeInterval score_acc_range =
+        compiler::matmul_accum_range(q_range, q_range, Dh);
+    score_trunc_p.kind = compiler::select_trunc_kind(score_acc_range, fb);
+    std::mt19937_64 rng_score(0x73636f72u);
+    auto score_trunc_bundle =
+        compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng_score, score_trunc_p, score_share.size());
+    {
+      pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
+      auto trunc_task = std::make_unique<runtime::TruncTask>(
+          &score_trunc_bundle,
+          std::span<const uint64_t>(score_share.data(), score_share.size()),
+          std::span<uint64_t>(score_qf.data(), score_qf.size()));
+      pe->add_task(std::move(trunc_task));
+      pe->run(phase_R);
+      pe->pfss_coeff_batch().clear();
+      pe->pfss_trunc_batch().clear();
+      pe->open_collector().clear();
+    }
+
+    // Scale by inv_sqrt (public Qf): score_qf (Qf) * inv_sqrt (Qf) -> Q2f, then trunc to Qf.
+    std::vector<uint64_t> score_scaled_q2f(score_qf.size(), 0);
+    for (size_t i = 0; i < score_qf.size(); ++i) {
+      __int128 prod = static_cast<__int128>(to_signed(score_qf[i])) *
+                      static_cast<__int128>(inv_sqrt);
+      score_scaled_q2f[i] = to_ring(static_cast<int64_t>(prod));
+    }
+    std::vector<uint64_t> score_scaled_qf(score_qf.size(), 0);
+    {
+      pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
+      auto trunc_task = std::make_unique<runtime::TruncTask>(
+          &score_trunc_bundle,
+          std::span<const uint64_t>(score_scaled_q2f.data(), score_scaled_q2f.size()),
+          std::span<uint64_t>(score_scaled_qf.data(), score_scaled_qf.size()));
+      pe->add_task(std::move(trunc_task));
+      pe->run(phase_R);
+      pe->pfss_coeff_batch().clear();
+      pe->pfss_trunc_batch().clear();
+      pe->open_collector().clear();
+    }
+
     // Scale scores by inv_sqrt (public scalar) and prepare softmax inputs.
     // Explicit Rescale is required; legacy inline shift is disallowed.
     for (size_t row = 0; row < rows; ++row) {
       uint64_t max_share = 0;
       for (size_t s = 0; s < cur_len; ++s) {
         size_t idx = row * cur_len + s;
-        uint64_t v = score_share[idx];
-        __int128 scaled = static_cast<__int128>(to_signed(v)) * static_cast<__int128>(inv_sqrt);
-        score_share[idx] = to_ring(static_cast<int64_t>(scaled));
-        if (score_share[idx] > max_share) max_share = score_share[idx];
+        uint64_t v = score_scaled_qf[idx];
+        score_share[idx] = v;
+        if (v > max_share) max_share = v;
       }
       if (use_phase_softmax) {
         int64_t cap = static_cast<int64_t>(16ll << fb);
@@ -557,7 +614,8 @@ void attention_forward(const AttentionConfig& cfg,
       ctx_trunc_p.kind = compiler::GateKind::FaithfulTR;
       ctx_trunc_p.frac_bits = fb;
       std::mt19937_64 rng_ctx(77);
-      auto ctx_trunc = compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng_ctx, ctx_trunc_p);
+      auto ctx_trunc = compiler::lower_truncation_gate(
+          ctx->trunc_ctx->backend(), rng_ctx, ctx_trunc_p, rows * Dh);
 
       // Prepare per-row V material ahead of time.
       std::vector<std::vector<uint64_t>> v_mats(rows);

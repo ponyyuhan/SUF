@@ -177,25 +177,17 @@ void matmul_beaver_finalize(PreparedMatmulBeaver& prep,
     throw std::runtime_error("matmul_beaver_finalize: truncation backend set but no plan provided");
   }
 
-  if (params.require_truncation && !trunc_requested) {
-    throw std::runtime_error("matmul_beaver_finalize: truncation required but no backend/plan provided");
-  }
-
-  if (!trunc_requested) {
-    if (!params.allow_local_shift) {
-      throw std::runtime_error("matmul_beaver_finalize: local shift fallback disallowed");
+  if (!trunc_requested || params.require_truncation) {
+    if (!trunc_requested) {
+      throw std::runtime_error("matmul_beaver_finalize: truncation required but no backend/plan provided");
     }
-    for (size_t i = 0; i < total; ++i) {
-      prep.Y_share.data[i] = to_ring(static_cast<int64_t>(to_signed(acc_share[i]) >> params.frac_bits));
+    if (!bundle_ptr) {
+      throw std::runtime_error("matmul_beaver_finalize: truncation bundle missing");
     }
-    return;
   }
 
   if (plan_ptr && plan_ptr->batch != total) {
     throw std::runtime_error("matmul_beaver_finalize: truncation plan batch mismatch");
-  }
-  if (!bundle_ptr) {
-    throw std::runtime_error("matmul_beaver_finalize: truncation bundle missing");
   }
   const auto& bundle = *bundle_ptr;
   const auto& key = (party == 0) ? bundle.keys.k0 : bundle.keys.k1;

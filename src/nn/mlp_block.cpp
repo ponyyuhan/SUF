@@ -163,7 +163,11 @@ void mlp_forward(const MLPConfig& cfg,
         std::span<uint64_t>(hidden_scaled.data(), hidden_scaled.size()));
     std::mt19937_64 rng2(0);
     auto mat = gates::dealer_make_silu_task_material(
-        ctx->trunc_ctx->backend(), cfg.frac_bits, rng2, 3 * hidden_scaled.size());
+        ctx->trunc_ctx->backend(),
+        cfg.frac_bits,
+        rng2,
+        3 * hidden_scaled.size(),
+        hidden_scaled.size());
     runtime::CubicPolyBundle bundle{
         &mat.suf, &mat.keys.k0, &mat.keys.k1, &mat.trunc_f, &mat.trunc_2f, cfg.frac_bits};
     auto silu_task = std::make_unique<runtime::CubicPolyTask>(

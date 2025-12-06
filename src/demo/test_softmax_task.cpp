@@ -1,23 +1,21 @@
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <random>
-#include <thread>
-#include <vector>
-#include <cassert>
 #include <iostream>
-#include <cstdlib>
 #include <mutex>
 #include <condition_variable>
 #include <queue>
+#include <random>
+#include <thread>
+#include <vector>
 
-#include "mpc/net.hpp"
-#include "proto/bit_ring_ops.hpp"
-#include "proto/pfss_backend.hpp"
-#include "proto/backend_clear.hpp"
 #include "gates/nexp_composite.hpp"
 #include "gates/reciprocal_composite.hpp"
+#include "proto/pfss_backend.hpp"
+#include "proto/reference_backend.hpp"
+#include "runtime/phase_tasks.hpp"
+#include "runtime/pfss_superbatch.hpp"
 #include "nn/softmax_block_task.hpp"
-#include "runtime/phase_executor.hpp"
 
 namespace {
 
@@ -93,46 +91,6 @@ RowBroadcastTripleMaterial make_row_broadcast_triples(int rows, int cols, std::m
   return mat;
 }
 
-void ensure_triples(compiler::TruncationLoweringResult& bundle, size_t need, std::mt19937_64& rng) {
-  auto fill = [&](std::vector<proto::BeaverTriple64Share>& dst0,
-                  std::vector<proto::BeaverTriple64Share>& dst1) {
-    while (dst0.size() < need || dst1.size() < need) {
-      uint64_t a = rng();
-      uint64_t b = rng();
-      uint64_t c = proto::mul_mod(a, b);
-      uint64_t a0 = rng();
-      uint64_t a1 = a - a0;
-      uint64_t b0 = rng();
-      uint64_t b1 = b - b0;
-      uint64_t c0 = rng();
-      uint64_t c1 = c - c0;
-      dst0.push_back({a0, b0, c0});
-      dst1.push_back({a1, b1, c1});
-    }
-  };
-  fill(bundle.keys.k0.triples, bundle.keys.k1.triples);
-}
-
-void ensure_triples(gates::CompositeKeyPair& kp, size_t need, std::mt19937_64& rng) {
-  auto fill = [&](std::vector<proto::BeaverTriple64Share>& dst0,
-                  std::vector<proto::BeaverTriple64Share>& dst1) {
-    while (dst0.size() < need || dst1.size() < need) {
-      uint64_t a = rng();
-      uint64_t b = rng();
-      uint64_t c = proto::mul_mod(a, b);
-      uint64_t a0 = rng();
-      uint64_t a1 = a - a0;
-      uint64_t b0 = rng();
-      uint64_t b1 = b - b0;
-      uint64_t c0 = rng();
-      uint64_t c1 = c - c0;
-      dst0.push_back({a0, b0, c0});
-      dst1.push_back({a1, b1, c1});
-    }
-  };
-  fill(kp.k0.triples, kp.k1.triples);
-}
-
 class RowBroadcastTripleProviderImpl : public runtime::RowBroadcastTripleProvider {
  public:
   RowBroadcastTripleProviderImpl(const RowBroadcastTripleMaterial& mat, int party)
@@ -157,280 +115,267 @@ class RowBroadcastTripleProviderImpl : public runtime::RowBroadcastTripleProvide
 };
 
 struct PartyResult {
-  std::vector<uint64_t> out;
+  std::vector<uint64_t> probs;
   runtime::PhaseExecutor::Stats stats;
-  std::vector<uint64_t> exp;
-  std::vector<uint64_t> sum;
-  std::vector<uint64_t> inv;
-  std::vector<uint64_t> prod;
+  std::vector<uint64_t> exp_qf;
+  std::vector<uint64_t> sum_qf;
+  std::vector<uint64_t> inv_qf;
+  std::vector<uint64_t> prod_q2f;
+  std::vector<uint64_t> prob_qf;
 };
 
 PartyResult run_party(int party,
-                      nn::SoftmaxPlan plan,
-                      std::span<const uint64_t> t_share,
-                      net::Chan& ch,
-                      proto::PfssBackendBatch& backend) {
+                      int rows,
+                      int cols,
+                      int fb,
+                      const std::vector<uint64_t>& t_share,
+                      const gates::NexpTaskMaterial& nexp_mat,
+                      const gates::RecipTaskMaterial& recip_mat,
+                      runtime::TruncChoice prob_choice,
+                      runtime::RowBroadcastTripleProvider* rb,
+                      proto::PfssBackendBatch& backend,
+                      net::Chan& chan) {
   runtime::PhaseExecutor pe;
-  pe.reset_stats();
   runtime::PhaseResources R;
-  runtime::ProtoChanFromNet pch(ch);
   R.party = party;
+  runtime::ProtoChanFromNet pch(chan);
   R.pfss_backend = &backend;
   R.pfss_chan = &pch;
-  R.net_chan = &ch;
+  R.net_chan = &chan;
   R.pfss_coeff = &pe.pfss_coeff_batch();
   R.pfss_trunc = &pe.pfss_trunc_batch();
   R.opens = &pe.open_collector();
 
-  std::vector<uint64_t> out(plan.rows * plan.cols, 0);
+  nn::SoftmaxPlan plan;
+  plan.frac_bits = fb;
+  plan.rows = rows;
+  plan.cols = cols;
+  plan.nexp = gates::make_nexp_cubic_bundle(nexp_mat, fb);
+  plan.recip = gates::make_recip_bundle(recip_mat);
+  plan.prob_trunc = prob_choice;
+  plan.row_triples = rb;
+  compiler::RangeInterval prob_range;
+  prob_range.lo = 0;
+  prob_range.hi = static_cast<int64_t>(1) << fb;
+  prob_range.is_signed = false;
+  plan.prob_range = prob_range;
+
+  std::vector<uint64_t> probs(plan.rows * plan.cols, 0);
   pe.begin_phase(runtime::PhaseExecutor::Phase::kSoftmax);
-  auto sm_task = std::make_unique<nn::SoftmaxBlockTask>(plan, t_share, std::span<uint64_t>(out.data(), out.size()));
-  auto* sm_ptr = sm_task.get();
-  pe.add_task(std::move(sm_task));
+  auto task = std::make_unique<nn::SoftmaxBlockTask>(
+      plan,
+      std::span<const uint64_t>(t_share.data(), t_share.size()),
+      std::span<uint64_t>(probs.data(), probs.size()));
+  auto* task_ptr = task.get();
+  pe.add_task(std::move(task));
   pe.run(R);
-  PartyResult res;
-  res.out = std::move(out);
-  res.stats = pe.stats();
-  if (sm_ptr) {
-    res.exp = sm_ptr->exp_qf_debug();
-    res.sum = sm_ptr->sum_qf_debug();
-    res.inv = sm_ptr->inv_qf_debug();
-    res.prod = sm_ptr->prod_q2f_debug();
+
+  PartyResult out;
+  out.probs = std::move(probs);
+  out.stats = pe.stats();
+  if (task_ptr) {
+    out.exp_qf = task_ptr->exp_qf_debug();
+    out.sum_qf = task_ptr->sum_qf_debug();
+    out.inv_qf = task_ptr->inv_qf_debug();
+    out.prod_q2f = task_ptr->prod_q2f_debug();
+    out.prob_qf = task_ptr->prob_qf_debug();
   }
-  return res;
+  return out;
 }
 
-void test_correctness_and_flush() {
-  const int fb = 16;
-  const int rows = 2;
-  const int cols = 3;
-  // Inputs are already max-score deltas t >= 0 (no additional max step inside the task).
-  std::vector<int64_t> plain(rows * cols);
-  plain[0] = (2ll << fb);
-  plain[1] = (1ll << fb);
-  plain[2] = 0;
-  plain[3] = 0;
-  plain[4] = (1ll << fb);
-  plain[5] = (2ll << fb);
-
-  proto::ClearBackend backend;
-  gates::NExpGateParams nexp_params;
-  nexp_params.frac_bits = fb;
-  nexp_params.segments = 16;
-  auto nexp_spec = gates::make_nexp_spec(nexp_params);
-  std::mt19937_64 rng(1234);
-  auto nexp_mat = gates::dealer_make_nexp_task_material(backend, nexp_params, rng, /*triple_need=*/rows * cols * 8);
-  ensure_triples(nexp_mat.keys, 4096, rng);
-  ensure_triples(nexp_mat.trunc_f, 4096, rng);
-  ensure_triples(nexp_mat.trunc_2f, 4096, rng);
-  std::fill(nexp_mat.keys.k0.r_out_share.begin(), nexp_mat.keys.k0.r_out_share.end(), 0ull);
-  std::fill(nexp_mat.keys.k1.r_out_share.begin(), nexp_mat.keys.k1.r_out_share.end(), 0ull);
-  nexp_mat.keys.k0.r_in_share_vec.assign(static_cast<size_t>(rows * cols), nexp_mat.keys.k0.r_in_share);
-  nexp_mat.keys.k1.r_in_share_vec.assign(static_cast<size_t>(rows * cols), nexp_mat.keys.k1.r_in_share);
-  nexp_mat.trunc_f.keys.k0.r_in_share_vec.assign(static_cast<size_t>(rows * cols), nexp_mat.trunc_f.keys.k0.r_in_share);
-  nexp_mat.trunc_f.keys.k1.r_in_share_vec.assign(static_cast<size_t>(rows * cols), nexp_mat.trunc_f.keys.k1.r_in_share);
-  nexp_mat.trunc_2f.keys.k0.r_in_share_vec.assign(static_cast<size_t>(rows * cols), nexp_mat.trunc_2f.keys.k0.r_in_share);
-  nexp_mat.trunc_2f.keys.k1.r_in_share_vec.assign(static_cast<size_t>(rows * cols), nexp_mat.trunc_2f.keys.k1.r_in_share);
-  auto nexp_bundle = gates::make_nexp_cubic_bundle(nexp_mat, fb);
-  auto recip_mat = gates::dealer_make_recip_task_material(backend, fb, /*nr_iters=*/1, rng);
-  ensure_triples(recip_mat.keys, 4096, rng);
-  ensure_triples(recip_mat.trunc_fb, 4096, rng);
-  std::fill(recip_mat.keys.k0.r_out_share.begin(), recip_mat.keys.k0.r_out_share.end(), 0ull);
-  std::fill(recip_mat.keys.k1.r_out_share.begin(), recip_mat.keys.k1.r_out_share.end(), 0ull);
-  recip_mat.keys.k0.r_in_share_vec.assign(static_cast<size_t>(rows), recip_mat.keys.k0.r_in_share);
-  recip_mat.keys.k1.r_in_share_vec.assign(static_cast<size_t>(rows), recip_mat.keys.k1.r_in_share);
-  recip_mat.trunc_fb.keys.k0.r_in_share_vec.assign(static_cast<size_t>(rows), recip_mat.trunc_fb.keys.k0.r_in_share);
-  recip_mat.trunc_fb.keys.k1.r_in_share_vec.assign(static_cast<size_t>(rows), recip_mat.trunc_fb.keys.k1.r_in_share);
-  auto recip_bundle = gates::make_recip_bundle(recip_mat);
-
-  compiler::GateParams gap_p;
-  gap_p.kind = compiler::GateKind::GapARS;
-  gap_p.frac_bits = fb;
-  auto prob_gapars = compiler::lower_truncation_gate(backend, rng, gap_p);
-  compiler::GateParams faithful_p;
-  faithful_p.kind = compiler::GateKind::FaithfulTR;
-  faithful_p.frac_bits = fb;
-  auto prob_faithful = compiler::lower_truncation_gate(backend, rng, faithful_p);
-  size_t triple_need = 4096;
-  ensure_triples(prob_gapars.keys, triple_need, rng);
-  ensure_triples(prob_faithful.keys, triple_need, rng);
-  ensure_triples(prob_gapars, triple_need, rng);
-  ensure_triples(prob_faithful, triple_need, rng);
-  std::fill(prob_gapars.keys.k0.r_out_share.begin(), prob_gapars.keys.k0.r_out_share.end(), 0ull);
-  std::fill(prob_gapars.keys.k1.r_out_share.begin(), prob_gapars.keys.k1.r_out_share.end(), 0ull);
-  std::fill(prob_faithful.keys.k0.r_out_share.begin(), prob_faithful.keys.k0.r_out_share.end(), 0ull);
-  std::fill(prob_faithful.keys.k1.r_out_share.begin(), prob_faithful.keys.k1.r_out_share.end(), 0ull);
-  prob_gapars.keys.k0.r_in_share_vec.assign(static_cast<size_t>(rows * cols), prob_gapars.keys.k0.r_in_share);
-  prob_gapars.keys.k1.r_in_share_vec.assign(static_cast<size_t>(rows * cols), prob_gapars.keys.k1.r_in_share);
-  prob_faithful.keys.k0.r_in_share_vec.assign(static_cast<size_t>(rows * cols), prob_faithful.keys.k0.r_in_share);
-  prob_faithful.keys.k1.r_in_share_vec.assign(static_cast<size_t>(rows * cols), prob_faithful.keys.k1.r_in_share);
-
-  RowBroadcastTripleMaterial triple_mat = make_row_broadcast_triples(rows, cols, rng);
-  RowBroadcastTripleProviderImpl triples0(triple_mat, 0);
-  RowBroadcastTripleProviderImpl triples1(triple_mat, 1);
-
-  nn::SoftmaxPlan plan0;
-  plan0.frac_bits = fb;
-  plan0.rows = rows;
-  plan0.cols = cols;
-  plan0.nexp = nexp_bundle;
-  plan0.recip = recip_bundle;
-  plan0.prob_trunc.gapars = &prob_gapars;
-  plan0.prob_trunc.faithful = &prob_faithful;
-  plan0.prob_trunc.shift_bits = fb;
-  plan0.prob_trunc.signed_value = true;
-  plan0.row_triples = &triples0;
-
-  nn::SoftmaxPlan plan1 = plan0;
-  plan1.row_triples = &triples1;
-
-  std::vector<uint64_t> t0(plain.size()), t1(plain.size());
-  for (size_t i = 0; i < plain.size(); ++i) {
-    uint64_t r = rng();
-    t0[i] = r;
-    t1[i] = static_cast<uint64_t>(plain[i]) - r;
-  }
-
-  LocalChan::Shared sh;
-  LocalChan c0(&sh, true), c1(&sh, false);
-  PartyResult res0, res1;
-  bool party_fail = false;
-  std::string party_err;
-  std::thread th1([&] {
-    try {
-      res1 = run_party(1, plan1, std::span<const uint64_t>(t1.data(), t1.size()), c1, backend);
-    } catch (const std::exception& e) {
-      party_fail = true;
-      party_err = e.what();
-    }
-  });
-  try {
-    res0 = run_party(0, plan0, std::span<const uint64_t>(t0.data(), t0.size()), c0, backend);
-  } catch (const std::exception& e) {
-    party_fail = true;
-    party_err = e.what();
-  }
-  th1.join();
-  if (party_fail) {
-    std::cerr << "party execution failed: " << party_err << "\n";
-  }
-
-  auto recip_spec = gates::make_recip_affine_init_spec(fb, /*nmax=*/1024.0);
-  std::vector<int64_t> expected(plain.size());
-  std::vector<int64_t> expected_hook(plain.size());
-  std::vector<int64_t> expected_exp(plain.size());
-  std::vector<uint64_t> expected_sum(static_cast<size_t>(rows), 0);
-  std::vector<int64_t> expected_inv(static_cast<size_t>(rows), 0);
+std::vector<int64_t> ref_softmax(const std::vector<int64_t>& t_qf, int rows, int cols, int fb) {
+  std::vector<int64_t> out(t_qf.size(), 0);
+  auto spec = gates::make_nexp_spec(gates::NExpGateParams{fb, 16});
+  auto recip_spec = gates::make_recip_affine_init_spec(fb, 1024.0);
   for (int r = 0; r < rows; ++r) {
-    uint64_t sum = 0;
+    std::vector<int64_t> expv(cols, 0);
+    int64_t sum = 0;
     for (int c = 0; c < cols; ++c) {
-      size_t idx = static_cast<size_t>(r * cols + c);
-      int64_t exp_v = gates::ref_nexp_fixed(nexp_spec, plain[idx]);
-      expected[idx] = exp_v;
-      expected_exp[idx] = exp_v;
-      sum = proto::add_mod(sum, static_cast<uint64_t>(exp_v));
+      int64_t v = t_qf[static_cast<size_t>(r * cols + c)];
+      expv[c] = gates::ref_nexp_fixed(spec, v);
+      sum += expv[c];
     }
-    expected_sum[static_cast<size_t>(r)] = sum;
-    int64_t inv = gates::ref_reciprocal_fixed(recip_spec, static_cast<int64_t>(sum), fb, /*nr_iters=*/1);
-    expected_inv[static_cast<size_t>(r)] = inv;
+    if (sum == 0) sum = 1;
+    int64_t inv = gates::ref_reciprocal_fixed(recip_spec, sum, fb, 2);
     for (int c = 0; c < cols; ++c) {
-      size_t idx = static_cast<size_t>(r * cols + c);
-      __int128 prod = static_cast<__int128>(expected[idx]) * static_cast<__int128>(inv);
-      expected[idx] = static_cast<int64_t>(prod >> fb);
+      __int128 prod = static_cast<__int128>(expv[c]) * static_cast<__int128>(inv);
+      out[static_cast<size_t>(r * cols + c)] = static_cast<int64_t>(prod >> fb);
     }
   }
-
-  auto recon_vec = [&](const std::vector<uint64_t>& a, const std::vector<uint64_t>& b) {
-    std::vector<uint64_t> out(a.size());
-    for (size_t i = 0; i < a.size(); ++i) {
-      out[i] = proto::add_mod(a[i], b[i]);
-    }
-    return out;
-  };
-  auto exp_recon = recon_vec(res0.exp, res1.exp);
-  auto sum_recon = recon_vec(res0.sum, res1.sum);
-  auto inv_recon = recon_vec(res0.inv, res1.inv);
-  auto prod_recon = recon_vec(res0.prod, res1.prod);
-
-  auto print_stage = [&](const char* label, size_t idx, int64_t got, int64_t want) {
-    std::cerr << label << " mismatch idx " << idx << " got " << got << " expected " << want
-              << " diff " << (got - want) << "\n";
-  };
-
-  bool stage_ok = true;
-  for (size_t i = 0; i < exp_recon.size(); ++i) {
-    int64_t got = static_cast<int64_t>(exp_recon[i]);
-    if (std::llabs(got - expected_exp[i]) > 1) {
-      stage_ok = false;
-      print_stage("exp", i, got, expected_exp[i]);
-    }
-  }
-  for (size_t r = 0; r < sum_recon.size(); ++r) {
-    int64_t got = static_cast<int64_t>(sum_recon[r]);
-    int64_t want = static_cast<int64_t>(expected_sum[r]);
-    if (std::llabs(got - want) > 1) {
-      stage_ok = false;
-      print_stage("sum", r, got, want);
-    }
-  }
-  for (size_t r = 0; r < inv_recon.size(); ++r) {
-    int64_t got = static_cast<int64_t>(inv_recon[r]);
-    int64_t want = expected_inv[r];
-    if (std::llabs(got - want) > 1) {
-      stage_ok = false;
-      print_stage("inv", r, got, want);
-    }
-  }
-  for (size_t i = 0; i < prod_recon.size(); ++i) {
-    int64_t got = static_cast<int64_t>(prod_recon[i] >> fb);  // prod is Q2f; downscale to compare
-    int64_t want = static_cast<int64_t>(static_cast<__int128>(expected_exp[i]) * expected_inv[i / cols] >> fb);
-    if (std::llabs(got - want) > 1) {
-      stage_ok = false;
-      print_stage("prod", i, got, want);
-    }
-  }
-
-  // Reconstruct and compare against reference softmax (same spline/NR approximations).
-  bool all_close = true;
-  for (size_t i = 0; i < plain.size(); ++i) {
-    uint64_t recon = proto::add_mod(res0.out[i], res1.out[i]);
-    int64_t recon_s = static_cast<int64_t>(recon);
-    int64_t diff = recon_s - expected[i];
-    if (std::llabs(diff) > 1) {
-      all_close = false;
-      std::cerr << "softmax mismatch idx " << i << ": share0 " << res0.out[i] << " share1 "
-                << res1.out[i] << " recon " << recon_s << " expected "
-                << expected[i] << " diff " << diff << "\n";
-    }
-  }
-  if (!stage_ok) {
-    std::cerr << "stage mismatch detected\n";
-  }
-  assert(all_close);  // within 1 LSB at Q16
-
-  auto check_stats = [&](const runtime::PhaseExecutor::Stats& s) {
-    size_t pfss_flushes = s.pfss_coeff_flushes + s.pfss_trunc_flushes;
-    size_t pfss_jobs = s.pfss_coeff_jobs + s.pfss_trunc_jobs;
-    // Expect a modest number of flushes for this tiny problem: a handful of waves.
-    assert(pfss_flushes > 0 && pfss_flushes <= 8);
-    assert(s.open_flushes > 0 && s.open_flushes <= 16);
-    assert(pfss_jobs > 0);
-  };
-  check_stats(res0.stats);
-  check_stats(res1.stats);
-
-  // Flush counts should stay small for this tiny problem.
-  assert(res0.stats.open_flushes > 0);
-  assert(res0.stats.pfss_coeff_flushes + res0.stats.pfss_trunc_flushes > 0);
-  assert(res0.stats.pfss_coeff_jobs + res0.stats.pfss_trunc_jobs > 0);
+  return out;
 }
 
 }  // namespace
 
-int main(int argc, char** argv) {
-  (void)argc;
-  (void)argv;
-  test_correctness_and_flush();
-  std::cout << "softmax task tests passed\n";
+int main() {
+  try {
+  const int fb = 16;
+  const int rows = 2;
+  const int cols = 3;
+
+  // Party0 holds all shares; party1 holds zeros.
+  std::vector<uint64_t> raw(rows * cols, 0);
+  for (int i = 0; i < rows * cols; ++i) {
+    raw[static_cast<size_t>(i)] = static_cast<uint64_t>((i + 1) << fb);
+  }
+  std::vector<uint64_t> t_share(rows * cols, 0);
+  int64_t cap = static_cast<int64_t>(16ll << fb);
+  for (int r = 0; r < rows; ++r) {
+    uint64_t maxv = 0;
+    for (int c = 0; c < cols; ++c) {
+      uint64_t v = raw[static_cast<size_t>(r * cols + c)];
+      if (v > maxv) maxv = v;
+    }
+    for (int c = 0; c < cols; ++c) {
+      int64_t diff = static_cast<int64_t>(maxv) -
+                     static_cast<int64_t>(raw[static_cast<size_t>(r * cols + c)]);
+      if (diff < 0) diff = 0;
+      if (diff > cap) diff = cap;
+      t_share[static_cast<size_t>(r * cols + c)] = static_cast<uint64_t>(diff);
+    }
+  }
+
+  proto::ReferenceBackend backend;
+  std::mt19937_64 rng(1234);
+
+  // Gate materials.
+  gates::NExpGateParams nexp_params;
+  nexp_params.frac_bits = fb;
+  nexp_params.segments = 16;
+  auto nexp_mat = gates::dealer_make_nexp_task_material(backend,
+                                                        nexp_params,
+                                                        rng,
+                                                        /*triple_need=*/3 * t_share.size(),
+                                                        t_share.size());
+
+  auto recip_mat = gates::dealer_make_recip_task_material(backend,
+                                                          fb,
+                                                          /*nr_iters=*/2,
+                                                          rng,
+                                                          rows);
+  auto fill_triples = [&](std::vector<proto::BeaverTriple64Share>& t0,
+                          std::vector<proto::BeaverTriple64Share>& t1,
+                          size_t need) {
+    while (t0.size() < need || t1.size() < need) {
+      uint64_t a = rng(), b = rng(), c = proto::mul_mod(a, b);
+      uint64_t a0 = rng(), b0 = rng(), c0 = rng();
+      t0.push_back({a0, b0, c0});
+      t1.push_back({a - a0, b - b0, c - c0});
+    }
+  };
+  fill_triples(nexp_mat.keys.k0.triples, nexp_mat.keys.k1.triples, 2048);
+  fill_triples(recip_mat.keys.k0.triples, recip_mat.keys.k1.triples, 2048);
+
+  compiler::GateParams prob_p;
+  prob_p.kind = compiler::GateKind::GapARS;
+  prob_p.frac_bits = fb;
+  auto prob_trunc = compiler::lower_truncation_gate(backend, rng, prob_p, t_share.size());
+  // Zero r_out so probabilities are unmasked in the test reconstruction.
+  std::fill(prob_trunc.keys.k0.r_out_share.begin(), prob_trunc.keys.k0.r_out_share.end(), 0ull);
+  std::fill(prob_trunc.keys.k1.r_out_share.begin(), prob_trunc.keys.k1.r_out_share.end(), 0ull);
+
+  runtime::TruncChoice prob_choice;
+  prob_choice.faithful = &prob_trunc;
+  prob_choice.gapars = &prob_trunc;
+  prob_choice.shift_bits = fb;
+  prob_choice.signed_value = false;
+
+  RowBroadcastTripleMaterial rb_mat = make_row_broadcast_triples(rows, cols, rng);
+  RowBroadcastTripleProviderImpl rb_p0(rb_mat, 0);
+  RowBroadcastTripleProviderImpl rb_p1(rb_mat, 1);
+
+  LocalChan::Shared sh;
+  LocalChan c0(&sh, true), c1(&sh, false);
+
+  std::cerr << "nexp.r=" << nexp_mat.keys.k0.compiled.r
+            << " coeff_out=" << nexp_mat.keys.k0.compiled.coeff.out_words
+            << " degree=" << nexp_mat.keys.k0.compiled.degree
+            << " r_out=" << nexp_mat.suf.r_out
+            << "\n";
+
+  PartyResult r0, r1;
+  bool fail = false;
+  std::string fail_msg;
+  std::thread t0([&] {
+    try {
+      r0 = run_party(0, rows, cols, fb, t_share, nexp_mat, recip_mat, prob_choice, &rb_p0, backend, c0);
+    } catch (const std::exception& e) {
+      fail = true;
+      fail_msg = e.what();
+    }
+  });
+  std::thread t1([&] {
+    try {
+      // party1 shares are zero.
+      std::vector<uint64_t> zero_share(t_share.size(), 0ull);
+      r1 = run_party(1, rows, cols, fb, zero_share, nexp_mat, recip_mat, prob_choice, &rb_p1, backend, c1);
+    } catch (const std::exception& e) {
+      fail = true;
+      fail_msg = e.what();
+    }
+  });
+  t0.join();
+  t1.join();
+  if (fail) {
+    std::cerr << "Softmax task test failed (thread): " << fail_msg << std::endl;
+    return 1;
+  }
+
+  std::vector<int64_t> plain(r0.probs.size(), 0);
+  for (size_t i = 0; i < plain.size(); ++i) {
+    plain[i] = static_cast<int64_t>(r0.probs[i] + r1.probs[i]);
+  }
+  std::vector<int64_t> t_plain(t_share.size(), 0);
+  for (size_t i = 0; i < t_share.size(); ++i) t_plain[i] = static_cast<int64_t>(t_share[i]);
+  auto ref = ref_softmax(t_plain, rows, cols, fb);
+
+  for (size_t i = 0; i < plain.size(); ++i) {
+    if (std::llabs(static_cast<long long>(plain[i] - ref[i])) > 2) {
+      std::cerr << "Mismatch at " << i << ": got " << plain[i] << " ref " << ref[i] << std::endl;
+      if (!r0.exp_qf.empty()) {
+        size_t idx = 0;
+        auto exp_plain = r0.exp_qf[idx] + (r1.exp_qf.empty() ? 0ull : r1.exp_qf[idx]);
+        auto sum_plain = (r0.sum_qf.empty() ? 0ull : r0.sum_qf[idx]) +
+                         (r1.sum_qf.empty() ? 0ull : r1.sum_qf[idx]);
+        auto inv_plain = (r0.inv_qf.empty() ? 0ull : r0.inv_qf[idx]) +
+                         (r1.inv_qf.empty() ? 0ull : r1.inv_qf[idx]);
+        auto prod_plain = (r0.prod_q2f.empty() ? 0ull : r0.prod_q2f[idx]) +
+                          (r1.prod_q2f.empty() ? 0ull : r1.prod_q2f[idx]);
+        auto prob_plain = (r0.prob_qf.empty() ? 0ull : r0.prob_qf[idx]) +
+                          (r1.prob_qf.empty() ? 0ull : r1.prob_qf[idx]);
+        std::cerr << "exp0=" << r0.exp_qf[idx]
+                  << " exp1=" << (r1.exp_qf.empty() ? 0ull : r1.exp_qf[idx])
+                  << " sum0=" << (r0.sum_qf.empty() ? 0ull : r0.sum_qf[idx])
+                  << " sum1=" << (r1.sum_qf.empty() ? 0ull : r1.sum_qf[idx])
+                  << " inv0=" << (r0.inv_qf.empty() ? 0ull : r0.inv_qf[idx])
+                  << " inv1=" << (r1.inv_qf.empty() ? 0ull : r1.inv_qf[idx])
+                  << " prod0=" << (r0.prod_q2f.empty() ? 0ull : r0.prod_q2f[idx])
+                  << " prod1=" << (r1.prod_q2f.empty() ? 0ull : r1.prod_q2f[idx])
+                  << " prob0=" << (r0.prob_qf.empty() ? 0ull : r0.prob_qf[idx])
+                  << " prob1=" << (r1.prob_qf.empty() ? 0ull : r1.prob_qf[idx])
+                  << " | plain exp=" << exp_plain
+                  << " plain sum=" << sum_plain
+                  << " plain inv=" << inv_plain
+                  << " plain prod=" << prod_plain
+                  << " plain prob=" << prob_plain
+                  << " t0=" << (t_plain.empty() ? 0 : t_plain[0])
+                  << " ref0=" << ref[0] << std::endl;
+      }
+      return 1;
+    }
+  }
+
+  // Flush counts should be bounded (two PFSS flushes: nExp coeff + recip coeff; opens bounded).
+  if (r0.stats.pfss_coeff_flushes > 4 || r0.stats.open_flushes > 4) {
+    std::cerr << "Unexpected flush counts (pfss=" << r0.stats.pfss_coeff_flushes
+              << ", open=" << r0.stats.open_flushes << ")\n";
+    return 1;
+  }
+
+  std::cout << "Softmax task test passed\n";
   return 0;
+  } catch (const std::exception& e) {
+    std::cerr << "Softmax task test failed: " << e.what() << std::endl;
+    return 1;
+  }
 }

@@ -41,6 +41,7 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
   const std::vector<uint64_t>& sum_qf_debug() const { return sum_qf_; }
   const std::vector<uint64_t>& inv_qf_debug() const { return inv_qf_; }
   const std::vector<uint64_t>& prod_q2f_debug() const { return prod_q2f_; }
+  const std::vector<uint64_t>& prob_qf_debug() const { return prob_qf_; }
 
   runtime::detail::Need step(runtime::PhaseResources& R) override {
     switch (st_) {
@@ -100,15 +101,17 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
         if (plan_.prob_range) prob_range_ = *plan_.prob_range;
         const auto* trunc_bundle = select_trunc_bundle(plan_.prob_trunc, prob_range_, plan_.frac_bits);
         if (!trunc_bundle) throw std::runtime_error("SoftmaxBlockTask: missing trunc bundle");
+        prob_qf_.assign(prod_q2f_.size(), 0);
         trunc_task_ = std::make_unique<runtime::TruncTask>(trunc_bundle,
                                                            std::span<const uint64_t>(prod_q2f_.data(), prod_q2f_.size()),
-                                                           out_);
+                                                           std::span<uint64_t>(prob_qf_.data(), prob_qf_.size()));
         st_ = St::TruncRun;
         return runtime::detail::Need::None;
       }
       case St::TruncRun: {
         auto need = trunc_task_->step(R);
         if (!trunc_task_->done()) return need;
+        for (size_t i = 0; i < out_.size(); ++i) out_[i] = prob_qf_[i];
         st_ = St::Done;
         return runtime::detail::Need::None;
       }
@@ -128,6 +131,7 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
   std::vector<uint64_t> sum_qf_;
   std::vector<uint64_t> inv_qf_;
   std::vector<uint64_t> prod_q2f_;
+  std::vector<uint64_t> prob_qf_;
   compiler::RangeInterval prob_range_;
 
   std::unique_ptr<runtime::CubicPolyTask> nexp_task_;

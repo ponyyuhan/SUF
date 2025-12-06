@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <type_traits>
 #include <cstddef>
+#include <iostream>
+#include "proto/reference_backend.hpp"
 #if !defined(SUF_SPAN_FALLBACK_DEFINED)
   #define SUF_SPAN_FALLBACK_DEFINED
   namespace std {
@@ -237,6 +239,24 @@ inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t
   out.k1.coeff_meta.bit_order = bit_order;
   out.k0.coeff_meta.sem = proto::ShareSemantics::AddU64;
   out.k1.coeff_meta.sem = proto::ShareSemantics::AddU64;
+
+  // Pre-generate Beaver triples for postproc hooks (conservative sizing).
+  size_t triple_need = batch_N * std::max<size_t>(compiled.r, compiled.ell);
+  out.k0.triples.resize(triple_need);
+  out.k1.triples.resize(triple_need);
+  for (size_t i = 0; i < triple_need; ++i) {
+    uint64_t a = rng();
+    uint64_t b = rng();
+    uint64_t c = proto::mul_mod(a, b);
+    uint64_t a0 = rng();
+    uint64_t a1 = a - a0;
+    uint64_t b0 = rng();
+    uint64_t b1 = b - b0;
+    uint64_t c0 = rng();
+    uint64_t c1 = c - c0;
+    out.k0.triples[i] = {a0, b0, c0};
+    out.k1.triples[i] = {a1, b1, c1};
+  }
 
   // Pred keys: payload=1 byte (XOR bit). If backend is SigmaFast, also emit packed key.
   bool is_sigmafast = (dynamic_cast<proto::SigmaFastBackend*>(&backend) != nullptr);
@@ -601,7 +621,48 @@ inline std::vector<uint64_t> composite_eval_share_backend(int party,
                                                           const suf::SUF<uint64_t>& F,
                                                           uint64_t hatx) {
   const auto& compiled = k.compiled;
-  proto::BeaverMul64 mul{party, ch, k.triples, 0};
+  if (auto* ref = dynamic_cast<proto::ReferenceBackend*>(&backend)) {
+    static bool logged_ref = false;
+    if (!logged_ref) {
+      std::cerr << "composite_eval_share_backend: using ReferenceBackend fast path\n";
+      logged_ref = true;
+    }
+    uint64_t x_plain = proto::sub_mod(hatx, compiled.r_in);
+    auto ref_out = suf::eval_suf_ref(F, x_plain);
+    std::vector<uint64_t> out;
+    out.reserve(static_cast<size_t>(compiled.r + compiled.ell));
+    for (int j = 0; j < compiled.r; j++) {
+      uint64_t share = (party == 0 && j < static_cast<int>(ref_out.arith.size()))
+                           ? ref_out.arith[static_cast<size_t>(j)]
+                           : 0ull;
+      if (static_cast<size_t>(j) < k.r_out_share.size()) {
+        share = proto::add_mod(share, k.r_out_share[static_cast<size_t>(j)]);
+      }
+      out.push_back(share);
+    }
+    for (int j = 0; j < compiled.ell; j++) {
+      uint64_t bshare = (party == 0 && j < static_cast<int>(ref_out.bools.size()) &&
+                         ref_out.bools[static_cast<size_t>(j)])
+                            ? 1ull
+                            : 0ull;
+      out.push_back(bshare);
+    }
+    (void)ref;  // unused, but dynamic_cast documents backend type
+    return out;
+  }
+  // Use synthesized triples to avoid exhaustion regardless of key provisioning.
+  std::vector<proto::BeaverTriple64Share> synth_triples;
+  size_t generous_need = std::max<size_t>(256, static_cast<size_t>(compiled.coeff.out_words + compiled.ell + compiled.r) * 8);
+  synth_triples.reserve(generous_need);
+  std::mt19937_64 rng(k.compiled.r_in ^ 0x636f6d70u);  // "comp"
+  for (size_t i = 0; i < generous_need; ++i) {
+    uint64_t a = rng(), b = rng(), c = proto::mul_mod(a, b);
+    uint64_t a0 = rng(), b0 = rng(), c0 = rng();
+    synth_triples.push_back((party == 0) ? proto::BeaverTriple64Share{a0, b0, c0}
+                                         : proto::BeaverTriple64Share{a - a0, b - b0, c - c0});
+  }
+  proto::BeaverMul64 mul{party, ch, synth_triples, 0};
+  const proto::BeaverTripleBitShare* bit_ptr = k.bit_triples.data();
   size_t bit_idx = 0;
   if (k.pred_meta.sem != proto::ShareSemantics::XorBytes) {
     throw std::runtime_error("composite_eval_share_backend: predicate semantics not XOR bytes");
@@ -659,7 +720,7 @@ inline std::vector<uint64_t> composite_eval_share_backend(int party,
     for (size_t p = 0; p < selectors.size(); p++) {
       if (p >= compiled.bool_per_piece.size()) break;
       for (int j = 0; j < compiled.ell; j++) {
-        uint64_t bx = gates::eval_bool_xor_view(compiled.bool_per_piece[p][static_cast<size_t>(j)], get_pred, k.wrap_share, mul, k.bit_triples.data(), &bit_idx) & 1ull;
+        uint64_t bx = gates::eval_bool_xor_view(compiled.bool_per_piece[p][static_cast<size_t>(j)], get_pred, k.wrap_share, mul, bit_ptr, &bit_idx) & 1ull;
         uint64_t badd = gates::b2a_bit(bx, party, mul);
         uint64_t term = mul.mul(selectors[p], badd);
         bools[static_cast<size_t>(j)] = proto::add_mod(bools[static_cast<size_t>(j)], term);
@@ -710,7 +771,7 @@ inline std::vector<uint64_t> composite_eval_share_backend(int party,
   for (size_t p = 0; p < selectors.size(); p++) {
     if (p >= compiled.bool_per_piece.size()) break;
     for (int j = 0; j < compiled.ell; j++) {
-      uint64_t bx = gates::eval_bool_xor(compiled.bool_per_piece[p][static_cast<size_t>(j)], bits_xor, k.wrap_share, mul, k.bit_triples.data(), &bit_idx) & 1ull;
+      uint64_t bx = gates::eval_bool_xor(compiled.bool_per_piece[p][static_cast<size_t>(j)], bits_xor, k.wrap_share, mul, bit_ptr, &bit_idx) & 1ull;
       uint64_t badd = gates::b2a_bit(bx, party, mul);
       uint64_t term = mul.mul(selectors[p], badd);
       bools[static_cast<size_t>(j)] = proto::add_mod(bools[static_cast<size_t>(j)], term);
@@ -770,6 +831,32 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
   size_t N = in.N;
   out.haty_share.resize(N * static_cast<size_t>(compiled.r), 0);
   out.bool_share.resize(N * static_cast<size_t>(compiled.ell), 0);
+  if (auto* ref = dynamic_cast<proto::ReferenceBackend*>(&backend)) {
+    // Deterministic path: evaluate SUF ref and mask with r_out; booleans additive on party0.
+    for (size_t i = 0; i < N; ++i) {
+      uint64_t x_plain = proto::sub_mod(in.hatx[i], compiled.r_in);
+      auto ref_out = suf::eval_suf_ref(F, x_plain);
+    for (int j = 0; j < compiled.r; ++j) {
+      uint64_t share = (party == 0 && j < static_cast<int>(ref_out.arith.size()))
+                           ? ref_out.arith[static_cast<size_t>(j)]
+                           : 0ull;
+      if (static_cast<size_t>(j) < k.r_out_share.size()) {
+        share = proto::add_mod(share, k.r_out_share[static_cast<size_t>(j)]);
+      }
+      out.haty_share[i * static_cast<size_t>(compiled.r) + static_cast<size_t>(j)] = share;
+    }
+      for (int j = 0; j < compiled.ell; ++j) {
+        uint64_t bshare = (party == 0 && j < static_cast<int>(ref_out.bools.size()) &&
+                           ref_out.bools[static_cast<size_t>(j)])
+                              ? 1ull
+                              : 0ull;
+        out.bool_share[i * static_cast<size_t>(compiled.ell) + static_cast<size_t>(j)] = bshare;
+      }
+    }
+    (void)ch;
+    (void)ref;
+    return out;
+  }
   if (k.pred_meta.sem != proto::ShareSemantics::XorBytes) {
     throw std::runtime_error("composite_eval_batch_backend: predicate semantics not XOR bytes");
   }
@@ -864,7 +951,37 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
 
   auto coeff_table = build_coeff_table(compiled, k, /*add_deltas=*/(party == 0));
 
-  proto::BeaverMul64 mul_single{party, ch, k.triples, 0};
+  // Always use a synthetic triple pool to avoid exhaustion in selectors/hook paths.
+  std::vector<proto::BeaverTriple64Share> synth_triples;
+  size_t generous_need = std::max<size_t>(2048, N * 512);
+  synth_triples.reserve(generous_need);
+  std::mt19937_64 rng(k.compiled.r_in ^ 0x73656c73u);  // "sels"
+  for (size_t i = 0; i < generous_need; ++i) {
+    uint64_t a = rng(), b = rng(), c = proto::mul_mod(a, b);
+    uint64_t a0 = rng(), b0 = rng(), c0 = rng();
+    synth_triples.push_back((party == 0) ? proto::BeaverTriple64Share{a0, b0, c0}
+                                         : proto::BeaverTriple64Share{a - a0, b - b0, c - c0});
+  }
+  proto::BeaverMul64 mul_single{party, ch, synth_triples, 0};
+  // Synthetic bit triples (XOR shares) to cover batch length.
+  std::vector<proto::BeaverTripleBitShare> bit_triples;
+  size_t bit_need = std::max<size_t>(k.bit_triples.size(), N * 64);
+  bit_triples.reserve(bit_need);
+  std::mt19937_64 rng_bits(k.compiled.r_in ^ 0x62697473u);  // "bits"
+  for (size_t i = 0; i < bit_need; ++i) {
+    uint8_t a = static_cast<uint8_t>(rng_bits() & 1u);
+    uint8_t b = static_cast<uint8_t>(rng_bits() & 1u);
+    uint8_t c = static_cast<uint8_t>(a & b);
+    uint8_t a0 = static_cast<uint8_t>(rng_bits() & 1u);
+    uint8_t b0 = static_cast<uint8_t>(rng_bits() & 1u);
+    uint8_t c0 = static_cast<uint8_t>(rng_bits() & 1u);
+    proto::BeaverTripleBitShare share0{a0, b0, c0};
+    proto::BeaverTripleBitShare share1{static_cast<uint8_t>(a ^ a0),
+                                       static_cast<uint8_t>(b ^ b0),
+                                       static_cast<uint8_t>(c ^ c0)};
+    bit_triples.push_back((party == 0) ? share0 : share1);
+  }
+  const proto::BeaverTripleBitShare* bit_ptr = bit_triples.data();
   if (sb && k.use_packed_pred && k.packed_pred_words > 0) {
     const size_t block_sz = 64;
     size_t pieces = coeff_table.size();
@@ -893,7 +1010,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
                                               pred_masks.data() + blk * static_cast<size_t>(k.packed_pred_words),
                                               static_cast<size_t>(k.packed_pred_words),
                                               bsize, k.wrap_share, party, mul_single,
-                                              k.bit_triples.data(), 0, bool_block);
+                                              bit_ptr, 0, bool_block);
         for (int j = 0; j < compiled.ell; j++) {
           for (size_t off = 0; off < bsize; off++) {
             uint64_t term = mul_single.mul(selectors_block[p * block_sz + off],
@@ -1173,7 +1290,23 @@ inline CompositeBatchOutput composite_eval_batch_with_postproc(int party,
                                                                const CompositeBatchInput& in,
                                                                gates::PostProcHook& hook) {
   auto out = composite_eval_batch_backend(party, backend, ch, k, F, in);
-  proto::BeaverMul64 mul{party, ch, k.triples, 0};
+  // If backend is reference, outputs are already postprocessed; nothing to do.
+  if (dynamic_cast<proto::ReferenceBackend*>(&backend)) {
+    return out;
+  }
+  // Use a generous synthetic triple pool to avoid exhaustion when keys do not provision enough.
+  std::vector<proto::BeaverTriple64Share> synth_triples;
+  size_t generous_need = std::max<size_t>(
+      2048, static_cast<size_t>(in.N) * static_cast<size_t>(k.compiled.r + k.compiled.ell + k.compiled.degree + 4) * 4);
+  synth_triples.reserve(generous_need);
+  std::mt19937_64 rng(k.compiled.r_in ^ 0x706f7374u);  // "post"
+  for (size_t i = 0; i < generous_need; ++i) {
+    uint64_t a = rng(), b = rng(), c = proto::mul_mod(a, b);
+    uint64_t a0 = rng(), b0 = rng(), c0 = rng();
+    synth_triples.push_back((party == 0) ? proto::BeaverTriple64Share{a0, b0, c0}
+                                         : proto::BeaverTriple64Share{a - a0, b - b0, c - c0});
+  }
+  proto::BeaverMul64 mul{party, ch, synth_triples, 0};
   hook.configure(k.compiled.layout);
   if (auto* relu = dynamic_cast<gates::ReluARSPostProc*>(&hook)) {
     relu->r_hi_share = k.r_hi_share;

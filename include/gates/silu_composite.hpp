@@ -45,10 +45,11 @@ struct SiluTaskMaterial {
 inline SiluTaskMaterial dealer_make_silu_task_material(proto::PfssBackendBatch& backend,
                                                        int frac_bits,
                                                        std::mt19937_64& rng,
-                                                       size_t triple_need = 0) {
+                                                       size_t triple_need = 0,
+                                                       size_t batch_N = 1) {
   auto spec = make_silu_spec({frac_bits, 16});
   auto suf_gate = suf::build_silu_suf_from_piecewise(spec);
-  auto kp = gates::composite_gen_backend(suf_gate, backend, rng);
+  auto kp = gates::composite_gen_backend(suf_gate, backend, rng, batch_N);
   // zero output masks so coeff payload is direct.
   std::fill(kp.k0.r_out_share.begin(), kp.k0.r_out_share.end(), 0ull);
   std::fill(kp.k1.r_out_share.begin(), kp.k1.r_out_share.end(), 0ull);
@@ -58,9 +59,9 @@ inline SiluTaskMaterial dealer_make_silu_task_material(proto::PfssBackendBatch& 
   compiler::GateParams p;
   p.kind = compiler::GateKind::FaithfulARS;
   p.frac_bits = frac_bits;
-  auto trunc_f = compiler::lower_truncation_gate(backend, rng, p);
+  auto trunc_f = compiler::lower_truncation_gate(backend, rng, p, batch_N);
   p.frac_bits = 2 * frac_bits;
-  auto trunc_2f = compiler::lower_truncation_gate(backend, rng, p);
+  auto trunc_2f = compiler::lower_truncation_gate(backend, rng, p, batch_N);
 
   if (triple_need > 0) {
     ensure_beaver_triples(kp, triple_need, rng);

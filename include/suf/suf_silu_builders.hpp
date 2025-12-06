@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <vector>
@@ -27,39 +28,46 @@ inline __int128 ipow_signed(int64_t base, int exp) {
   return acc;
 }
 
-// Expand a polynomial in (x - x0) into coefficients of x^k so it can be
-// embedded directly as a SUF arithmetic channel.
-inline std::vector<uint64_t> expand_to_x_coeffs(const gates::CoeffPack& pack, int degree) {
-  std::vector<__int128> accum(static_cast<size_t>(degree + 1), 0);
-  std::vector<int64_t> coeffs = pack.coeffs;
-  if (static_cast<int>(coeffs.size()) < degree + 1) {
-    coeffs.resize(static_cast<size_t>(degree + 1), 0);
+// Expand a polynomial in (x - x0) into coefficients of x^k, scaling results
+// back to Q{frac_bits} so downstream Horner can treat coeffs as Qf.
+inline std::vector<uint64_t> expand_to_x_coeffs(const gates::CoeffPack& pack,
+                                                int degree,
+                                                int frac_bits) {
+  double scale = std::ldexp(1.0, frac_bits);
+  std::vector<double> coeffs_real(static_cast<size_t>(degree + 1), 0.0);
+  for (size_t i = 0; i < coeffs_real.size(); ++i) {
+    if (i < pack.coeffs.size()) {
+      coeffs_real[i] = static_cast<double>(pack.coeffs[i]) / scale;
+    }
   }
-  int64_t x0 = pack.offset;
+  double x0 = static_cast<double>(pack.offset) / scale;
+  std::vector<double> accum(static_cast<size_t>(degree + 1), 0.0);
+  auto binom = [](int k, int i) -> int {
+    if (k == 0 || i == 0 || i == k) return 1;
+    if (k == 1) return 1;
+    if (k == 2) return (i == 1) ? 2 : 1;
+    if (k == 3) return (i == 1 || i == 2) ? 3 : 1;
+    int c = 1;
+    for (int j = 1; j <= i; ++j) c = c * (k - j + 1) / j;
+    return c;
+  };
   for (int k = 0; k <= degree; ++k) {
-    int64_t ck = coeffs[static_cast<size_t>(k)];
-    __int128 c128 = static_cast<__int128>(ck);
+    double ck = coeffs_real[static_cast<size_t>(k)];
     for (int i = 0; i <= k; ++i) {
-      // binom(k,i) * (-x0)^{k-i}
-      int choose = 1;
-      if (k == 1) choose = 1;
-      else if (k == 2) choose = (i == 0 || i == 2) ? 1 : 2;
-      else if (k == 3) {
-        choose = (i == 0 || i == 3) ? 1 : (i == 1 || i == 2 ? 3 : 1);
-      } else {
-        // fallback: simple multiplicative formula (small degrees only in practice)
-        choose = 1;
-        for (int j = 1; j <= i; ++j) {
-          choose = choose * (k - j + 1) / j;
-        }
-      }
-      __int128 term = c128 * static_cast<__int128>(choose) * ipow_signed(-x0, k - i);
+      double term = ck * static_cast<double>(binom(k, i)) * std::pow(-x0, k - i);
       accum[static_cast<size_t>(i)] += term;
     }
   }
   std::vector<uint64_t> out(static_cast<size_t>(degree + 1), 0);
   for (size_t i = 0; i < out.size(); ++i) {
-    out[i] = clamp_to_ring(accum[i]);
+    long double v = static_cast<long double>(accum[i]) * static_cast<long double>(scale);
+    if (v > static_cast<long double>(std::numeric_limits<int64_t>::max())) {
+      v = static_cast<long double>(std::numeric_limits<int64_t>::max());
+    }
+    if (v < static_cast<long double>(std::numeric_limits<int64_t>::min())) {
+      v = static_cast<long double>(std::numeric_limits<int64_t>::min());
+    }
+    out[i] = static_cast<uint64_t>(static_cast<int64_t>(std::llround(v)));
   }
   return out;
 }
@@ -102,7 +110,7 @@ inline SUF<uint64_t> build_silu_suf_from_piecewise(const gates::PiecewisePolySpe
 
   for (const auto& iv : intervals) {
     suf::SufPiece<uint64_t> piece;
-    auto coeffs = expand_to_x_coeffs(iv.pack, 3);  // up to cubic
+    auto coeffs = expand_to_x_coeffs(iv.pack, 3, spec.frac_bits_out);  // up to cubic
     coeffs.resize(static_cast<size_t>(F.r_out), 0);
     for (int i = 0; i < F.r_out; ++i) {
       suf::Poly<uint64_t> poly;

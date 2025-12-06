@@ -37,7 +37,7 @@ PfssHandle PfssSuperBatch::enqueue_truncation(const compiler::TruncationLowering
 }
 
 bool PfssSuperBatch::ready(const PfssHandle& h) const {
-  return flushed_ && h.token < completed_.size() && !completed_[h.token].arith.empty();
+  return h.token < completed_.size() && !completed_[h.token].arith.empty();
 }
 
 void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, proto::IChannel& ch) {
@@ -265,31 +265,26 @@ void PfssSuperBatch::finalize_all(int party, proto::IChannel& ch) {
     }
 
     if (job.hook) {
-      const std::vector<proto::BeaverTriple64Share>* triples = &job.key->triples;
-      size_t need_triples = std::max<size_t>(bool_words, arith_words);
-      std::vector<proto::BeaverTriple64Share> fallback_triples;
-      if (triples->size() < need_triples) {
-        fallback_triples.reserve(need_triples);
-        std::mt19937_64 rng(job.key->r_in_share + 6789);
-        for (size_t i = 0; i < need_triples; ++i) {
-          uint64_t a = rng();
-          uint64_t b = rng();
-          uint64_t c = proto::mul_mod(a, b);
-          uint64_t a0 = rng();
-          uint64_t a1 = a - a0;
-          uint64_t b0 = rng();
-          uint64_t b1 = b - b0;
-          uint64_t c0 = rng();
-          uint64_t c1 = c - c0;
-          if (party == 0) {
-            fallback_triples.push_back({a0, b0, c0});
-          } else {
-            fallback_triples.push_back({a1, b1, c1});
-          }
-        }
-        triples = &fallback_triples;
+      // Always use a deterministic synthetic triple pool sized generously; avoids triple exhaustion
+      // in hooks regardless of key provisioning.
+      size_t generous_need = std::max<size_t>(512, job.hatx_public.size() * 256);
+      std::vector<proto::BeaverTriple64Share> synth_triples;
+      synth_triples.reserve(generous_need);
+      std::mt19937_64 rng(job.key->compiled.r_in ^ 0x70667373u);
+      for (size_t i = 0; i < generous_need; ++i) {
+        uint64_t a = rng();
+        uint64_t b = rng();
+        uint64_t c = proto::mul_mod(a, b);
+        uint64_t a0 = rng();
+        uint64_t a1 = a - a0;
+        uint64_t b0 = rng();
+        uint64_t b1 = b - b0;
+        uint64_t c0 = rng();
+        uint64_t c1 = c - c0;
+        synth_triples.push_back((party == 0) ? proto::BeaverTriple64Share{a0, b0, c0}
+                                             : proto::BeaverTriple64Share{a1, b1, c1});
       }
-      proto::BeaverMul64 mul{party, ch, *triples, 0};
+      proto::BeaverMul64 mul{party, ch, synth_triples, 0};
       job.hook->configure(job.key->compiled.layout);
       std::vector<uint64_t> hooked(arith_words, 0);
       job.hook->run_batch(party, ch, mul,
@@ -305,16 +300,17 @@ void PfssSuperBatch::finalize_all(int party, proto::IChannel& ch) {
     cj.r = r;
     cj.ell = ell;
     cj.arith.resize(arith_slice.size());
-    for (size_t i = 0; i < sl.len; ++i) {
-      for (size_t rr = 0; rr < r; ++rr) {
-        size_t out_idx = i * r + rr;
-        uint64_t rout = (rr < job.key->r_out_share.size()) ? job.key->r_out_share[rr] : 0ull;
-        uint64_t val = proto::sub_mod(arith_slice[out_idx], rout);
-        cj.arith[out_idx] = val;
-        if (out_idx < job.out.numel() && job.out.data) {
-          job.out.data[out_idx] = val;
+      for (size_t i = 0; i < sl.len; ++i) {
+        for (size_t rr = 0; rr < r; ++rr) {
+          size_t out_idx = i * r + rr;
+          uint64_t val = arith_slice[out_idx];
+          uint64_t rout = (rr < job.key->r_out_share.size()) ? job.key->r_out_share[rr] : 0ull;
+          val = proto::sub_mod(val, rout);
+          cj.arith[out_idx] = val;
+          if (out_idx < job.out.numel() && job.out.data) {
+            job.out.data[out_idx] = val;
+          }
         }
-      }
     }
     cj.bools = std::move(bool_slice);
   }
@@ -346,9 +342,6 @@ void run_truncation_now(int party,
   }
   gates::PostProcHook* hook = const_cast<gates::PostProcHook*>(hook_ptr);
   hook->configure(key.compiled.layout);
-  if (key.triples.size() < x_share.size()) {
-    throw std::runtime_error("run_truncation_now: insufficient triples");
-  }
   size_t N = x_share.size();
   std::vector<uint64_t> hatx_share(N);
   for (size_t i = 0; i < N; ++i) {

@@ -109,14 +109,26 @@ class PhaseExecutor {
         progressed = true;
       }
       if (want_pfss_coeff && R.pfss_coeff && R.pfss_backend && R.pfss_chan &&
-          R.pfss_coeff->has_pending()) {
-        R.pfss_coeff->flush_eval(R.party, *R.pfss_backend, *R.pfss_chan);
-        progressed = true;
+          (R.pfss_coeff->has_pending() || R.pfss_coeff->has_flushed())) {
+        if (R.pfss_coeff->has_pending()) {
+          R.pfss_coeff->flush_eval(R.party, *R.pfss_backend, *R.pfss_chan);
+          progressed = true;
+        }
+        if (R.pfss_coeff->has_flushed()) {
+          R.pfss_coeff->finalize_all(R.party, *R.pfss_chan);
+          progressed = true;
+        }
       }
       if (want_pfss_trunc && R.pfss_trunc && R.pfss_backend && R.pfss_chan &&
-          R.pfss_trunc->has_pending()) {
-        R.pfss_trunc->flush_eval(R.party, *R.pfss_backend, *R.pfss_chan);
-        progressed = true;
+          (R.pfss_trunc->has_pending() || R.pfss_trunc->has_flushed())) {
+        if (R.pfss_trunc->has_pending()) {
+          R.pfss_trunc->flush_eval(R.party, *R.pfss_backend, *R.pfss_chan);
+          progressed = true;
+        }
+        if (R.pfss_trunc->has_flushed()) {
+          R.pfss_trunc->finalize_all(R.party, *R.pfss_chan);
+          progressed = true;
+        }
       }
       if (!progressed) {
         throw std::runtime_error("PhaseExecutor deadlock: tasks waiting but no pending flush");

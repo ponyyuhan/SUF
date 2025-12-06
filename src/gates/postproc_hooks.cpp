@@ -20,8 +20,9 @@ const compiler::TruncationLoweringResult& HornerCubicHook::ensure_trunc_bundle()
     compiler::GateParams p;
     p.kind = compiler::GateKind::FaithfulARS;
     p.frac_bits = trunc_frac_bits > 0 ? trunc_frac_bits : frac_bits;
+    constexpr size_t kDefaultTriples = 4096;
     trunc_bundle = new compiler::TruncationLoweringResult(
-        compiler::lower_truncation_gate(*backend, rng, p));
+        compiler::lower_truncation_gate(*backend, rng, p, kDefaultTriples));
     auto fill = [&](std::vector<proto::BeaverTriple64Share>& dst0,
                     std::vector<proto::BeaverTriple64Share>& dst1,
                     size_t need) {
@@ -40,7 +41,6 @@ const compiler::TruncationLoweringResult& HornerCubicHook::ensure_trunc_bundle()
       }
     };
     // Provide a generous stash so hook-only paths don't exhaust triples.
-    constexpr size_t kDefaultTriples = 4096;
     fill(trunc_bundle->keys.k0.triples, trunc_bundle->keys.k1.triples, kDefaultTriples);
   }
   return *trunc_bundle;
