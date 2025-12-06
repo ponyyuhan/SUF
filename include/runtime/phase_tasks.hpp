@@ -420,37 +420,10 @@ class RsqrtTask final : public detail::PhaseTask {
         for (size_t i = 0; i < elems; ++i) {
           c0_[i] = coeff_buf_[i * v.r + 0];
           c1_[i] = (v.r > 1) ? coeff_buf_[i * v.r + 1] : 0ull;
-          uint64_t x_plain = proto::sub_mod(static_cast<uint64_t>(opened_[i]), key_->r_in_share_vec[i]);
+          uint64_t x_plain = proto::sub_mod(static_cast<uint64_t>(opened_[i]), key_->compiled.r_in);
           x_plain_debug_.push_back(x_plain);
         }
-        y_init_q2f_.assign(elems, 0);
-        auto triples = next_triples(elems);
-        init_mul_ = std::make_unique<MulTask>(
-            std::span<const uint64_t>(c1_.data(), c1_.size()),
-            std::span<const uint64_t>(x_.data(), x_.size()),
-            std::span<uint64_t>(y_init_q2f_.data(), y_init_q2f_.size()),
-            triples);
-        st_ = St::InitMul;
-        return detail::Need::None;
-      }
-      case St::InitMul: {
-        auto need = init_mul_->step(R);
-        if (!init_mul_->done()) return need;
-        y_init_qf_.assign(y_init_q2f_.size(), 0);
-        init_trunc_ = std::make_unique<TruncTask>(
-            bundle_.trunc_f,
-            std::span<const uint64_t>(y_init_q2f_.data(), y_init_q2f_.size()),
-            std::span<uint64_t>(y_init_qf_.data(), y_init_qf_.size()));
-        st_ = St::InitTrunc;
-        return detail::Need::None;
-      }
-      case St::InitTrunc: {
-        auto need = init_trunc_->step(R);
-        if (!init_trunc_->done()) return need;
-        y_ = y_init_qf_;
-        for (size_t i = 0; i < y_.size(); ++i) {
-          y_[i] = proto::add_mod(y_[i], c0_[i]);
-        }
+        y_.assign(elems, (R.party == 0) ? (uint64_t(1) << fb_) : 0ull);
         init_y_ = y_;
         iter_ = 0;
         st_ = St::IterMul1;
