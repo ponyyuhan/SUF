@@ -3,6 +3,7 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <random>
+#include <algorithm>
 
 namespace runtime {
 
@@ -10,6 +11,19 @@ PfssHandle PfssSuperBatch::enqueue_composite(PreparedCompositeJob job) {
   if (job.token == static_cast<size_t>(-1)) {
     job.token = completed_.size();
   }
+  size_t hatx_words = job.hatx_public.size();
+  size_t new_pending_jobs = pending_jobs_ + 1;
+  size_t new_pending_hatx = pending_hatx_words_ + hatx_words;
+  if (limits_.max_pending_jobs > 0 && new_pending_jobs > limits_.max_pending_jobs) {
+    throw std::runtime_error("PfssSuperBatch: pending job limit exceeded");
+  }
+  if (limits_.max_pending_hatx_words > 0 && new_pending_hatx > limits_.max_pending_hatx_words) {
+    throw std::runtime_error("PfssSuperBatch: pending hatx packing limit exceeded");
+  }
+  pending_jobs_ = new_pending_jobs;
+  pending_hatx_words_ = new_pending_hatx;
+  stats_.pending_jobs = pending_jobs_;
+  stats_.pending_hatx = pending_hatx_words_;
   if (completed_.size() <= job.token) {
     completed_.resize(job.token + 1);
   }
@@ -23,6 +37,19 @@ PfssHandle PfssSuperBatch::enqueue_truncation(const compiler::TruncationLowering
                                               gates::PostProcHook& hook,
                                               std::vector<uint64_t> hatx_public,
                                               nn::TensorView<uint64_t> out) {
+  size_t hatx_words = hatx_public.size();
+  size_t new_pending_jobs = pending_jobs_ + 1;
+  size_t new_pending_hatx = pending_hatx_words_ + hatx_words;
+  if (limits_.max_pending_jobs > 0 && new_pending_jobs > limits_.max_pending_jobs) {
+    throw std::runtime_error("PfssSuperBatch: pending job limit exceeded");
+  }
+  if (limits_.max_pending_hatx_words > 0 && new_pending_hatx > limits_.max_pending_hatx_words) {
+    throw std::runtime_error("PfssSuperBatch: pending hatx packing limit exceeded");
+  }
+  pending_jobs_ = new_pending_jobs;
+  pending_hatx_words_ = new_pending_hatx;
+  stats_.pending_jobs = pending_jobs_;
+  stats_.pending_hatx = pending_hatx_words_;
   PreparedCompositeJob job;
   job.suf = &bundle.suf;
   job.key = &key;
@@ -41,6 +68,9 @@ bool PfssSuperBatch::ready(const PfssHandle& h) const {
 }
 
 void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, proto::IChannel& ch) {
+  if (limits_.max_flushes > 0 && stats_.flushes + 1 > limits_.max_flushes) {
+    throw std::runtime_error("PfssSuperBatch: flush budget exceeded");
+  }
   stats_.flushes += 1;
   stats_.jobs += jobs_.size();
   struct GroupKey {
@@ -160,6 +190,8 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
     }
 
     for (auto& b : buckets) {
+      stats_.max_bucket_hatx = std::max(stats_.max_bucket_hatx, b.hatx.size());
+      stats_.max_bucket_jobs = std::max(stats_.max_bucket_jobs, b.jobs.size());
       gates::CompositeBatchInput in{b.hatx.data(), b.hatx.size()};
       auto out = gates::composite_eval_batch_backend(party, backend, ch, *b.key, *b.suf, in);
       size_t gr_idx = group_results_.size();
@@ -184,6 +216,10 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
   flushed_ = true;
   stats_.arith_words += total_arith_words;
   stats_.pred_bits += total_bool_words * 64;
+  pending_jobs_ = 0;
+  pending_hatx_words_ = 0;
+  stats_.pending_jobs = 0;
+  stats_.pending_hatx = 0;
   populate_completed_();
 }
 
@@ -236,6 +272,10 @@ void PfssSuperBatch::clear() {
   completed_.clear();
   slices_.clear();
   flushed_ = false;
+  pending_jobs_ = 0;
+  pending_hatx_words_ = 0;
+  stats_.pending_jobs = 0;
+  stats_.pending_hatx = 0;
 }
 
 void PfssSuperBatch::finalize_all(int party, proto::IChannel& ch) {
@@ -345,7 +385,10 @@ void run_truncation_now(int party,
   size_t N = x_share.size();
   std::vector<uint64_t> hatx_share(N);
   for (size_t i = 0; i < N; ++i) {
-    hatx_share[i] = proto::add_mod(x_share[i], key.r_in_share);
+    uint64_t rin = (!key.r_in_share_vec.empty() && key.r_in_share_vec.size() > i)
+                       ? key.r_in_share_vec[i]
+                       : key.r_in_share;
+    hatx_share[i] = proto::add_mod(x_share[i], rin);
   }
   std::vector<uint64_t> other(N, 0);
   if (party == 0) {

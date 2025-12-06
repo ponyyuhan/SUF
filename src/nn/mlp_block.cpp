@@ -47,6 +47,8 @@ void mlp_forward(const MLPConfig& cfg,
   compiler::RangeInterval mat2_w_range;
   int row_l1_max1 = 0;
   int row_l1_max2 = 0;
+  compiler::RangeInterval mat1_out_range = compiler::RangeInterval::whole(true);
+  compiler::RangeInterval mat2_out_range = compiler::RangeInterval::whole(true);
   if (ctx) {
     compiler::Scale q_scale = make_scale(cfg.frac_bits, true);
     compiler::RangeInterval x_range = compiler::RangeInterval::whole(true);
@@ -74,6 +76,7 @@ void mlp_forward(const MLPConfig& cfg,
 
     compiler::RangeInterval hidden_range =
         compiler::propagate_matmul_out(x_t.range, mat1.w_range, mat1.K, cfg.frac_bits);
+    mat1_out_range = hidden_range;
     compiler::RescaleAttrs r1;
     r1.matmul_op = acc1.producer_op;
     r1.from_frac = 2 * cfg.frac_bits;
@@ -103,6 +106,7 @@ void mlp_forward(const MLPConfig& cfg,
 
     compiler::RangeInterval out_range =
         compiler::propagate_matmul_out(hidden_t.range, mat2.w_range, mat2.K, cfg.frac_bits);
+    mat2_out_range = out_range;
     compiler::RescaleAttrs r2;
     r2.matmul_op = acc2.producer_op;
     r2.from_frac = 2 * cfg.frac_bits;

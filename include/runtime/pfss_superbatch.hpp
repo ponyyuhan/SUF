@@ -121,6 +121,11 @@ struct PreparedCompositeJob {
 
 class PfssSuperBatch {
  public:
+  struct Limits {
+    size_t max_pending_jobs = 1ull << 18;         // generous default
+    size_t max_pending_hatx_words = 1ull << 26;   // cap total packed hatx per flush
+    size_t max_flushes = 1ull << 16;              // safety guard against runaway flushing
+  };
   // Enqueue a composite job; no implicit finalize is performed. Caller should
   // flush(), then read view() to consume outputs.
   PfssHandle enqueue_composite(PreparedCompositeJob job);
@@ -136,6 +141,8 @@ class PfssSuperBatch {
   bool has_flushed() const { return flushed_; }
   // Ready check for callers using multi-wave task scheduling.
   bool ready(const PfssHandle& h) const;
+
+  void set_limits(const Limits& lim) { limits_ = lim; }
 
   // Evaluate all queued composite jobs and store PFSS outputs.
   void flush_eval(int party, proto::PfssBackendBatch& backend, proto::IChannel& ch);
@@ -158,6 +165,10 @@ class PfssSuperBatch {
     size_t jobs = 0;
     size_t arith_words = 0;
     size_t pred_bits = 0;
+    size_t max_bucket_hatx = 0;   // largest packed hatx length in a bucket
+    size_t max_bucket_jobs = 0;   // largest number of jobs fused into one bucket
+    size_t pending_jobs = 0;      // current pending jobs before flush
+    size_t pending_hatx = 0;      // pending hatx words before flush
   };
   const Stats& stats() const { return stats_; }
   void reset_stats() { stats_ = Stats{}; }
@@ -189,6 +200,9 @@ class PfssSuperBatch {
   std::vector<JobSlice> slices_;
   bool flushed_ = false;
   Stats stats_;
+  Limits limits_;
+  size_t pending_jobs_ = 0;
+  size_t pending_hatx_words_ = 0;
 
   void populate_completed_();
 };

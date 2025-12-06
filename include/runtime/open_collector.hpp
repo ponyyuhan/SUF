@@ -51,6 +51,10 @@ class OpenCollector {
   struct Stats {
     size_t flushes = 0;
     size_t opened_words = 0;
+    size_t max_pending_words = 0;
+  };
+  struct Limits {
+    size_t max_pending_words = 1ull << 24;  // generous guardrail
   };
 
   // Enqueue a buffer of local shares to be opened; returns a handle to view later.
@@ -68,6 +72,8 @@ class OpenCollector {
 
   void clear();
 
+  void set_limits(const Limits& lim) { limits_ = lim; }
+
   const Stats& stats() const { return stats_; }
   void reset_stats() { stats_ = Stats{}; }
 
@@ -81,6 +87,8 @@ class OpenCollector {
   std::vector<int64_t> opened_;
   bool opened_valid_ = false;
   Stats stats_;
+  Limits limits_;
+  size_t pending_words_ = 0;
 };
 
 }  // namespace runtime

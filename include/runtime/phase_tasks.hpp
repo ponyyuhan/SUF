@@ -755,6 +755,9 @@ struct LayerNormTaskBundle {
   std::span<const int64_t> beta;   // Qf public
   std::span<const proto::BeaverTriple64Share> mul_triples;  // for diff^2
   RowBroadcastTripleProvider* row_triples = nullptr;
+  compiler::RangeInterval mean_range = compiler::RangeInterval::whole(true);
+  compiler::RangeInterval var_range = compiler::RangeInterval::whole(true);
+  compiler::RangeInterval norm_range = compiler::RangeInterval::whole(true);
 };
 
 // LayerNorm over rows*cols with secret shares, using RsqrtTask and batched mul/trunc.
@@ -867,6 +870,9 @@ class LayerNormTask final : public detail::PhaseTask {
         return detail::Need::None;
       }
       case St::MeanTrunc: {
+        if (bundle_.mean_range.lo <= bundle_.mean_range.hi) {
+          mu_range_ = bundle_.mean_range;
+        }
         const auto* tb = select_trunc_bundle(bundle_.mean_trunc, mu_range_, bundle_.frac_bits);
         if (!tb) throw std::runtime_error("LayerNormTask: missing mean trunc bundle");
         mean_trunc_task_ = std::make_unique<TruncTask>(
@@ -913,19 +919,22 @@ class LayerNormTask final : public detail::PhaseTask {
             size_t idx = static_cast<size_t>(r * cols_ + c);
             acc = proto::add_mod(acc, diff2_[idx]);
           }
-          var_sum_[static_cast<size_t>(r)] = acc;
-        }
-        var_q3f_.assign(var_sum_.size(), 0);
-        for (size_t r = 0; r < var_sum_.size(); ++r) {
-          uint64_t const_share = bundle_.inv_len_qf;
-          var_q3f_[r] = proto::mul_mod(var_sum_[r], const_share);
-        }
-        st_ = St::VarTrunc;
-        return detail::Need::None;
+        var_sum_[static_cast<size_t>(r)] = acc;
       }
+      var_q3f_.assign(var_sum_.size(), 0);
+      for (size_t r = 0; r < var_sum_.size(); ++r) {
+        uint64_t const_share = bundle_.inv_len_qf;
+        var_q3f_[r] = proto::mul_mod(var_sum_[r], const_share);
+      }
+      st_ = St::VarTrunc;
+      return detail::Need::None;
+    }
       case St::VarTrunc: {
         var_range_.lo = 0;
         var_range_.is_signed = true;
+        if (bundle_.var_range.lo <= bundle_.var_range.hi) {
+          var_range_ = bundle_.var_range;
+        }
         const auto* tb = select_trunc_bundle(bundle_.var_trunc, var_range_, 2 * bundle_.frac_bits);
         if (!tb) throw std::runtime_error("LayerNormTask: missing var trunc bundle");
         var_qf_.assign(var_q3f_.size(), 0);
@@ -990,6 +999,9 @@ class LayerNormTask final : public detail::PhaseTask {
         return detail::Need::None;
       }
       case St::NormTrunc: {
+        if (bundle_.norm_range.lo <= bundle_.norm_range.hi) {
+          norm_range_ = bundle_.norm_range;
+        }
         auto need = trunc_norm_->step(R);
         if (!trunc_norm_->done()) return need;
         st_ = St::Affine;

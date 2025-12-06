@@ -371,6 +371,32 @@ void transformer_layer_forward(const TransformerConfig& cfg,
     b.frac_bits = fb;
     b.mul_triples = mul_triples;
     b.row_triples = &row_triples;
+    // Range hints: inputs are Qf. Mean stays within input range; variance is non-negative
+    // and in Q2f before trunc; norm is roughly unit-scale.
+    compiler::RangeInterval in_range = compiler::RangeInterval::whole(true);
+    if (ctx) {
+      // If the caller recorded a tensor range for the LN input, reuse it.
+      in_range = (ctx->graph.tensors().empty())
+                     ? compiler::RangeInterval::whole(true)
+                     : ctx->graph.tensors().back().range;
+    }
+    b.mean_range = compiler::shift_down(in_range, fb);  // sum*invL is already Qf before trunc
+    b.var_range = compiler::RangeInterval::whole(true);
+    b.var_range.lo = 0;
+    b.var_range.is_signed = true;
+    // Conservatively bound variance by |x|^2 * cols.
+    uint64_t abs_lo = (in_range.lo < 0) ? static_cast<uint64_t>(-in_range.lo) : 0ull;
+    uint64_t abs_hi = (in_range.hi < 0) ? static_cast<uint64_t>(-in_range.hi) : static_cast<uint64_t>(in_range.hi);
+    uint64_t abs_max = std::max(abs_lo, abs_hi);
+    __int128 var_bound = static_cast<__int128>(abs_max) * static_cast<__int128>(abs_max);
+    var_bound = var_bound >> fb;  // one downscale from square
+    var_bound *= static_cast<int64_t>(cols);
+    int64_t vb = static_cast<int64_t>(std::min<__int128>(var_bound, std::numeric_limits<int64_t>::max()));
+    b.var_range.hi = vb;
+    b.norm_range = compiler::RangeInterval::whole(true);
+    b.norm_range.lo = -(static_cast<int64_t>(1) << fb);
+    b.norm_range.hi = static_cast<int64_t>(1) << fb;
+    b.norm_range.is_signed = true;
     return b;
   };
 

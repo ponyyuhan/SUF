@@ -80,6 +80,7 @@ class PhaseExecutor {
   PfssSuperBatch& pfss_trunc_batch() { return pfss_trunc_; }
   OpenCollector& open_collector() { return opens_; }
   const Stats& stats() const { return stats_; }
+  void set_max_flushes(size_t max_flushes) { max_flushes_ = max_flushes; }
   void reset_stats() {
     stats_ = Stats{};
     pfss_coeff_.reset_stats();
@@ -88,6 +89,7 @@ class PhaseExecutor {
   }
 
   void run(PhaseResources& R) {
+    size_t flush_guard = 0;
     for (;;) {
       bool any_not_done = false;
       bool want_open = false;
@@ -105,28 +107,48 @@ class PhaseExecutor {
       }
       if (!any_not_done) break;
       if (want_open && R.opens && R.net_chan && R.opens->has_pending()) {
+        if (flush_guard + 1 > max_flushes_) {
+          throw std::runtime_error("PhaseExecutor: open flush budget exceeded");
+        }
         R.opens->flush(R.party, *R.net_chan);
+        flush_guard++;
         progressed = true;
       }
       if (want_pfss_coeff && R.pfss_coeff && R.pfss_backend && R.pfss_chan &&
           (R.pfss_coeff->has_pending() || R.pfss_coeff->has_flushed())) {
         if (R.pfss_coeff->has_pending()) {
+          if (flush_guard + 1 > max_flushes_) {
+            throw std::runtime_error("PhaseExecutor: coeff flush budget exceeded");
+          }
           R.pfss_coeff->flush_eval(R.party, *R.pfss_backend, *R.pfss_chan);
+          flush_guard++;
           progressed = true;
         }
         if (R.pfss_coeff->has_flushed()) {
+          if (flush_guard + 1 > max_flushes_) {
+            throw std::runtime_error("PhaseExecutor: coeff finalize budget exceeded");
+          }
           R.pfss_coeff->finalize_all(R.party, *R.pfss_chan);
+          flush_guard++;
           progressed = true;
         }
       }
       if (want_pfss_trunc && R.pfss_trunc && R.pfss_backend && R.pfss_chan &&
           (R.pfss_trunc->has_pending() || R.pfss_trunc->has_flushed())) {
         if (R.pfss_trunc->has_pending()) {
+          if (flush_guard + 1 > max_flushes_) {
+            throw std::runtime_error("PhaseExecutor: trunc flush budget exceeded");
+          }
           R.pfss_trunc->flush_eval(R.party, *R.pfss_backend, *R.pfss_chan);
+          flush_guard++;
           progressed = true;
         }
         if (R.pfss_trunc->has_flushed()) {
+          if (flush_guard + 1 > max_flushes_) {
+            throw std::runtime_error("PhaseExecutor: trunc finalize budget exceeded");
+          }
           R.pfss_trunc->finalize_all(R.party, *R.pfss_chan);
+          flush_guard++;
           progressed = true;
         }
       }
@@ -160,6 +182,7 @@ class PhaseExecutor {
   PfssSuperBatch pfss_trunc_;
   OpenCollector opens_;
   Stats stats_;
+  size_t max_flushes_ = 1ull << 16;  // safety guard
 };
 
 }  // namespace runtime

@@ -197,8 +197,11 @@ void matmul_beaver_finalize(PreparedMatmulBeaver& prep,
 
   // Build masked hatx shares and open them to both parties.
   std::vector<uint64_t> hatx_share(total);
+  if (key.r_in_share_vec.empty() || key.r_in_share_vec.size() < total) {
+    throw std::runtime_error("matmul_beaver: r_in_share_vec missing or too small");
+  }
   for (size_t i = 0; i < total; ++i) {
-    hatx_share[i] = proto::add_mod(acc_share[i], key.r_in_share);
+    hatx_share[i] = proto::add_mod(acc_share[i], key.r_in_share_vec[i]);
   }
   std::vector<uint64_t> hatx_public;
   open_public_hatx(party, ch, hatx_share, hatx_public);

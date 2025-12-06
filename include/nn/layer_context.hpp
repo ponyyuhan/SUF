@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <optional>
 
+#include "compiler/range_analysis.hpp"
 #include "compiler/layer_graph.hpp"
 #include "compiler/truncation_pass_runner.hpp"
 #include "nn/tensor_view.hpp"
@@ -90,6 +92,7 @@ inline SecretTensor record_matmul(LayerContext* ctx,
   attrs.x_range = x.range;
   size_t op_idx = ctx->graph.current_op_index();
   t.tid = ctx->graph.add_matmul_beaver(x.tid, attrs, out_scale, out_range);
+  t.range = compiler::matmul_accum_range(x.range, attrs.w_range, attrs.K);
   t.producer_op = op_idx;
   return t;
 }
@@ -108,9 +111,19 @@ inline SecretTensor record_rescale(LayerContext* ctx,
   t.ctx = ctx;
   if (!ctx || !input.valid()) return t;
   compiler::RescaleAttrs attrs_copy = attrs;
+  // Populate missing frac hints from scales.
+  if (attrs_copy.from_frac == 0) attrs_copy.from_frac = input.scale.frac_bits;
+  if (attrs_copy.to_frac == 0) attrs_copy.to_frac = out_scale.frac_bits;
   auto kind = compiler::select_trunc_kind(input.range, attrs.to_frac);
   attrs_copy.prefer_gapars = attrs_copy.prefer_gapars || (kind == compiler::GateKind::GapARS);
   t.tid = ctx->graph.add_rescale(input.tid, attrs_copy, out_scale, out_range);
+  compiler::RangeInterval inferred = compiler::shift_down(input.range, attrs_copy.from_frac - attrs_copy.to_frac);
+  if (out_range.lo != std::numeric_limits<int64_t>::min() ||
+      out_range.hi != std::numeric_limits<int64_t>::max()) {
+    t.range = compiler::intersect(out_range, inferred);
+  } else {
+    t.range = inferred;
+  }
   return t;
 }
 
