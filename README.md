@@ -76,7 +76,7 @@ expand*.md, initial.md, milestone*.md, advice*.md, revise_m11_*.md, paper.md
   - Rescale/hoist：hoist 覆盖 rescale 链、add/sub/bias/Hadamard/mul_const/axpy，MatmulRescaleSite/softmax/LN/recip 带 range_hint/GapCert 优先 GapARS；公共 bias/residual 具备 GapCert。  
   - 执行层：attention/MLP/softmax phase 绑定 `PfssPhasePlanner`/`finalize_pfss_once` 单次 PFSS flush，默认更紧预算+统计。  
   - Transformer：attention/MLP/LN 全部任务化，无本地 shift；残差加法使用 `proto::add_mod`；小型 transformer+LN 回归用例通过。
-- **Milestone 11 待办/保留风险**：PhaseExecutor 级别的跨 phase super-plan 与更激进的 hoist 仍缺；GapCert 证明保守，packing/flush 预算可再收紧；LN/激活 clamp 可以继续缩紧；性能向（GPU/SigmaFast PRG/Beaver 缓存）尚未展开。
+- **Milestone 11 待办/保留风险**：PhaseExecutor 级别的跨 phase/layer super-plan 与更激进的 hoist 仍缺；GapCert 证明保守，packing/flush 预算可再收紧；LN/激活 clamp 可以继续缩紧；性能向（GPU/SigmaFast PRG/Beaver 缓存）尚未展开。
 - **Staged/super-plan 原型**：`StagedExecutor` + `test_staged_softmax` 展示 softmax 的 nExp/Recip/Trunc 可单次 PFSS flush，尚未推广到其他任务或跨 phase super-plan/异步合并。
 
 ## 测试现状
@@ -96,6 +96,13 @@ expand*.md, initial.md, milestone*.md, advice*.md, revise_m11_*.md, paper.md
   - `LayerNormTask`：mean/var trunc + rsqrt 迭代 + 行广播 mul + affine（ReferenceBackend 可明文调试）。  
   - `PhaseExecutor`：多任务循环，驱动 Open/coeff/trunc flush_eval + finalize，记录 flush/job/opened_words/规划统计。
 - **NN 路径**：`nn/attention_block.cpp`（任务化 softmax/recip/nexp + matmul trunc 计划 + KV cache），`nn/mlp_block.cpp`（两段 matmul trunc + SiLU CubicPolyTask），`nn/transformer_layer.cpp`（两次 LayerNormTask + attention + MLP + 残差），`nn/layer_context.hpp` 记录 hoist/rescale/trunc 计划、GapCert 与 PfssSuperBatch。
+
+## 当前难点与风险
+
+- **GapCert 证明不足**：范围/GapCert 仍靠启发式 clamp，未引入形式化 gap_cert 证明链，限制了更激进的 hoist 与 AutoTrunc 选择。
+- **Super-plan 受限**：现有 planner 仅做 phase/layer 内的单次 flush + 预算检查，未做跨 phase/layer 合并或 causal-mask 稀疏批次优化；packing 边界仅在 planner_causal 中做简单断言。
+- **Async 覆盖有限**：异步 PFSS 仅在存在独立 PFSS 通道时启用，且只在层末集中 flush；缺少更细粒度的异步/overlap 评估。
+- **性能工作未展开**：SigmaFast PRG/packing、Beaver/三元组缓存、GPU/SoA 批处理等性能向优化尚未启动。
 
 ## 后续建议
 

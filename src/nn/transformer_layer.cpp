@@ -271,6 +271,10 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   if (!ctx || !ctx->trunc_ctx) {
     throw std::runtime_error("transformer_layer_forward: LayerContext with trunc_ctx required");
   }
+  // Enable async PFSS when a dedicated PFSS channel is present (guarded by a shared mutex at finalize).
+  if (ctx->pfss_net_chan) ctx->allow_async_pfss = true;
+  pe->set_lazy_mode(true);
+  pe->set_keep_batches(true);
   runtime::PfssLayerPlanner::Limits layer_lim;
   layer_lim.max_coeff_jobs = 1ull << 15;
   layer_lim.max_trunc_jobs = 1ull << 15;
@@ -287,6 +291,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   ctx->enable_hoist = true;
   ctx->open_collector = &pe->open_collector();
   proto::PfssBackendBatch& backend = ctx->trunc_ctx->backend();
+  net::Chan* pfss_nc = (ctx && ctx->pfss_net_chan) ? ctx->pfss_net_chan : &ch;
   // Apply conservative limits to PFSS batches and opens to avoid runaway buffering.
   runtime::PfssSuperBatch::Limits pfss_lim;
   pfss_lim.max_pending_jobs = 1ull << 12;
@@ -297,6 +302,12 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   runtime::OpenCollector::Limits open_lim;
   open_lim.max_pending_words = 1ull << 22;
   pe->open_collector().set_limits(open_lim);
+  runtime::PhaseExecutor::LazyLimits lazy_lim;
+  lazy_lim.open_pending_words = open_lim.max_pending_words;
+  lazy_lim.coeff_pending_jobs = pfss_lim.max_pending_jobs;
+  lazy_lim.trunc_pending_jobs = pfss_lim.max_pending_jobs;
+  lazy_lim.hatx_pending_words = pfss_lim.max_pending_hatx_words;
+  pe->set_lazy_limits(lazy_lim);
   pe->set_max_flushes(1ull << 11);
 
   size_t B = X_share.shape[0];
@@ -306,7 +317,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
 
   // Phase resources shared across tasks.
   runtime::PhaseResources R;
-  runtime::ProtoChanFromNet pch(ch);
+  runtime::ProtoChanFromNet pch(*pfss_nc);
   R.party = party;
   R.net_chan = &ch;
   R.pfss_backend = &backend;
@@ -316,6 +327,9 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   R.opens = &pe->open_collector();
   runtime::PfssPhasePlanner phase_planner;
   auto* layer_planner_ptr = ctx ? ctx->pfss_layer_planner : nullptr;
+  if (layer_planner_ptr) {
+    layer_planner_ptr->begin_layer();
+  }
   auto record_phase_plan = [&](runtime::PfssPhasePlanner& planner) {
     if (layer_planner_ptr) {
       const auto& st = planner.stats();
@@ -327,6 +341,13 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   };
   phase_planner.bind(R.pfss_coeff, R.pfss_trunc);
   R.pfss_planner = &phase_planner;
+  auto drain_barrier = [&](const runtime::PfssLayerPlanner::BarrierPolicy& pol) {
+    if (layer_planner_ptr) {
+      runtime::ProtoChanFromNet pch_bar(*pfss_nc);
+      layer_planner_ptr->barrier(
+          party, backend, pe->pfss_coeff_batch(), pe->pfss_trunc_batch(), pch_bar, R.opens, R.net_chan, pol);
+    }
+  };
 
   int rows = static_cast<int>(B * T);
   int cols = static_cast<int>(D);
@@ -438,6 +459,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
 
   std::vector<uint64_t> ln1(B * T * D, 0);
   pe->begin_phase(runtime::PhaseExecutor::Phase::kLN1);
+  if (layer_planner_ptr) layer_planner_ptr->enter_phase();
   auto ln1_bundle = build_ln_bundle(
       rsqrt_bundle1,
       std::span<const proto::BeaverTriple64Share>(ln1_triples.data(), ln1_triples.size()));
@@ -448,10 +470,20 @@ void transformer_layer_forward(const TransformerConfig& cfg,
       rows,
       cols));
   pe->run(R);
+  drain_barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
   record_phase_plan(phase_planner);
+
+  // Record a clamp for LN1 output to tighten ranges for downstream attention.
+  if (ctx) {
+    compiler::RangeInterval ln_range = clamp_layernorm_range(fb);
+    SecretTensor ln1_t =
+        make_secret_tensor(ctx, view3(ln1.data(), B, T, D), make_scale(fb, true));
+    (void)record_clamp(ctx, ln1_t, ln_range, ln1_t.scale);
+  }
 
   // Attention (already task-based, no local shifts).
   pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
+  if (layer_planner_ptr) layer_planner_ptr->enter_phase();
   std::vector<uint64_t> attn_out(B * T * D, 0);
   attention_forward(cfg.attn,
                     party,
@@ -472,6 +504,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   // LayerNorm 2 via task.
   std::vector<uint64_t> ln2(attn_out.size(), 0);
   pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
+  if (layer_planner_ptr) layer_planner_ptr->enter_phase();
   auto ln2_bundle = build_ln_bundle(
       rsqrt_bundle2,
       std::span<const proto::BeaverTriple64Share>(ln2_triples.data(), ln2_triples.size()));
@@ -482,7 +515,16 @@ void transformer_layer_forward(const TransformerConfig& cfg,
       rows,
       cols));
   pe->run(R);
+  drain_barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
   record_phase_plan(phase_planner);
+
+  // Clamp LN2 output to feed tighter ranges into the MLP.
+  if (ctx) {
+    compiler::RangeInterval ln_range = clamp_layernorm_range(fb);
+    SecretTensor ln2_t =
+        make_secret_tensor(ctx, view3(ln2.data(), B, T, D), make_scale(fb, true));
+    (void)record_clamp(ctx, ln2_t, ln_range, ln2_t.scale);
+  }
 
   // MLP (already task-based for trunc/rescale).
   mlp_forward(cfg.mlp,
@@ -502,12 +544,32 @@ void transformer_layer_forward(const TransformerConfig& cfg,
 
   // Final safety flush and layer-level accounting for PFSS.
   if (layer_planner_ptr) {
-    runtime::ProtoChanFromNet pch_layer(ch);
+    runtime::ProtoChanFromNet pch_layer(*pfss_nc);
     runtime::PfssAsyncRunner async_runner;
+    static std::shared_ptr<std::mutex> pfss_chan_mu = std::make_shared<std::mutex>();
+    bool wait = !(ctx && ctx->allow_async_pfss);
     layer_planner_ptr->finalize_layer(
-        party, backend, pe->pfss_coeff_batch(), pe->pfss_trunc_batch(), pch_layer, &async_runner, /*async=*/false);
+        party,
+        backend,
+        pe->pfss_coeff_batch(),
+        pe->pfss_trunc_batch(),
+        pch_layer,
+        &async_runner,
+        wait,
+        pfss_chan_mu.get());
+    if (party == 0) {
+      const auto& totals = layer_planner_ptr->totals();
+      std::cerr << "[pfss-layer] phases=" << totals.phases
+                << " coeff_jobs=" << totals.coeff_jobs
+                << " trunc_jobs=" << totals.trunc_jobs
+                << " coeff_flushes=" << totals.coeff_flushes
+                << " trunc_flushes=" << totals.trunc_flushes
+                << " coeff_hatx=" << totals.coeff_hatx_words
+                << " trunc_hatx=" << totals.trunc_hatx_words << "\n";
+    }
   }
-  finalize_layer(*ctx, party, ch, backend);
+  bool flush_pfss = !(ctx && ctx->allow_async_pfss);
+  finalize_layer(*ctx, party, ch, backend, flush_pfss);
   ctx->pfss_layer_planner = prev_layer_planner;
 }
 

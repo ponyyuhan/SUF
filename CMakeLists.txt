@@ -219,6 +219,18 @@ add_executable(test_layernorm_task src/demo/test_layernorm_task.cpp)
 target_include_directories(test_layernorm_task PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_layernorm_task PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
 
+add_executable(test_pfss_planner src/demo/test_pfss_planner.cpp)
+target_include_directories(test_pfss_planner PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_pfss_planner PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
+
+add_executable(test_pfss_async src/demo/test_pfss_async.cpp)
+target_include_directories(test_pfss_async PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_pfss_async PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
+
+add_executable(test_planner_causal src/demo/test_planner_causal.cpp)
+target_include_directories(test_planner_causal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_planner_causal PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
+
 add_executable(bench_gemm src/bench/bench_gemm.cpp)
 target_include_directories(bench_gemm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(bench_gemm PRIVATE nn_ops suf_fss ${MYL7_LINK_LIBS})
@@ -236,6 +248,9 @@ endif()
 add_test(NAME test_trunc_task COMMAND test_trunc_task)
 add_test(NAME test_layernorm_task COMMAND test_layernorm_task)
 add_test(NAME test_staged_softmax COMMAND test_staged_softmax)
+add_test(NAME test_pfss_planner COMMAND test_pfss_planner)
+add_test(NAME test_pfss_async COMMAND test_pfss_async)
+add_test(NAME test_planner_causal COMMAND test_planner_causal)
 
 # Placeholder executor coverage for MLP/attention (reuse existing binaries for smoke until dedicated harnesses are added).
 add_test(NAME test_matmul_and_attention_executor COMMAND test_matmul_and_attention)

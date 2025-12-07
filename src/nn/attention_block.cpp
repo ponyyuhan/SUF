@@ -201,6 +201,9 @@ void attention_forward(const AttentionConfig& cfg,
   if (ctx) {
     compiler::Scale q_scale = make_scale(fb, true);
     compiler::RangeInterval x_range = compiler::RangeInterval::whole(true);
+    if (!ctx->graph.tensors().empty()) {
+      x_range = ctx->graph.tensors().back().range;
+    }
     SecretTensor x_t = make_secret_tensor(ctx, X_share, q_scale, x_range);
     q_range = x_range;
 
@@ -241,7 +244,11 @@ void attention_forward(const AttentionConfig& cfg,
     out_attrs.w_transposed = false;
     out_attrs.params = nullptr;
     out_attrs.frac_bits = fb;
-    out_attrs.x_range = qkv_t.range;  // conservative; attention stack clamps internally.
+    compiler::RangeInterval prob_range = clamp_softmax_range(fb);
+    int max_len = std::max(cache.S_max, T);
+    compiler::RangeInterval ctx_range =
+        compiler::propagate_matmul_out(prob_range, qkv_t.range, max_len, fb);
+    out_attrs.x_range = ctx_range;
     out_attrs.row_l1_max = row_l1_max(Wout_public, out_attrs.w_transposed);
     out_attrs.w_range = range_from_public_weights(Wout_public);
     auto out_acc = record_matmul(
@@ -272,6 +279,7 @@ void attention_forward(const AttentionConfig& cfg,
   mp.w_transposed = false;
   mp.local_rescale = false;
   mp.allow_legacy_shift = false;
+  net::Chan* pfss_nc = (ctx && ctx->pfss_net_chan) ? ctx->pfss_net_chan : &ch;
 
   if (!ctx) {
     throw std::runtime_error("attention_forward: LayerContext required (no local rescale fallback)");
@@ -281,8 +289,30 @@ void attention_forward(const AttentionConfig& cfg,
     const auto& st = planner.stats();
     if (st.coeff_jobs == 0 && st.trunc_jobs == 0 && st.coeff_flushes == 0 && st.trunc_flushes == 0) return;
     ctx->pfss_layer_planner->record_phase(planner, pe->pfss_coeff_batch(), pe->pfss_trunc_batch());
+    if (party == 0) {
+      std::cerr << "[pfss-phase][attn] coeff_jobs=" << st.coeff_jobs
+                << " trunc_jobs=" << st.trunc_jobs
+                << " coeff_flushes=" << st.coeff_flushes
+                << " trunc_flushes=" << st.trunc_flushes
+                << " coeff_hatx=" << pe->pfss_coeff_batch().stats().max_bucket_hatx
+                << " trunc_hatx=" << pe->pfss_trunc_batch().stats().max_bucket_hatx << "\n";
+    }
     pe->pfss_coeff_batch().reset_stats();
     pe->pfss_trunc_batch().reset_stats();
+  };
+  auto barrier = [&](const runtime::PfssLayerPlanner::BarrierPolicy& pol) {
+    if (ctx && ctx->pfss_layer_planner) {
+      runtime::ProtoChanFromNet pch_bar(*pfss_nc);
+      ctx->pfss_layer_planner->barrier(
+          party,
+          ctx->trunc_ctx->backend(),
+          pe->pfss_coeff_batch(),
+          pe->pfss_trunc_batch(),
+          pch_bar,
+          &pe->open_collector(),
+          &ch,
+          pol);
+    }
   };
 
   matmul_publicW(view2(const_cast<uint64_t*>(X_share.data), B * T, D),
@@ -302,7 +332,7 @@ void attention_forward(const AttentionConfig& cfg,
       compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng_qkv, trunc_params_qkv, qkv.size());
   {
     runtime::PhaseResources truncR;
-    runtime::ProtoChanFromNet pch(ch);
+    runtime::ProtoChanFromNet pch(*pfss_nc);
     truncR.party = party;
     truncR.net_chan = &ch;
     truncR.pfss_backend = &ctx->trunc_ctx->backend();
@@ -320,12 +350,14 @@ void attention_forward(const AttentionConfig& cfg,
     pe->open_collector().set_limits(open_lim);
     pe->set_max_flushes(1ull << 11);
     pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
+    if (ctx && ctx->pfss_layer_planner) ctx->pfss_layer_planner->enter_phase();
     auto trunc_task = std::make_unique<runtime::TruncTask>(
         &trunc_qkv_bundle,
         std::span<const uint64_t>(qkv.data(), qkv.size()),
         std::span<uint64_t>(qkv.data(), qkv.size()));
     pe->add_task(std::move(trunc_task));
     pe->run(truncR);
+    barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
     record_phase_plan(pfss_phase_planner);
   }
 
@@ -358,7 +390,7 @@ void attention_forward(const AttentionConfig& cfg,
   runtime::PhaseResources phase_R;
   phase_R.party = party;
   phase_R.net_chan = &ch;
-  runtime::ProtoChanFromNet pch(ch);
+  runtime::ProtoChanFromNet pch(*pfss_nc);
   runtime::PfssPhasePlanner phase_planner;
   std::mt19937_64 rng(123);
   if (use_phase_softmax) {
@@ -535,6 +567,7 @@ void attention_forward(const AttentionConfig& cfg,
 
     // Phase: score matmul (unscaled Q2f).
     pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
+    if (ctx && ctx->pfss_layer_planner) ctx->pfss_layer_planner->enter_phase();
     for (size_t row = 0; row < rows; ++row) {
       auto q_row = std::span<const uint64_t>(q_mat.data() + row * Dh, Dh);
       auto k_row = std::span<const uint64_t>(k_mat.data() + row * cur_len * Dh, cur_len * Dh);
@@ -546,6 +579,7 @@ void attention_forward(const AttentionConfig& cfg,
       pe->add_task(std::move(score_task));
     }
     pe->run(phase_R);
+    barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
     record_phase_plan(phase_planner);
 
     // Rescale scores Q2f -> Qf via truncation (no inline shift).
@@ -561,12 +595,14 @@ void attention_forward(const AttentionConfig& cfg,
         compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng_score, score_trunc_p, score_share.size());
     {
       pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
+      if (ctx && ctx->pfss_layer_planner) ctx->pfss_layer_planner->enter_phase();
       auto trunc_task = std::make_unique<runtime::TruncTask>(
           &score_trunc_bundle,
           std::span<const uint64_t>(score_share.data(), score_share.size()),
           std::span<uint64_t>(score_qf.data(), score_qf.size()));
       pe->add_task(std::move(trunc_task));
       pe->run(phase_R);
+      barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
       record_phase_plan(phase_planner);
     }
 
@@ -580,12 +616,14 @@ void attention_forward(const AttentionConfig& cfg,
     std::vector<uint64_t> score_scaled_qf(score_qf.size(), 0);
     {
       pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
+      if (ctx && ctx->pfss_layer_planner) ctx->pfss_layer_planner->enter_phase();
       auto trunc_task = std::make_unique<runtime::TruncTask>(
           &score_trunc_bundle,
           std::span<const uint64_t>(score_scaled_q2f.data(), score_scaled_q2f.size()),
           std::span<uint64_t>(score_scaled_qf.data(), score_scaled_qf.size()));
       pe->add_task(std::move(trunc_task));
       pe->run(phase_R);
+      barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
       record_phase_plan(phase_planner);
     }
 
@@ -851,7 +889,7 @@ void attention_forward(const AttentionConfig& cfg,
       compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng_out, trunc_params_out, Y_share.numel());
   {
     runtime::PhaseResources truncR;
-    runtime::ProtoChanFromNet pch(ch);
+    runtime::ProtoChanFromNet pch(*pfss_nc);
     truncR.party = party;
     truncR.net_chan = &ch;
     truncR.pfss_backend = &ctx->trunc_ctx->backend();

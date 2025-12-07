@@ -40,13 +40,40 @@ void mlp_forward(const MLPConfig& cfg,
   if (!ctx) {
     throw std::runtime_error("mlp_forward: LayerContext required (no local rescale fallback)");
   }
+  compiler::RangeInterval x_range_hint = compiler::RangeInterval::whole(true);
+  if (ctx && !ctx->graph.tensors().empty()) {
+    x_range_hint = ctx->graph.tensors().back().range;
+  }
+  net::Chan* pfss_nc = (ctx && ctx->pfss_net_chan) ? ctx->pfss_net_chan : &ch;
   auto record_phase_plan = [&](runtime::PfssPhasePlanner& planner) {
     if (!ctx || !ctx->pfss_layer_planner) return;
     const auto& st = planner.stats();
     if (st.coeff_jobs == 0 && st.trunc_jobs == 0 && st.coeff_flushes == 0 && st.trunc_flushes == 0) return;
     ctx->pfss_layer_planner->record_phase(planner, pe->pfss_coeff_batch(), pe->pfss_trunc_batch());
+    if (party == 0) {
+      std::cerr << "[pfss-phase][mlp] coeff_jobs=" << st.coeff_jobs
+                << " trunc_jobs=" << st.trunc_jobs
+                << " coeff_flushes=" << st.coeff_flushes
+                << " trunc_flushes=" << st.trunc_flushes
+                << " coeff_hatx=" << pe->pfss_coeff_batch().stats().max_bucket_hatx
+                << " trunc_hatx=" << pe->pfss_trunc_batch().stats().max_bucket_hatx << "\n";
+    }
     pe->pfss_coeff_batch().reset_stats();
     pe->pfss_trunc_batch().reset_stats();
+  };
+  auto barrier = [&](const runtime::PfssLayerPlanner::BarrierPolicy& pol) {
+    if (ctx && ctx->pfss_layer_planner) {
+      runtime::ProtoChanFromNet pch_bar(*pfss_nc);
+      ctx->pfss_layer_planner->barrier(
+          party,
+          ctx->trunc_ctx->backend(),
+          pe->pfss_coeff_batch(),
+          pe->pfss_trunc_batch(),
+          pch_bar,
+          &pe->open_collector(),
+          &ch,
+          pol);
+    }
   };
 
   std::vector<uint64_t> hidden(B * T * H, 0);
@@ -60,8 +87,7 @@ void mlp_forward(const MLPConfig& cfg,
   compiler::RangeInterval mat2_out_range = compiler::RangeInterval::whole(true);
   if (ctx) {
     compiler::Scale q_scale = make_scale(cfg.frac_bits, true);
-    compiler::RangeInterval x_range = compiler::RangeInterval::whole(true);
-    SecretTensor x_t = make_secret_tensor(ctx, X_share, q_scale, x_range);
+    SecretTensor x_t = make_secret_tensor(ctx, X_share, q_scale, x_range_hint);
 
     compiler::MatmulAttrs mat1;
     mat1.M = B * T;
@@ -92,6 +118,9 @@ void mlp_forward(const MLPConfig& cfg,
     r1.to_frac = cfg.frac_bits;
     auto hidden_t = record_rescale(ctx, acc1, r1, q_scale, hidden_range,
                                    view2(hidden.data(), B * T, H));
+    // SiLU is tightly bounded; record a clamp so downstream matmul can exploit the gap cert.
+    compiler::RangeInterval silu_range = clamp_silu_range(cfg.frac_bits);
+    auto silu_t = record_clamp(ctx, hidden_t, silu_range, q_scale);
 
     compiler::MatmulAttrs mat2;
     mat2.M = B * T;
@@ -103,18 +132,18 @@ void mlp_forward(const MLPConfig& cfg,
     mat2.row_l1_max = row_l1_max(W2_public, mp.w_transposed);
     row_l1_max2 = mat2.row_l1_max;
     mat2.w_range = range_from_public_weights(W2_public);
-    mat2.x_range = hidden_t.range;
+    mat2.x_range = silu_t.range;
     mat2_x_range = mat2.x_range;
     mat2_w_range = mat2.w_range;
     auto acc2 =
-        record_matmul(ctx, hidden_t, mat2, make_scale(2 * cfg.frac_bits, true),
+        record_matmul(ctx, silu_t, mat2, make_scale(2 * cfg.frac_bits, true),
                       mat2.row_l1_max > 0
-                          ? compiler::propagate_matmul_accum_rowl1(hidden_t.range, mat2.row_l1_max)
-                          : compiler::propagate_matmul_accum(hidden_t.range, mat2.w_range, mat2.K),
+                          ? compiler::propagate_matmul_accum_rowl1(silu_t.range, mat2.row_l1_max)
+                          : compiler::propagate_matmul_accum(silu_t.range, mat2.w_range, mat2.K),
                       Y_share);
 
     compiler::RangeInterval out_range =
-        compiler::propagate_matmul_out(hidden_t.range, mat2.w_range, mat2.K, cfg.frac_bits);
+        compiler::propagate_matmul_out(silu_t.range, mat2.w_range, mat2.K, cfg.frac_bits);
     mat2_out_range = out_range;
     compiler::RescaleAttrs r2;
     r2.matmul_op = acc2.producer_op;
@@ -130,7 +159,7 @@ void mlp_forward(const MLPConfig& cfg,
   bool use_phase = (ctx && pe && ctx->trunc_ctx);
   std::vector<uint64_t> hidden_scaled = hidden;
   runtime::PhaseResources R;
-  runtime::ProtoChanFromNet pch(ch);
+  runtime::ProtoChanFromNet pch(*pfss_nc);
   runtime::PfssPhasePlanner pfss_phase_planner;
   if (use_phase) {
     R.party = party;
@@ -209,14 +238,18 @@ void mlp_forward(const MLPConfig& cfg,
 
     // First wave: trunc hidden matmul accum to Qf.
     pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
+    if (ctx && ctx->pfss_layer_planner) ctx->pfss_layer_planner->enter_phase();
     pe->add_task(std::move(trunc_task1));
     pe->run(R);
+    barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
     record_phase_plan(pfss_phase_planner);
 
     // Second wave: apply SiLU cubic on the truncated hidden.
     pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
+    if (ctx && ctx->pfss_layer_planner) ctx->pfss_layer_planner->enter_phase();
     pe->add_task(std::move(silu_task));
     pe->run(R);
+    barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
     record_phase_plan(pfss_phase_planner);
 
     // Linear 2 on the updated hidden.
@@ -230,10 +263,12 @@ void mlp_forward(const MLPConfig& cfg,
     auto plan2 = make_plan(B * T, H, D, mat2_x_range, mat2_w_range, row_l1_max2);
     std::vector<uint64_t> y_scaled(Y_share.numel(), 0);
     pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
+    if (ctx && ctx->pfss_layer_planner) ctx->pfss_layer_planner->enter_phase();
     pe->add_task(std::make_unique<runtime::TruncTask>(
         &plan2.bundle, std::span<const uint64_t>(Y_share.data, Y_share.numel()),
         std::span<uint64_t>(y_scaled.data(), y_scaled.size())));
     pe->run(R);
+    barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
     record_phase_plan(pfss_phase_planner);
     for (size_t i = 0; i < Y_share.numel() && i < y_scaled.size(); ++i) {
       Y_share.data[i] = y_scaled[i];

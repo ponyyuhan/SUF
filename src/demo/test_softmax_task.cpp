@@ -433,6 +433,18 @@ int main() {
               << " vs " << r0.stats.pfss_trunc_jobs << ")\n";
     return 1;
   }
+  if (m0.planner_stats.coeff_jobs > r0.planner_stats.coeff_jobs ||
+      m0.planner_stats.trunc_jobs > r0.planner_stats.trunc_jobs) {
+    std::cerr << "Planner stats did not shrink under valid_lens (coeff " << m0.planner_stats.coeff_jobs
+              << " vs " << r0.planner_stats.coeff_jobs << ", trunc " << m0.planner_stats.trunc_jobs
+              << " vs " << r0.planner_stats.trunc_jobs << ")\n";
+    return 1;
+  }
+  if (m0.planner_stats.coeff_flushes > 1 || m0.planner_stats.trunc_flushes > 1) {
+    std::cerr << "Masked softmax expected at most one planner flush, got coeff="
+              << m0.planner_stats.coeff_flushes << " trunc=" << m0.planner_stats.trunc_flushes << "\n";
+    return 1;
+  }
 
   // Super-plan prototype: run two softmax tasks back-to-back with shared planner/flush.
   {

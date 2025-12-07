@@ -1,7 +1,9 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <type_traits>
 #include <vector>
 #if __has_include(<span>)
@@ -38,8 +40,15 @@
 
 namespace runtime {
 
+struct OpenSlot {
+  std::vector<int64_t> opened;
+  size_t n = 0;
+  std::atomic<bool> ready{false};
+};
+
 struct OpenHandle {
-  size_t offset = static_cast<size_t>(-1);
+  std::shared_ptr<OpenSlot> slot;
+  size_t offset = 0;
   size_t len = 0;
 };
 
@@ -63,6 +72,10 @@ class OpenCollector {
   // Flush all enqueued opens over the channel; results become available via view().
   void flush(int party, net::Chan& ch);
 
+  // Pending words currently buffered (before flush).
+  size_t pending_words() const { return pending_words_; }
+  const Limits& limits() const { return limits_; }
+
   // View opened values for a handle. Valid until next clear/flush.
   std::span<const int64_t> view(const OpenHandle& h) const;
 
@@ -80,12 +93,11 @@ class OpenCollector {
  private:
   struct Request {
     std::vector<uint64_t> diff;
+    std::shared_ptr<OpenSlot> slot;
     size_t offset = 0;
     size_t len = 0;
   };
   std::vector<Request> requests_;
-  std::vector<int64_t> opened_;
-  bool opened_valid_ = false;
   Stats stats_;
   Limits limits_;
   size_t pending_words_ = 0;

@@ -103,6 +103,17 @@ class PhaseExecutor {
     opens_.reset_stats();
   }
 
+  struct LazyLimits {
+    size_t open_pending_words = 1ull << 18;
+    size_t coeff_pending_jobs = 1ull << 12;
+    size_t trunc_pending_jobs = 1ull << 12;
+    size_t hatx_pending_words = 1ull << 20;
+  };
+
+  void set_lazy_mode(bool enable) { lazy_mode_ = enable; }
+  void set_lazy_limits(const LazyLimits& lim) { lazy_limits_ = lim; }
+  void set_keep_batches(bool keep) { keep_batches_ = keep; }
+
   template <typename PfssChanT>
   void finalize_pfss_once(int party, proto::PfssBackendBatch& backend, PfssChanT& pfss_ch) {
     auto flush_once = [&](PfssSuperBatch& b) {
@@ -115,6 +126,10 @@ class PhaseExecutor {
   }
 
   void run(PhaseResources& R) {
+    if (lazy_mode_) {
+      run_lazy(R);
+      return;
+    }
     size_t flush_guard = 0;
     bool planner_flushed = false;
     for (;;) {
@@ -220,12 +235,115 @@ class PhaseExecutor {
   }
 
  private:
+  void run_lazy(PhaseResources& R) {
+    size_t flush_guard = 0;
+    for (;;) {
+      bool any_not_done = false;
+      bool want_open = false;
+      bool want_pfss_coeff = false;
+      bool want_pfss_trunc = false;
+      bool progressed = false;
+      for (auto& t : tasks_) {
+        if (t->done()) continue;
+        any_not_done = true;
+        auto need = t->step(R);
+        if (need == detail::Need::Open) want_open = true;
+        if (need == detail::Need::PfssCoeff) want_pfss_coeff = true;
+        if (need == detail::Need::PfssTrunc) want_pfss_trunc = true;
+        if (need == detail::Need::None) progressed = true;
+      }
+      if (!any_not_done) break;
+
+      auto do_flush_open = [&]() -> bool {
+        if (!R.opens || !R.net_chan || !R.opens->has_pending()) return false;
+        if (flush_guard + 1 > max_flushes_) {
+          throw std::runtime_error("PhaseExecutor: open flush budget exceeded");
+        }
+        R.opens->flush(R.party, *R.net_chan);
+        flush_guard++;
+        return true;
+      };
+      auto do_flush_pfss = [&](PfssSuperBatch* b) -> bool {
+        if (!b || !R.pfss_backend || !R.pfss_chan) return false;
+        bool did = false;
+        if (b->has_pending()) {
+          if (flush_guard + 1 > max_flushes_) {
+            throw std::runtime_error("PhaseExecutor: PFSS flush budget exceeded");
+          }
+          b->flush_eval(R.party, *R.pfss_backend, *R.pfss_chan);
+          flush_guard++;
+          did = true;
+        }
+        if (b->has_flushed()) {
+          if (flush_guard + 1 > max_flushes_) {
+            throw std::runtime_error("PhaseExecutor: PFSS finalize budget exceeded");
+          }
+          b->finalize_all(R.party, *R.pfss_chan);
+          flush_guard++;
+          did = true;
+        }
+        return did;
+      };
+
+      bool budget_open = R.opens &&
+                         lazy_limits_.open_pending_words > 0 &&
+                         R.opens->pending_words() >= lazy_limits_.open_pending_words;
+      auto coeff_stats = pfss_coeff_.stats();
+      auto trunc_stats = pfss_trunc_.stats();
+      bool budget_coeff = lazy_limits_.coeff_pending_jobs > 0 &&
+                          coeff_stats.pending_jobs >= lazy_limits_.coeff_pending_jobs;
+      bool budget_trunc = lazy_limits_.trunc_pending_jobs > 0 &&
+                          trunc_stats.pending_jobs >= lazy_limits_.trunc_pending_jobs;
+      bool budget_hatx = lazy_limits_.hatx_pending_words > 0 &&
+                         coeff_stats.pending_hatx >= lazy_limits_.hatx_pending_words;
+
+      if (progressed) {
+        if (budget_open) {
+          do_flush_open();
+        } else if (budget_coeff || budget_hatx) {
+          do_flush_pfss(&pfss_coeff_);
+        } else if (budget_trunc) {
+          do_flush_pfss(&pfss_trunc_);
+        }
+        continue;
+      }
+
+      if (want_open && do_flush_open()) continue;
+      if (want_pfss_coeff && do_flush_pfss(&pfss_coeff_)) continue;
+      if (want_pfss_trunc && do_flush_pfss(&pfss_trunc_)) continue;
+      throw std::runtime_error("PhaseExecutor deadlock (lazy): tasks waiting but no pending flush");
+    }
+
+    const auto& os = opens_.stats();
+    stats_.open_flushes = os.flushes;
+    stats_.opened_words = os.opened_words;
+    const auto& pcs = pfss_coeff_.stats();
+    const auto& pts = pfss_trunc_.stats();
+    stats_.pfss_coeff_flushes = pcs.flushes;
+    stats_.pfss_coeff_jobs = pcs.jobs;
+    stats_.pfss_coeff_arith_words = pcs.arith_words;
+    stats_.pfss_coeff_pred_bits = pcs.pred_bits;
+    stats_.pfss_trunc_flushes = pts.flushes;
+    stats_.pfss_trunc_jobs = pts.jobs;
+    stats_.pfss_trunc_arith_words = pts.arith_words;
+    stats_.pfss_trunc_pred_bits = pts.pred_bits;
+
+    if (!keep_batches_) {
+      pfss_coeff_.clear();
+      pfss_trunc_.clear();
+      opens_.clear();
+    }
+  }
+
   std::vector<std::unique_ptr<detail::PhaseTask>> tasks_;
   PfssSuperBatch pfss_coeff_;
   PfssSuperBatch pfss_trunc_;
   OpenCollector opens_;
   Stats stats_;
   size_t max_flushes_ = 1ull << 16;  // safety guard
+  bool lazy_mode_ = false;
+  bool keep_batches_ = false;
+  LazyLimits lazy_limits_{};
 };
 
 }  // namespace runtime

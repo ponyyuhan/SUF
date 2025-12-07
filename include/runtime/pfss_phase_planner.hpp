@@ -1,9 +1,13 @@
 #pragma once
 
 #include <stdexcept>
+#include <algorithm>
+#include <optional>
 
 #include "runtime/pfss_superbatch.hpp"
 #include "runtime/pfss_async_runner.hpp"
+#include "runtime/open_collector.hpp"
+#include "mpc/net.hpp"
 
 namespace runtime {
 
@@ -64,6 +68,13 @@ class PfssLayerPlanner {
  public:
   PfssLayerPlanner() = default;
 
+  struct BarrierPolicy {
+    bool drain_open = false;
+    bool drain_pfss_coeff = false;
+    bool drain_pfss_trunc = false;
+    bool drain_all = false;
+  };
+
   struct Limits {
     size_t max_coeff_jobs = 1ull << 16;
     size_t max_trunc_jobs = 1ull << 16;
@@ -88,11 +99,13 @@ class PfssLayerPlanner {
   const Totals& totals() const { return totals_; }
   void reset() { totals_ = Totals{}; }
 
+  void begin_layer() { reset(); }
+  void enter_phase() { totals_.phases++; enforce_limits(); }
+
   void record_phase(const PfssPhasePlanner& planner,
                     const PfssSuperBatch& coeff_batch,
                     const PfssSuperBatch& trunc_batch) {
     const auto& ps = planner.stats();
-    totals_.phases++;
     totals_.coeff_jobs += ps.coeff_jobs;
     totals_.trunc_jobs += ps.trunc_jobs;
     totals_.coeff_hatx_words += coeff_batch.stats().max_bucket_hatx;
@@ -100,6 +113,42 @@ class PfssLayerPlanner {
     totals_.coeff_flushes += ps.coeff_flushes;
     totals_.trunc_flushes += ps.trunc_flushes;
     enforce_limits();
+  }
+
+  template <typename PfssChanT>
+  void barrier(int party,
+               proto::PfssBackendBatch& backend,
+               PfssSuperBatch& coeff_batch,
+               PfssSuperBatch& trunc_batch,
+               PfssChanT& pfss_ch,
+               OpenCollector* opens,
+               net::Chan* net_ch,
+               const BarrierPolicy& policy) {
+    auto flush_open = [&](OpenCollector* oc, net::Chan* nc) {
+      if (!oc || !nc) return;
+      if (oc->has_pending()) {
+        oc->flush(party, *nc);
+      }
+    };
+    auto flush_pfss = [&](PfssSuperBatch& b) {
+      if (b.has_pending()) {
+        b.flush_eval(party, backend, pfss_ch);
+      }
+      if (b.has_flushed()) {
+        b.finalize_all(party, pfss_ch);
+      }
+    };
+    if (policy.drain_all || policy.drain_open) {
+      flush_open(opens, net_ch);
+    }
+    if (policy.drain_all || policy.drain_pfss_coeff) {
+      flush_pfss(coeff_batch);
+    }
+    if (policy.drain_all || policy.drain_pfss_trunc) {
+      if (&trunc_batch != &coeff_batch) flush_pfss(trunc_batch);
+    }
+    // We do not clear batches here; callers can keep slots alive across phases.
+    // Totals will be updated when finalize_layer() is invoked.
   }
 
   // Optional safety flush at layer end; useful when phases forgot to clear.
@@ -110,28 +159,69 @@ class PfssLayerPlanner {
                       PfssSuperBatch& trunc_batch,
                       PfssChanT& pfss_ch,
                       PfssAsyncRunner* async_runner = nullptr,
-                      bool async = false) {
+                      bool wait = true,
+                      std::mutex* chan_mu = nullptr) {
+    auto pending_snapshot = [&](PfssSuperBatch& b) {
+      struct Pending {
+        size_t jobs = 0;
+        size_t hatx_words = 0;
+        size_t flushes = 0;
+      };
+      Pending p;
+      const auto& st = b.stats();
+      p.jobs = st.jobs + st.pending_jobs;
+      p.hatx_words = std::max(st.max_bucket_hatx, st.pending_hatx);
+      if (b.has_pending()) p.flushes += 1;
+      p.flushes += st.flushes;
+      return p;
+    };
+
     if (async_runner) {
-      async_runner->start_flush(party, backend, coeff_batch, &trunc_batch, pfss_ch, async);
-      if (async) async_runner->wait();  // caller can still choose to block
+      auto coeff_pending = pending_snapshot(coeff_batch);
+      std::optional<decltype(coeff_pending)> trunc_pending;
+      if (&trunc_batch != &coeff_batch) trunc_pending = pending_snapshot(trunc_batch);
+      bool spawn_async = !wait;
+      async_runner->start_flush(party, backend, coeff_batch, &trunc_batch, pfss_ch, spawn_async, chan_mu);
+      if (wait) {
+        auto stats = async_runner->take_stats();
+        if (stats) {
+          totals_.coeff_jobs += stats->coeff.jobs;
+          totals_.coeff_hatx_words += stats->coeff.max_bucket_hatx;
+          totals_.coeff_flushes += stats->coeff.flushes;
+          if (&trunc_batch != &coeff_batch) {
+            totals_.trunc_jobs += stats->trunc.jobs;
+            totals_.trunc_hatx_words += stats->trunc.max_bucket_hatx;
+            totals_.trunc_flushes += stats->trunc.flushes;
+          }
+        }
+      } else {
+        totals_.coeff_jobs += coeff_pending.jobs;
+        totals_.coeff_hatx_words += coeff_pending.hatx_words;
+        totals_.coeff_flushes += coeff_pending.flushes;
+        if (&trunc_batch != &coeff_batch && trunc_pending) {
+          totals_.trunc_jobs += trunc_pending->jobs;
+          totals_.trunc_hatx_words += trunc_pending->hatx_words;
+          totals_.trunc_flushes += trunc_pending->flushes;
+        }
+      }
     } else {
-      auto flush_once = [&](PfssSuperBatch& b, size_t& flush_counter) {
+      auto flush_once = [&](PfssSuperBatch& b, size_t& flush_counter, size_t& jobs_counter, size_t& hatx_counter) {
         if (b.has_pending()) {
           b.flush_eval(party, backend, pfss_ch);
-          flush_counter += b.stats().flushes;
         }
         if (b.has_flushed()) {
           b.finalize_all(party, pfss_ch);
-          flush_counter += b.stats().flushes;
         }
+        jobs_counter += b.stats().jobs;
+        hatx_counter += b.stats().max_bucket_hatx;
+        flush_counter += b.stats().flushes;
+        b.clear();
       };
-      flush_once(coeff_batch, totals_.coeff_flushes);
-      if (&trunc_batch != &coeff_batch) flush_once(trunc_batch, totals_.trunc_flushes);
+      flush_once(coeff_batch, totals_.coeff_flushes, totals_.coeff_jobs, totals_.coeff_hatx_words);
+      if (&trunc_batch != &coeff_batch) {
+        flush_once(trunc_batch, totals_.trunc_flushes, totals_.trunc_jobs, totals_.trunc_hatx_words);
+      }
     }
-    totals_.coeff_jobs += coeff_batch.stats().jobs;
-    totals_.trunc_jobs += trunc_batch.stats().jobs;
-    totals_.coeff_hatx_words += coeff_batch.stats().max_bucket_hatx;
-    totals_.trunc_hatx_words += trunc_batch.stats().max_bucket_hatx;
     enforce_limits();
   }
 

@@ -11,6 +11,14 @@ PfssHandle PfssSuperBatch::enqueue_composite(PreparedCompositeJob job) {
   if (job.token == static_cast<size_t>(-1)) {
     job.token = completed_.size();
   }
+  if (slots_.size() <= job.token) {
+    slots_.resize(job.token + 1);
+  }
+  if (!slots_[job.token]) {
+    slots_[job.token] = std::make_shared<PfssResultSlot>();
+    slots_[job.token]->arith_storage = std::make_shared<std::vector<uint64_t>>();
+    slots_[job.token]->bool_storage = std::make_shared<std::vector<uint64_t>>();
+  }
   size_t hatx_words = job.hatx_public.size();
   size_t new_pending_jobs = pending_jobs_ + 1;
   size_t new_pending_hatx = pending_hatx_words_ + hatx_words;
@@ -29,7 +37,7 @@ PfssHandle PfssSuperBatch::enqueue_composite(PreparedCompositeJob job) {
   }
   jobs_.push_back(std::move(job));
   flushed_ = false;
-  return PfssHandle{jobs_.back().token};
+  return PfssHandle{jobs_.back().token, slots_[jobs_.back().token]};
 }
 
 PfssHandle PfssSuperBatch::enqueue_truncation(const compiler::TruncationLoweringResult& bundle,
@@ -47,6 +55,7 @@ PfssHandle PfssSuperBatch::enqueue_truncation(const compiler::TruncationLowering
 }
 
 bool PfssSuperBatch::ready(const PfssHandle& h) const {
+  if (h.slot && h.slot->ready.load()) return true;
   return h.token < completed_.size() && !completed_[h.token].arith.empty();
 }
 
@@ -207,9 +216,22 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
 }
 
 PfssResultView PfssSuperBatch::view(const PfssHandle& h) const {
-  if (h.token >= completed_.size()) return PfssResultView{};
-  const auto& cj = completed_[h.token];
   PfssResultView v;
+  if (h.slot && h.slot->ready.load()) {
+    if (h.slot->arith_storage) {
+      v.arith = h.slot->arith_storage->data();
+      v.arith_words = h.slot->arith_storage->size();
+    }
+    if (h.slot->bool_storage) {
+      v.bools = h.slot->bool_storage->data();
+      v.bool_words = h.slot->bool_storage->size();
+    }
+    v.r = h.slot->r;
+    v.ell = h.slot->ell;
+    return v;
+  }
+  if (h.token >= completed_.size()) return v;
+  const auto& cj = completed_[h.token];
   v.arith = cj.arith.data();
   v.arith_words = cj.arith.size();
   v.bools = cj.bools.data();
@@ -221,6 +243,13 @@ PfssResultView PfssSuperBatch::view(const PfssHandle& h) const {
 
 PfssSharedResult PfssSuperBatch::view_shared(const PfssHandle& h) const {
   PfssSharedResult out;
+  if (h.slot && h.slot->ready.load()) {
+    out.r = h.slot->r;
+    out.ell = h.slot->ell;
+    out.arith = h.slot->arith_storage;
+    out.bools = h.slot->bool_storage;
+    return out;
+  }
   if (h.token >= completed_.size()) return out;
   const auto& cj = completed_[h.token];
   out.r = cj.r;
@@ -257,6 +286,20 @@ void PfssSuperBatch::populate_completed_() {
     } else {
       cj.bools.clear();
     }
+    if (job.token < slots_.size() && slots_[job.token]) {
+      auto& slot = slots_[job.token];
+      slot->r = r;
+      slot->ell = ell;
+      if (!slot->arith_storage) slot->arith_storage = std::make_shared<std::vector<uint64_t>>();
+      if (!slot->bool_storage) slot->bool_storage = std::make_shared<std::vector<uint64_t>>();
+      slot->arith_storage->assign(arith_base, arith_base + arith_words);
+      if (bool_base && bool_words > 0) {
+        slot->bool_storage->assign(bool_base, bool_base + bool_words);
+      } else {
+        slot->bool_storage->clear();
+      }
+      slot->ready.store(true);
+    }
   }
 }
 
@@ -265,6 +308,7 @@ void PfssSuperBatch::clear() {
   group_results_.clear();
   completed_.clear();
   slices_.clear();
+  slots_.clear();
   flushed_ = false;
   pending_jobs_ = 0;
   pending_hatx_words_ = 0;
@@ -334,19 +378,29 @@ void PfssSuperBatch::finalize_all(int party, proto::IChannel& ch) {
     cj.r = r;
     cj.ell = ell;
     cj.arith.resize(arith_slice.size());
-      for (size_t i = 0; i < sl.len; ++i) {
-        for (size_t rr = 0; rr < r; ++rr) {
-          size_t out_idx = i * r + rr;
-          uint64_t val = arith_slice[out_idx];
-          uint64_t rout = (rr < job.key->r_out_share.size()) ? job.key->r_out_share[rr] : 0ull;
-          val = proto::sub_mod(val, rout);
-          cj.arith[out_idx] = val;
-          if (out_idx < job.out.numel() && job.out.data) {
-            job.out.data[out_idx] = val;
-          }
+    for (size_t i = 0; i < sl.len; ++i) {
+      for (size_t rr = 0; rr < r; ++rr) {
+        size_t out_idx = i * r + rr;
+        uint64_t val = arith_slice[out_idx];
+        uint64_t rout = (rr < job.key->r_out_share.size()) ? job.key->r_out_share[rr] : 0ull;
+        val = proto::sub_mod(val, rout);
+        cj.arith[out_idx] = val;
+        if (out_idx < job.out.numel() && job.out.data) {
+          job.out.data[out_idx] = val;
         }
+      }
     }
     cj.bools = std::move(bool_slice);
+    if (job.token < slots_.size() && slots_[job.token]) {
+      auto& slot = slots_[job.token];
+      slot->r = r;
+      slot->ell = ell;
+      if (!slot->arith_storage) slot->arith_storage = std::make_shared<std::vector<uint64_t>>();
+      if (!slot->bool_storage) slot->bool_storage = std::make_shared<std::vector<uint64_t>>();
+      slot->arith_storage->assign(cj.arith.begin(), cj.arith.end());
+      slot->bool_storage->assign(cj.bools.begin(), cj.bools.end());
+      slot->ready.store(true);
+    }
   }
   jobs_.clear();
   slices_.clear();

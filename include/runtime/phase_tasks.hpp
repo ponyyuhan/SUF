@@ -187,8 +187,15 @@ class TruncTask final : public detail::PhaseTask {
       hook_ = (R.party == 0) ? bundle_->hook0.get() : bundle_->hook1.get();
       if (!hook_) throw std::runtime_error("TruncTask: hook missing");
       hook_->configure(key_->compiled.layout);
-      if (key_->r_in_share_vec.empty() || key_->r_in_share_vec.size() < in_.size()) {
-        throw std::runtime_error("TruncTask: r_in_share_vec missing or too small");
+      if (key_->r_in_share_vec.empty()) {
+        r_in_fallback_.assign(in_.size(), key_->r_in_share);
+        r_in_src_ = &r_in_fallback_;
+      } else if (key_->r_in_share_vec.size() < in_.size()) {
+        // Some backends only populate scalar r_in; repeat it to cover the full input.
+        r_in_fallback_.assign(in_.size(), key_->r_in_share);
+        r_in_src_ = &r_in_fallback_;
+      } else {
+        r_in_src_ = &key_->r_in_share_vec;
       }
     }
 
@@ -196,7 +203,10 @@ class TruncTask final : public detail::PhaseTask {
       case St::OpenXhat: {
         masked_.resize(in_.size());
         for (size_t i = 0; i < in_.size(); ++i) {
-          uint64_t rin = key_->r_in_share_vec[i];
+          if (!r_in_src_ || r_in_src_->size() <= i) {
+            throw std::runtime_error("TruncTask: missing r_in share");
+          }
+          uint64_t rin = (*r_in_src_)[i];
           masked_[i] = proto::add_mod(in_[i], rin);
         }
         if (R.opens) {
@@ -251,13 +261,13 @@ class TruncTask final : public detail::PhaseTask {
         for (size_t i = 0; i < opened_.size(); ++i) {
           job.hatx_public[i] = static_cast<uint64_t>(opened_[i]);
         }
-        token_ = R.pfss_trunc->enqueue_composite(std::move(job)).token;
+        h_pfss_ = R.pfss_trunc->enqueue_composite(std::move(job));
         st_ = St::WaitPfss;
         return detail::Need::PfssTrunc;
       }
       case St::WaitPfss: {
-        if (!R.pfss_trunc->ready(PfssHandle{token_})) return detail::Need::PfssTrunc;
-        auto v = R.pfss_trunc->view(PfssHandle{token_});
+        if (!R.pfss_trunc->ready(h_pfss_)) return detail::Need::PfssTrunc;
+        auto v = R.pfss_trunc->view(h_pfss_);
         size_t elems = in_.size();
         if (v.arith_words < elems * v.r) {
           throw std::runtime_error("TruncTask: PFSS arith slice too small");
@@ -294,10 +304,12 @@ class TruncTask final : public detail::PhaseTask {
   gates::PostProcHook* hook_ = nullptr;
   std::span<const uint64_t> in_;
   std::span<uint64_t> out_;
+  const std::vector<uint64_t>* r_in_src_ = nullptr;
+  std::vector<uint64_t> r_in_fallback_;
   std::vector<uint64_t> masked_;
   std::vector<int64_t> opened_;
   OpenHandle h_open_{};
-  size_t token_ = static_cast<size_t>(-1);
+  PfssHandle h_pfss_{};
 
   const uint64_t* job_hatx() {
     if (hatx_public_.empty()) {
@@ -420,13 +432,13 @@ class RsqrtTask final : public detail::PhaseTask {
           job.hatx_public[i] = static_cast<uint64_t>(opened_[i]);
         }
         if (!R.pfss_coeff) throw std::runtime_error("RsqrtTask: missing coeff PFSS batch");
-        coeff_token_ = R.pfss_coeff->enqueue_composite(std::move(job)).token;
+        coeff_handle_ = R.pfss_coeff->enqueue_composite(std::move(job));
         st_ = St::WaitInit;
         return detail::Need::PfssCoeff;
       }
       case St::WaitInit: {
-        if (!R.pfss_coeff->ready(PfssHandle{coeff_token_})) return detail::Need::PfssCoeff;
-        auto v = R.pfss_coeff->view(PfssHandle{coeff_token_});
+        if (!R.pfss_coeff->ready(coeff_handle_)) return detail::Need::PfssCoeff;
+        auto v = R.pfss_coeff->view(coeff_handle_);
         size_t elems = x_.size();
         if (v.r < 2 || v.arith_words < elems * v.r) {
           throw std::runtime_error("RsqrtTask: coeff payload too small");
@@ -580,7 +592,7 @@ class RsqrtTask final : public detail::PhaseTask {
   std::vector<uint64_t> masked_;
   std::vector<int64_t> opened_;
   OpenHandle h_open_{};
-  size_t coeff_token_ = static_cast<size_t>(-1);
+  PfssHandle coeff_handle_{};
 
   std::span<const proto::BeaverTriple64Share> triple_span_;
   size_t triple_cursor_ = 0;
@@ -1177,13 +1189,13 @@ class CubicPolyTask final : public detail::PhaseTask {
           job.hatx_public[i] = static_cast<uint64_t>(opened_[i]);
         }
         if (!R.pfss_coeff) throw std::runtime_error("CubicPolyTask: missing coeff PFSS batch");
-        coeff_token_ = R.pfss_coeff->enqueue_composite(std::move(job)).token;
+        coeff_handle_ = R.pfss_coeff->enqueue_composite(std::move(job));
         st_ = St::WaitCoeff;
         return detail::Need::PfssCoeff;
       }
       case St::WaitCoeff: {
-        if (!R.pfss_coeff->ready(PfssHandle{coeff_token_})) return detail::Need::PfssCoeff;
-        auto v = R.pfss_coeff->view(PfssHandle{coeff_token_});
+        if (!R.pfss_coeff->ready(coeff_handle_)) return detail::Need::PfssCoeff;
+        auto v = R.pfss_coeff->view(coeff_handle_);
         size_t elems = x_.size();
         // Some backends may already return the evaluated polynomial (r=1).
         if (v.r == 1 && v.arith_words == elems) {
@@ -1357,7 +1369,7 @@ class CubicPolyTask final : public detail::PhaseTask {
   std::vector<uint64_t> masked_;
   std::vector<int64_t> opened_;
   OpenHandle h_open_{};
-  size_t coeff_token_ = static_cast<size_t>(-1);
+  PfssHandle coeff_handle_{};
   std::span<const proto::BeaverTriple64Share> triple_span_;
   size_t triple_cursor_ = 0;
 
@@ -1466,13 +1478,13 @@ class RecipTask final : public detail::PhaseTask {
         job.hatx_public.resize(opened_.size());
         for (size_t i = 0; i < opened_.size(); ++i) job.hatx_public[i] = static_cast<uint64_t>(opened_[i]);
         if (!R.pfss_coeff) throw std::runtime_error("RecipTask: missing coeff PFSS batch");
-        coeff_token_ = R.pfss_coeff->enqueue_composite(std::move(job)).token;
+        coeff_handle_ = R.pfss_coeff->enqueue_composite(std::move(job));
         st_ = St::WaitCoeff;
         return detail::Need::PfssCoeff;
       }
       case St::WaitCoeff: {
-        if (!R.pfss_coeff->ready(PfssHandle{coeff_token_})) return detail::Need::PfssCoeff;
-        auto v = R.pfss_coeff->view(PfssHandle{coeff_token_});
+        if (!R.pfss_coeff->ready(coeff_handle_)) return detail::Need::PfssCoeff;
+        auto v = R.pfss_coeff->view(coeff_handle_);
         size_t elems = x_.size();
         // Some backends may already emit evaluated init (single arith word).
         if (v.r == 1 && v.arith_words >= elems) {
@@ -1613,7 +1625,7 @@ class RecipTask final : public detail::PhaseTask {
   std::vector<uint64_t> masked_;
   std::vector<int64_t> opened_;
   OpenHandle h_open_{};
-  size_t coeff_token_ = static_cast<size_t>(-1);
+  PfssHandle coeff_handle_{};
 
   std::span<const proto::BeaverTriple64Share> triple_span_;
   size_t triple_cursor_ = 0;

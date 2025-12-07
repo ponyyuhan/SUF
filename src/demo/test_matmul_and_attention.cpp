@@ -671,11 +671,125 @@ static void test_mlp_only() {
   }
 }
 
+static void test_transformer_numeric_regression() {
+  const int B = 1;
+  const int T = 1;
+  const int D = 2;
+  const int H = 1;
+  const int Dh = D / H;
+  const int fb = 8;
+
+  TransformerConfig cfg;
+  cfg.frac_bits = fb;
+  cfg.attn.D = D;
+  cfg.attn.Dh = Dh;
+  cfg.attn.H = H;
+  cfg.attn.S_max = T;
+  cfg.attn.frac_bits = fb;
+  cfg.attn.legacy_softmax = false;
+  cfg.mlp.Hidden = D;
+  cfg.mlp.frac_bits = fb;
+
+  std::mt19937_64 rng(321);
+  std::vector<int64_t> X(T * D), Wqkv(D * 3 * D), Wout(D * D), W1(D * D), W2(D * D);
+  for (auto& v : X) v = static_cast<int64_t>((rng() % 16) - 8) << fb;
+  for (auto& w : Wqkv) w = (rng() % 9) - 4;
+  for (auto& w : Wout) w = (rng() % 7) - 3;
+  for (auto& w : W1) w = (rng() % 5) - 2;
+  for (auto& w : W2) w = (rng() % 5) - 2;
+
+  std::vector<uint64_t> X0, X1;
+  split_shares(X, rng, fb, X0, X1);
+
+  std::vector<uint64_t> Y0(T * D, 0), Y1(T * D, 0);
+  KVCache cache0(B, H, T, Dh), cache1(B, H, T, Dh);
+
+  proto::ReferenceBackend be0, be1;
+  compiler::TruncationPassContext trunc0(be0, 0x7472666772ull);
+  compiler::TruncationPassContext trunc1(be1, 0x7472666772ull);
+  LayerContext ctx0, ctx1;
+  ctx0.trunc_ctx = &trunc0;
+  ctx1.trunc_ctx = &trunc1;
+  ctx0.frac_bits = fb;
+  ctx1.frac_bits = fb;
+
+  LocalChan::Shared sh;
+  LocalChan c0(&sh, true), c1(&sh, false);
+  std::atomic<bool> fail{false};
+  std::string err;
+  std::mutex err_mu;
+  auto record_err = [&](const std::exception& e) {
+    fail.store(true, std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lk(err_mu);
+    if (err.empty()) err = e.what();
+  };
+
+  std::thread th1([&] {
+    try {
+      transformer_layer_forward(cfg,
+                                1,
+                                c1,
+                                view3(X1.data(), B, T, D),
+                                view2(Wqkv.data(), D, 3 * D),
+                                view2(Wout.data(), D, D),
+                                view2(W1.data(), D, cfg.mlp.Hidden),
+                                view2(W2.data(), cfg.mlp.Hidden, D),
+                                cache1,
+                                view3(Y1.data(), B, T, D),
+                                &ctx1);
+    } catch (const std::exception& e) {
+      record_err(e);
+    }
+  });
+  try {
+    transformer_layer_forward(cfg,
+                              0,
+                              c0,
+                              view3(X0.data(), B, T, D),
+                              view2(Wqkv.data(), D, 3 * D),
+                              view2(Wout.data(), D, D),
+                              view2(W1.data(), D, cfg.mlp.Hidden),
+                              view2(W2.data(), cfg.mlp.Hidden, D),
+                              cache0,
+                              view3(Y0.data(), B, T, D),
+                              &ctx0);
+  } catch (const std::exception& e) {
+    record_err(e);
+  }
+  th1.join();
+  if (fail.load(std::memory_order_relaxed)) {
+    throw std::runtime_error("transformer_numeric: " + err);
+  }
+
+  std::cout << "[transformer_numeric] combine shares\n";
+  auto plain = transformer_ref(cfg, X, Wqkv, Wout, W1, W2);
+  for (size_t i = 0; i < plain.size(); ++i) {
+    int64_t got = to_signed(Y0[i]) + to_signed(Y1[i]);
+    if (std::llabs(got - plain[i]) > 1) {
+      std::cerr << "transformer mismatch idx=" << i << " got=" << got
+                << " expected=" << plain[i] << " y0=" << to_signed(Y0[i])
+                << " y1=" << to_signed(Y1[i]) << "\n";
+      assert(std::llabs(got - plain[i]) <= 1);
+    }
+  }
+  std::cout << "[transformer_numeric] ok\n";
+}
+
 int main() {
+  std::cout << "[run] test_attention_correctness\n";
   test_attention_correctness();
+  std::cout << "[run] test_attention_step_vs_batch\n";
   test_attention_step_vs_batch();
+  std::cout << "[run] test_mlp_only\n";
   test_mlp_only();
+  std::cout << "[run] test_transformer_layer\n";
   test_transformer_layer();
+  if (std::getenv("RUN_TRANSFORMER_NUMERIC")) {
+    std::cout << "[run] test_transformer_numeric_regression\n";
+    test_transformer_numeric_regression();
+  } else {
+    std::cout << "[skip] test_transformer_numeric_regression (set RUN_TRANSFORMER_NUMERIC=1 to run)\n";
+  }
   std::cout << "Attention/Transformer tests passed\n";
   return 0;
 }

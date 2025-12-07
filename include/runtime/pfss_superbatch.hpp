@@ -5,6 +5,7 @@
 #include <memory>
 #include <type_traits>
 #include <vector>
+#include <atomic>
 #if __has_include(<span>)
   #include <span>
 #else
@@ -83,9 +84,18 @@ class ProtoChanFromNet final : public proto::IChannel {
   net::Chan& ch_;
 };
 
+struct PfssResultSlot {
+  std::shared_ptr<std::vector<uint64_t>> arith_storage;
+  std::shared_ptr<std::vector<uint64_t>> bool_storage;
+  size_t r = 0;
+  size_t ell = 0;
+  std::atomic<bool> ready{false};
+};
+
 // Handle returned to callers so they can look up PFSS outputs after a flush.
 struct PfssHandle {
   size_t token = static_cast<size_t>(-1);
+  std::shared_ptr<PfssResultSlot> slot;
 };
 
 // View into stored PFSS results (arith + bool shares). Pointers remain valid
@@ -208,6 +218,7 @@ class PfssSuperBatch {
   std::vector<GroupResult> group_results_;
   std::vector<CompletedJob> completed_;
   std::vector<JobSlice> slices_;
+  std::vector<std::shared_ptr<PfssResultSlot>> slots_;
   bool flushed_ = false;
   Stats stats_;
   Limits limits_;

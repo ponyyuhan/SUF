@@ -13,6 +13,7 @@
 #include "runtime/pfss_superbatch.hpp"
 #include "runtime/open_collector.hpp"
 #include "runtime/pfss_phase_planner.hpp"
+#include "mpc/net.hpp"
 
 namespace nn {
 
@@ -24,8 +25,10 @@ struct LayerContext {
   runtime::PfssSuperBatch* pfss_batch = nullptr;         // optional runtime batching surface
   runtime::OpenCollector* open_collector = nullptr;      // optional batched opens surface
   runtime::PfssLayerPlanner* pfss_layer_planner = nullptr;  // optional cross-phase planner
+  net::Chan* pfss_net_chan = nullptr;  // optional dedicated PFSS channel; defaults to main chan
   int frac_bits = 16;
   bool enable_hoist = false;  // enable conservative rescale hoisting when finalizing
+  bool allow_async_pfss = false;  // if true, caller may detach PFSS flushes (requires safe channel)
   std::optional<compiler::TruncationPassResult> last_trunc;
   std::unordered_map<int, TensorView<uint64_t>> bindings;
 
@@ -101,6 +104,16 @@ inline compiler::RangeInterval clamp_gelu_range(int frac_bits) {
   compiler::RangeInterval r;
   r.is_signed = true;
   int64_t bound = static_cast<int64_t>(4ll << frac_bits);
+  r.lo = -bound;
+  r.hi = bound;
+  return r;
+}
+
+inline compiler::RangeInterval clamp_layernorm_range(int frac_bits) {
+  // LayerNorm affine output is typically bounded to a small multiple of unit variance.
+  compiler::RangeInterval r;
+  r.is_signed = true;
+  int64_t bound = static_cast<int64_t>(8ll << frac_bits);
   r.lo = -bound;
   r.hi = bound;
   return r;
@@ -230,7 +243,8 @@ inline int64_t row_l1_max(const TensorView<int64_t>& W, bool w_transposed = fals
 inline void finalize_layer(LayerContext& ctx,
                            int party,
                            net::Chan& ch,
-                           proto::PfssBackendBatch& backend) {
+                           proto::PfssBackendBatch& backend,
+                           bool flush_pfss = true) {
   ctx.graph.propagate_ranges();
   if (ctx.enable_hoist) {
     ctx.graph.hoist_rescales();
@@ -238,7 +252,7 @@ inline void finalize_layer(LayerContext& ctx,
   }
   if (!ctx.trunc_ctx) return;
   ctx.last_trunc = ctx.graph.lower_truncations(*ctx.trunc_ctx, ctx.pfss_batch);
-  if (ctx.pfss_batch && !ctx.pfss_batch->empty()) {
+  if (flush_pfss && ctx.pfss_batch && !ctx.pfss_batch->empty()) {
     runtime::ProtoChanFromNet pch(ch);
     ctx.pfss_batch->flush_and_finalize(party, backend, pch);
   }
