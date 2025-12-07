@@ -158,6 +158,7 @@ class MulTask final : public detail::PhaseTask {
 };
 
 // Faithful truncation task (TR/ARS/GapARS) using existing composite bundle.
+// Truncation with prepare/finalize split so PFSS can be flushed across phases.
 class TruncTask final : public detail::PhaseTask {
  public:
   TruncTask(const compiler::TruncationLoweringResult* bundle,
@@ -171,6 +172,7 @@ class TruncTask final : public detail::PhaseTask {
   }
 
   bool done() const override { return st_ == St::Done; }
+  bool prepared() const { return st_ == St::WaitPfss; }
 
   detail::Need step(PhaseResources& R) override {
     if (!R.pfss_trunc || !R.pfss_backend || !R.pfss_chan) {

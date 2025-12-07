@@ -109,6 +109,14 @@ struct PfssResultView {
   }
 };
 
+// Shared-result wrapper for async/future-style use cases; owns its buffers.
+struct PfssSharedResult {
+  std::shared_ptr<std::vector<uint64_t>> arith;
+  std::shared_ptr<std::vector<uint64_t>> bools;
+  size_t r = 0;
+  size_t ell = 0;
+};
+
 // Generic composite job so non-trunc gates can reuse the same batching surface.
 struct PreparedCompositeJob {
   const suf::SUF<uint64_t>* suf = nullptr;
@@ -159,6 +167,8 @@ class PfssSuperBatch {
 
   // Access raw PFSS outputs (arith/bool shares) for a completed handle.
   PfssResultView view(const PfssHandle& h) const;
+  // Copy into shared buffers to allow safe use beyond the batch lifetime.
+  PfssSharedResult view_shared(const PfssHandle& h) const;
 
   struct Stats {
     size_t flushes = 0;

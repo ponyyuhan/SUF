@@ -8,13 +8,14 @@
 #include <queue>
 #include <thread>
 
-#include "proto/reference_backend.hpp"
+#include "proto/sigma_fast_backend_ext.hpp"
 #include "runtime/phase_tasks.hpp"
 #include "mpc/net.hpp"
 #include "proto/pfss_backend.hpp"
 #include "proto/pfss_backend_batch.hpp"
 #include "proto/pfss_utils.hpp"
 #include "runtime/open_collector.hpp"
+#include "runtime/pfss_phase_planner.hpp"
 
 namespace {
 
@@ -97,9 +98,12 @@ int main() {
     runtime::ProtoChanFromNet pch(net_ch);
     R.pfss_chan = &pch;
     R.net_chan = &net_ch;
-    R.pfss_coeff = &pe.pfss_coeff_batch();
+    R.pfss_coeff = &pe.pfss_trunc_batch();
     R.pfss_trunc = &pe.pfss_trunc_batch();
     R.opens = &pe.open_collector();
+    runtime::PfssPhasePlanner planner;
+    planner.bind(R.pfss_coeff, R.pfss_trunc);
+    R.pfss_planner = &planner;
 
     std::vector<uint64_t> out(in.size(), 0);
     auto task = std::make_unique<runtime::TruncTask>(&trunc_bundle,

@@ -4,6 +4,7 @@
 #include <iostream>
 #include <mutex>
 #include <condition_variable>
+#include <atomic>
 #include <queue>
 #include <random>
 #include <thread>
@@ -15,7 +16,9 @@
 #include "proto/reference_backend.hpp"
 #include "runtime/phase_tasks.hpp"
 #include "runtime/pfss_superbatch.hpp"
+#include "runtime/pfss_phase_planner.hpp"
 #include "nn/softmax_block_task.hpp"
+#include "runtime/staged_executor.hpp"
 
 namespace {
 
@@ -117,6 +120,7 @@ class RowBroadcastTripleProviderImpl : public runtime::RowBroadcastTripleProvide
 struct PartyResult {
   std::vector<uint64_t> probs;
   runtime::PhaseExecutor::Stats stats;
+  runtime::PfssPhasePlanner::Stats planner_stats;
   std::vector<uint64_t> exp_qf;
   std::vector<uint64_t> sum_qf;
   std::vector<uint64_t> inv_qf;
@@ -134,7 +138,8 @@ PartyResult run_party(int party,
                       runtime::TruncChoice prob_choice,
                       runtime::RowBroadcastTripleProvider* rb,
                       proto::PfssBackendBatch& backend,
-                      net::Chan& chan) {
+                      net::Chan& chan,
+                      const std::vector<int>& valid_lens) {
   runtime::PhaseExecutor pe;
   runtime::PhaseResources R;
   R.party = party;
@@ -145,11 +150,15 @@ PartyResult run_party(int party,
   R.pfss_coeff = &pe.pfss_coeff_batch();
   R.pfss_trunc = &pe.pfss_trunc_batch();
   R.opens = &pe.open_collector();
+  runtime::PfssPhasePlanner planner;
+  planner.bind(R.pfss_coeff, R.pfss_trunc);
+  R.pfss_planner = &planner;
 
   nn::SoftmaxPlan plan;
   plan.frac_bits = fb;
   plan.rows = rows;
   plan.cols = cols;
+  plan.valid_lens = valid_lens;
   plan.nexp = gates::make_nexp_cubic_bundle(nexp_mat, fb);
   plan.recip = gates::make_recip_bundle(recip_mat);
   plan.prob_trunc = prob_choice;
@@ -173,6 +182,7 @@ PartyResult run_party(int party,
   PartyResult out;
   out.probs = std::move(probs);
   out.stats = pe.stats();
+  out.planner_stats = planner.stats();
   if (task_ptr) {
     out.exp_qf = task_ptr->exp_qf_debug();
     out.sum_qf = task_ptr->sum_qf_debug();
@@ -298,7 +308,7 @@ int main() {
   std::string fail_msg;
   std::thread t0([&] {
     try {
-      r0 = run_party(0, rows, cols, fb, t_share, nexp_mat, recip_mat, prob_choice, &rb_p0, backend, c0);
+      r0 = run_party(0, rows, cols, fb, t_share, nexp_mat, recip_mat, prob_choice, &rb_p0, backend, c0, {});
     } catch (const std::exception& e) {
       fail = true;
       fail_msg = e.what();
@@ -308,7 +318,7 @@ int main() {
     try {
       // party1 shares are zero.
       std::vector<uint64_t> zero_share(t_share.size(), 0ull);
-      r1 = run_party(1, rows, cols, fb, zero_share, nexp_mat, recip_mat, prob_choice, &rb_p1, backend, c1);
+      r1 = run_party(1, rows, cols, fb, zero_share, nexp_mat, recip_mat, prob_choice, &rb_p1, backend, c1, {});
     } catch (const std::exception& e) {
       fail = true;
       fail_msg = e.what();
@@ -370,6 +380,171 @@ int main() {
     std::cerr << "Unexpected flush counts (pfss=" << r0.stats.pfss_coeff_flushes
               << ", open=" << r0.stats.open_flushes << ")\n";
     return 1;
+  }
+
+  if (r0.planner_stats.coeff_flushes > 1 || r0.planner_stats.trunc_flushes > 1) {
+    std::cerr << "Unexpected planner flush counts (coeff=" << r0.planner_stats.coeff_flushes
+              << ", trunc=" << r0.planner_stats.trunc_flushes << ")\n";
+    return 1;
+  }
+
+  // Masked variant: cols=4 but only first 2 entries per row valid; PFSS jobs should shrink.
+  const int cols_masked = 4;
+  std::vector<uint64_t> t_mask(rows * cols_masked, 0);
+  for (int i = 0; i < rows * cols_masked; ++i) {
+    t_mask[static_cast<size_t>(i)] = static_cast<uint64_t>((i + 1) << fb);
+  }
+  std::vector<int> valid(rows, 2);
+  std::vector<uint64_t> zero_mask(t_mask.size(), 0);
+  RowBroadcastTripleMaterial rb_mat_mask = make_row_broadcast_triples(rows, cols_masked, rng);
+  RowBroadcastTripleProviderImpl rb_mask_p0(rb_mat_mask, 0);
+  RowBroadcastTripleProviderImpl rb_mask_p1(rb_mat_mask, 1);
+  std::atomic<bool> fail_mask{false};
+  std::string fail_mask_msg;
+  PartyResult m0, m1;
+  LocalChan::Shared sh_mask;
+  LocalChan cm0(&sh_mask, true), cm1(&sh_mask, false);
+  std::thread tm0([&] {
+    try {
+      m0 = run_party(0, rows, cols_masked, fb, t_mask, nexp_mat, recip_mat, prob_choice, &rb_mask_p0, backend, cm0, valid);
+    } catch (const std::exception& e) {
+      fail_mask = true;
+      fail_mask_msg = e.what();
+    }
+  });
+  std::thread tm1([&] {
+    try {
+      m1 = run_party(1, rows, cols_masked, fb, zero_mask, nexp_mat, recip_mat, prob_choice, &rb_mask_p1, backend, cm1, valid);
+    } catch (const std::exception& e) {
+      fail_mask = true;
+      fail_mask_msg = e.what();
+    }
+  });
+  tm0.join();
+  tm1.join();
+  if (fail_mask) {
+    std::cerr << "Masked softmax task failed (thread): " << fail_mask_msg << std::endl;
+    return 1;
+  }
+  if (m0.stats.pfss_coeff_jobs > r0.stats.pfss_coeff_jobs ||
+      m0.stats.pfss_trunc_jobs > r0.stats.pfss_trunc_jobs) {
+    std::cerr << "Masked PFSS jobs did not shrink (coeff " << m0.stats.pfss_coeff_jobs
+              << " vs " << r0.stats.pfss_coeff_jobs << ", trunc " << m0.stats.pfss_trunc_jobs
+              << " vs " << r0.stats.pfss_trunc_jobs << ")\n";
+    return 1;
+  }
+
+  // Super-plan prototype: run two softmax tasks back-to-back with shared planner/flush.
+  {
+    std::vector<uint64_t> probs_a(rows * cols, 0);
+    std::vector<uint64_t> probs_b(rows * cols, 0);
+    runtime::PhaseExecutor pe;
+    runtime::PhaseResources R;
+    R.party = 0;
+    runtime::ProtoChanFromNet pch(c0);
+    R.pfss_backend = &backend;
+    R.pfss_chan = &pch;
+    R.net_chan = &c0;
+    R.pfss_coeff = &pe.pfss_coeff_batch();
+    R.pfss_trunc = &pe.pfss_trunc_batch();
+    R.opens = &pe.open_collector();
+    runtime::PfssPhasePlanner planner;
+    planner.bind(R.pfss_coeff, R.pfss_trunc);
+    R.pfss_planner = &planner;
+    nn::SoftmaxPlan plan = {};
+    plan.frac_bits = fb;
+    plan.rows = rows;
+    plan.cols = cols;
+    plan.nexp = gates::make_nexp_cubic_bundle(nexp_mat, fb);
+    plan.recip = gates::make_recip_bundle(recip_mat);
+    plan.prob_trunc = prob_choice;
+    plan.row_triples = &rb_p0;
+    compiler::RangeInterval prob_range2;
+    prob_range2.lo = 0;
+    prob_range2.hi = static_cast<int64_t>(1) << fb;
+    prob_range2.is_signed = false;
+    plan.prob_range = prob_range2;
+    pe.begin_phase(runtime::PhaseExecutor::Phase::kSoftmax);
+    pe.add_task(std::make_unique<nn::SoftmaxBlockTask>(
+        plan,
+        std::span<const uint64_t>(t_share.data(), t_share.size()),
+        std::span<uint64_t>(probs_a.data(), probs_a.size())));
+    // Append second logical phase without clearing tasks to force one PFSS flush.
+    pe.begin_phase(runtime::PhaseExecutor::Phase::kSoftmax, /*clear_tasks=*/false);
+    pe.add_task(std::make_unique<nn::SoftmaxBlockTask>(
+        plan,
+        std::span<const uint64_t>(t_share.data(), t_share.size()),
+        std::span<uint64_t>(probs_b.data(), probs_b.size())));
+    pe.run(R);
+    if (planner.stats().coeff_flushes > 1 || planner.stats().trunc_flushes > 1) {
+      std::cerr << "Super-plan expected single PFSS flush, got coeff=" << planner.stats().coeff_flushes
+                << " trunc=" << planner.stats().trunc_flushes << "\n";
+      return 1;
+    }
+  }
+
+  // Staged executor demo: two trunc tasks share one PFSS flush.
+  {
+    proto::ReferenceBackend ref_backend;
+    compiler::GateParams p;
+    p.kind = compiler::GateKind::GapARS;
+    p.frac_bits = fb;
+    std::mt19937_64 rng(999);
+    auto bundle = compiler::lower_truncation_gate(ref_backend, rng, p, rows * cols);
+    std::vector<uint64_t> in_a(rows * cols, 0), in_b(rows * cols, 0);
+    for (size_t i = 0; i < in_a.size(); ++i) {
+      in_a[i] = t_share[i];
+      in_b[i] = t_share[i];
+    }
+    std::vector<uint64_t> out_a(in_a.size(), 0), out_b(in_b.size(), 0);
+    runtime::StagedExecutor se0, se1;
+    runtime::PhaseResources RA, RB;
+    RA.party = 0;
+    RB.party = 1;
+    runtime::ProtoChanFromNet pchA(c0), pchB(c1);
+    RA.pfss_backend = &ref_backend;
+    RB.pfss_backend = &ref_backend;
+    RA.pfss_chan = &pchA;
+    RB.pfss_chan = &pchB;
+    RA.net_chan = &c0;
+    RB.net_chan = &c1;
+    runtime::PfssSuperBatch sb_coeffA, sb_coeffB;
+    runtime::PfssSuperBatch sb_truncA, sb_truncB;
+    RA.pfss_coeff = &sb_coeffA;
+    RA.pfss_trunc = &sb_truncA;
+    RB.pfss_coeff = &sb_coeffB;
+    RB.pfss_trunc = &sb_truncB;
+    runtime::OpenCollector opensA, opensB;
+    RA.opens = &opensA;
+    RB.opens = &opensB;
+
+    se0.add_task(std::make_unique<runtime::TruncTask>(
+        &bundle,
+        std::span<const uint64_t>(in_a.data(), in_a.size()),
+        std::span<uint64_t>(out_a.data(), out_a.size())));
+    se0.add_task(std::make_unique<runtime::TruncTask>(
+        &bundle,
+        std::span<const uint64_t>(in_b.data(), in_b.size()),
+        std::span<uint64_t>(out_b.data(), out_b.size())));
+    se1.add_task(std::make_unique<runtime::TruncTask>(
+        &bundle,
+        std::span<const uint64_t>(in_a.data(), in_a.size()),
+        std::span<uint64_t>(out_a.data(), out_a.size())));
+    se1.add_task(std::make_unique<runtime::TruncTask>(
+        &bundle,
+        std::span<const uint64_t>(in_b.data(), in_b.size()),
+        std::span<uint64_t>(out_b.data(), out_b.size())));
+
+    se0.run(RA, ref_backend, pchA);
+    se1.run(RB, ref_backend, pchB);
+    for (size_t i = 0; i < out_a.size(); ++i) {
+      uint64_t plain = out_a[i] + out_b[i];
+      uint64_t expect = t_share[i] >> fb;
+      if (plain != expect) {
+        std::cerr << "Staged trunc mismatch at " << i << ": got " << plain << " expect " << expect << "\n";
+        return 1;
+      }
+    }
   }
 
   std::cout << "Softmax task test passed\n";

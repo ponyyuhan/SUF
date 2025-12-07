@@ -219,6 +219,17 @@ PfssResultView PfssSuperBatch::view(const PfssHandle& h) const {
   return v;
 }
 
+PfssSharedResult PfssSuperBatch::view_shared(const PfssHandle& h) const {
+  PfssSharedResult out;
+  if (h.token >= completed_.size()) return out;
+  const auto& cj = completed_[h.token];
+  out.r = cj.r;
+  out.ell = cj.ell;
+  out.arith = std::make_shared<std::vector<uint64_t>>(cj.arith);
+  out.bools = std::make_shared<std::vector<uint64_t>>(cj.bools);
+  return out;
+}
+
 void PfssSuperBatch::populate_completed_() {
   // Populate per-job completed slices (without running hooks).
   for (size_t idx = 0; idx < jobs_.size(); ++idx) {

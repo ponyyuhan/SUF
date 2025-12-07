@@ -276,6 +276,14 @@ void attention_forward(const AttentionConfig& cfg,
   if (!ctx) {
     throw std::runtime_error("attention_forward: LayerContext required (no local rescale fallback)");
   }
+  auto record_phase_plan = [&](runtime::PfssPhasePlanner& planner) {
+    if (!ctx || !ctx->pfss_layer_planner) return;
+    const auto& st = planner.stats();
+    if (st.coeff_jobs == 0 && st.trunc_jobs == 0 && st.coeff_flushes == 0 && st.trunc_flushes == 0) return;
+    ctx->pfss_layer_planner->record_phase(planner, pe->pfss_coeff_batch(), pe->pfss_trunc_batch());
+    pe->pfss_coeff_batch().reset_stats();
+    pe->pfss_trunc_batch().reset_stats();
+  };
 
   matmul_publicW(view2(const_cast<uint64_t*>(X_share.data), B * T, D),
                  Wqkv_public,
@@ -303,14 +311,14 @@ void attention_forward(const AttentionConfig& cfg,
     truncR.opens = &pe->open_collector();
     truncR.pfss_planner = &pfss_phase_planner;
     runtime::PfssSuperBatch::Limits pfss_lim;
-    pfss_lim.max_pending_jobs = 1ull << 16;
-    pfss_lim.max_pending_hatx_words = 1ull << 24;
-    pfss_lim.max_flushes = 1ull << 12;
+    pfss_lim.max_pending_jobs = 1ull << 12;
+    pfss_lim.max_pending_hatx_words = 1ull << 21;
+    pfss_lim.max_flushes = 1ull << 9;
     pe->pfss_trunc_batch().set_limits(pfss_lim);
     runtime::OpenCollector::Limits open_lim;
     open_lim.max_pending_words = 1ull << 22;
     pe->open_collector().set_limits(open_lim);
-    pe->set_max_flushes(1ull << 12);
+    pe->set_max_flushes(1ull << 11);
     pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
     auto trunc_task = std::make_unique<runtime::TruncTask>(
         &trunc_qkv_bundle,
@@ -318,6 +326,7 @@ void attention_forward(const AttentionConfig& cfg,
         std::span<uint64_t>(qkv.data(), qkv.size()));
     pe->add_task(std::move(trunc_task));
     pe->run(truncR);
+    record_phase_plan(pfss_phase_planner);
   }
 
   std::vector<uint64_t> ctx_shares(B * T * H * Dh, 0);
@@ -354,15 +363,15 @@ void attention_forward(const AttentionConfig& cfg,
   std::mt19937_64 rng(123);
   if (use_phase_softmax) {
     runtime::PfssSuperBatch::Limits pfss_lim;
-    pfss_lim.max_pending_jobs = 1ull << 16;
-    pfss_lim.max_pending_hatx_words = 1ull << 24;
-    pfss_lim.max_flushes = 1ull << 12;
+    pfss_lim.max_pending_jobs = 1ull << 12;
+    pfss_lim.max_pending_hatx_words = 1ull << 21;
+    pfss_lim.max_flushes = 1ull << 9;
     pe->pfss_coeff_batch().set_limits(pfss_lim);
     pe->pfss_trunc_batch().set_limits(pfss_lim);
     runtime::OpenCollector::Limits open_lim;
     open_lim.max_pending_words = 1ull << 22;
     pe->open_collector().set_limits(open_lim);
-    pe->set_max_flushes(1ull << 12);
+    pe->set_max_flushes(1ull << 11);
     size_t triple_need = 3 * cache.S_max * B * H;
     nexp_mat = gates::dealer_make_nexp_task_material(ctx->trunc_ctx->backend(),
                                                      nexp_params,
@@ -537,6 +546,7 @@ void attention_forward(const AttentionConfig& cfg,
       pe->add_task(std::move(score_task));
     }
     pe->run(phase_R);
+    record_phase_plan(phase_planner);
 
     // Rescale scores Q2f -> Qf via truncation (no inline shift).
     std::vector<uint64_t> score_qf(score_share.size(), 0);
@@ -557,6 +567,7 @@ void attention_forward(const AttentionConfig& cfg,
           std::span<uint64_t>(score_qf.data(), score_qf.size()));
       pe->add_task(std::move(trunc_task));
       pe->run(phase_R);
+      record_phase_plan(phase_planner);
     }
 
     // Scale by inv_sqrt (public Qf): score_qf (Qf) * inv_sqrt (Qf) -> Q2f, then trunc to Qf.
@@ -575,6 +586,7 @@ void attention_forward(const AttentionConfig& cfg,
           std::span<uint64_t>(score_scaled_qf.data(), score_scaled_qf.size()));
       pe->add_task(std::move(trunc_task));
       pe->run(phase_R);
+      record_phase_plan(phase_planner);
     }
 
     // Scale scores by inv_sqrt (public scalar) and prepare softmax inputs.
@@ -809,6 +821,7 @@ void attention_forward(const AttentionConfig& cfg,
                                                      party,
                                                      fb));
       pe->run(phase_R);
+      record_phase_plan(phase_planner);
     }
   }
 
@@ -854,6 +867,7 @@ void attention_forward(const AttentionConfig& cfg,
         std::span<const uint64_t>(Y_share.data, Y_share.numel()),
         std::span<uint64_t>(Y_share.data, Y_share.numel())));
     pe->run(truncR);
+    record_phase_plan(planner);
   }
 }
 

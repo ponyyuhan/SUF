@@ -12,6 +12,7 @@
 #include "nn/tensor_view.hpp"
 #include "runtime/pfss_superbatch.hpp"
 #include "runtime/open_collector.hpp"
+#include "runtime/pfss_phase_planner.hpp"
 
 namespace nn {
 
@@ -22,6 +23,7 @@ struct LayerContext {
   compiler::TruncationPassContext* trunc_ctx = nullptr;  // owned externally
   runtime::PfssSuperBatch* pfss_batch = nullptr;         // optional runtime batching surface
   runtime::OpenCollector* open_collector = nullptr;      // optional batched opens surface
+  runtime::PfssLayerPlanner* pfss_layer_planner = nullptr;  // optional cross-phase planner
   int frac_bits = 16;
   bool enable_hoist = false;  // enable conservative rescale hoisting when finalizing
   std::optional<compiler::TruncationPassResult> last_trunc;
@@ -91,6 +93,16 @@ inline compiler::RangeInterval clamp_softmax_range(int frac_bits) {
   r.is_signed = true;
   r.lo = 0;
   r.hi = static_cast<int64_t>(1ll << frac_bits);
+  return r;
+}
+
+inline compiler::RangeInterval clamp_gelu_range(int frac_bits) {
+  // GeLU output roughly in [-4, 4] for typical inputs.
+  compiler::RangeInterval r;
+  r.is_signed = true;
+  int64_t bound = static_cast<int64_t>(4ll << frac_bits);
+  r.lo = -bound;
+  r.hi = bound;
   return r;
 }
 
@@ -165,6 +177,21 @@ inline SecretTensor record_rescale(LayerContext* ctx,
   } else {
     t.range = inferred;
   }
+  return t;
+}
+
+inline SecretTensor record_clamp(LayerContext* ctx,
+                                 const SecretTensor& input,
+                                 const compiler::RangeInterval& clamp_r,
+                                 const compiler::Scale& out_scale,
+                                 const TensorView<uint64_t>& out_share = {}) {
+  SecretTensor t;
+  t.share = out_share;
+  t.scale = out_scale;
+  t.range = clamp_r;
+  t.ctx = ctx;
+  if (!ctx || !input.valid()) return t;
+  t.tid = ctx->graph.add_clamp(input.tid, clamp_r, out_scale);
   return t;
 }
 

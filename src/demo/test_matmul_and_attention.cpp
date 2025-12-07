@@ -483,6 +483,16 @@ static void test_attention_step_vs_batch() {
       step_out.push_back(to_signed(sY0[d]) + to_signed(sY1[d]));
     }
   }
+  const auto& st0 = pe0.stats();
+  const auto& st1 = pe1.stats();
+  std::cerr << "attention planner stats p0 coeff_jobs=" << st0.pfss_coeff_jobs
+            << " trunc_jobs=" << st0.pfss_trunc_jobs
+            << " coeff_flushes=" << st0.pfss_coeff_flushes
+            << " trunc_flushes=" << st0.pfss_trunc_flushes << "\n";
+  std::cerr << "attention planner stats p1 coeff_jobs=" << st1.pfss_coeff_jobs
+            << " trunc_jobs=" << st1.pfss_trunc_jobs
+            << " coeff_flushes=" << st1.pfss_coeff_flushes
+            << " trunc_flushes=" << st1.pfss_trunc_flushes << "\n";
 
   assert(batch_out.size() == step_out.size());
   for (size_t i = 0; i < batch_out.size(); ++i) {

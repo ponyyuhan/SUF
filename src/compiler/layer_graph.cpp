@@ -146,6 +146,16 @@ int LayerGraph::add_bias(int x, const std::vector<int64_t>& bias_qf, const Scale
   return op.outputs[0];
 }
 
+int LayerGraph::add_clamp(int x, const RangeInterval& r, const Scale& out_scale) {
+  OpNode op;
+  op.kind = OpKind::kClamp;
+  op.inputs = {x};
+  op.outputs = {add_tensor(out_scale, r)};
+  op.clamp_range = r;
+  ops_.push_back(op);
+  return op.outputs[0];
+}
+
 void LayerGraph::propagate_ranges() {
   for (const auto& op : ops_) {
     auto get_range = [&](int tid) -> const RangeInterval& {
@@ -202,7 +212,12 @@ void LayerGraph::propagate_ranges() {
         break;
       }
       case OpKind::kMean: {
-        tensors_[static_cast<size_t>(op.outputs[0])].range = get_range(op.inputs[0]);
+        RangeInterval xr = get_range(op.inputs[0]);
+        // Mean reduces magnitude by ~length; use shift_down by ceil(log2(length)).
+        int sh = 0;
+        int len = std::max(op.length, 1);
+        while ((1 << sh) < len && sh < 30) ++sh;
+        tensors_[static_cast<size_t>(op.outputs[0])].range = shift_down(xr, sh);
         break;
       }
       case OpKind::kVar: {
@@ -210,15 +225,32 @@ void LayerGraph::propagate_ranges() {
         RangeInterval mr = get_range(op.inputs[1]);
         RangeInterval diff = propagate_sub(xr, mr);
         RangeInterval sq = propagate_mul(diff, diff, op.frac_bits);
-        tensors_[static_cast<size_t>(op.outputs[0])].range = sq;
+        int sh = 0;
+        int len = std::max(op.length, 1);
+        while ((1 << sh) < len && sh < 30) ++sh;
+        tensors_[static_cast<size_t>(op.outputs[0])].range = shift_down(sq, sh);
         break;
       }
       case OpKind::kRsqrt: {
-        tensors_[static_cast<size_t>(op.outputs[0])].range = RangeInterval::whole(true);
+        RangeInterval r;
+        r.is_signed = true;
+        r.lo = 0;
+        r.hi = static_cast<int64_t>(1ll << op.frac_bits);
+        tensors_[static_cast<size_t>(op.outputs[0])].range = r;
+        tensors_[static_cast<size_t>(op.outputs[0])].gap_cert = has_gap_cert(r);
         break;
       }
       case OpKind::kAffine: {
-        tensors_[static_cast<size_t>(op.outputs[0])].range = get_range(op.inputs[0]);
+        // LayerNorm affine output is bounded; clamp to roughly [-8, 8] in Qf.
+        int64_t bound = static_cast<int64_t>(8ll << op.frac_bits);
+        RangeInterval r;
+        r.is_signed = true;
+        r.lo = -bound;
+        r.hi = bound;
+        tensors_[static_cast<size_t>(op.outputs[0])].range =
+            clamp_range(get_range(op.inputs[0]), r.lo, r.hi, r.is_signed);
+        tensors_[static_cast<size_t>(op.outputs[0])].gap_cert =
+            has_gap_cert(tensors_[static_cast<size_t>(op.outputs[0])].range);
         break;
       }
       case OpKind::kBiasAdd: {
@@ -240,6 +272,16 @@ void LayerGraph::propagate_ranges() {
           br.lo = br.hi = 0;
         }
         tensors_[static_cast<size_t>(op.outputs[0])].range = add_range(xr, br);
+        tensors_[static_cast<size_t>(op.outputs[0])].gap_cert =
+            has_gap_cert(tensors_[static_cast<size_t>(op.outputs[0])].range);
+        break;
+      }
+      case OpKind::kClamp: {
+        tensors_[static_cast<size_t>(op.outputs[0])].range =
+            clamp_range(get_range(op.inputs[0]), op.clamp_range.lo, op.clamp_range.hi,
+                        op.clamp_range.is_signed);
+        tensors_[static_cast<size_t>(op.outputs[0])].gap_cert =
+            has_gap_cert(tensors_[static_cast<size_t>(op.outputs[0])].range);
         break;
       }
       default:

@@ -31,6 +31,19 @@ struct PhaseTask {
 
 class PhaseExecutor {
  public:
+  PhaseExecutor() {
+    PfssSuperBatch::Limits pfss_lim;
+    pfss_lim.max_pending_jobs = 1ull << 12;
+    pfss_lim.max_pending_hatx_words = 1ull << 21;
+    pfss_lim.max_flushes = 1ull << 9;
+    pfss_coeff_.set_limits(pfss_lim);
+    pfss_trunc_.set_limits(pfss_lim);
+    OpenCollector::Limits open_lim;
+    open_lim.max_pending_words = 1ull << 19;
+    opens_.set_limits(open_lim);
+    max_flushes_ = 1ull << 11;
+  }
+
   enum class Phase : int {
     kLN1 = 0,
     kQKV_Score = 1,
@@ -44,8 +57,8 @@ class PhaseExecutor {
     tasks_.push_back(std::move(t));
   }
 
-  void begin_phase(Phase) {
-    tasks_.clear();
+  void begin_phase(Phase, bool clear_tasks = true) {
+    if (clear_tasks) tasks_.clear();
   }
 
   struct Stats {
@@ -103,6 +116,7 @@ class PhaseExecutor {
 
   void run(PhaseResources& R) {
     size_t flush_guard = 0;
+    bool planner_flushed = false;
     for (;;) {
       bool any_not_done = false;
       bool want_open = false;
@@ -131,11 +145,15 @@ class PhaseExecutor {
         if (!R.pfss_backend || !R.pfss_chan) {
           throw std::runtime_error("PhaseExecutor: PFSS planner missing backend/channel");
         }
+        if (planner_flushed) {
+          throw std::runtime_error("PhaseExecutor: planner single-flush budget exceeded");
+        }
         if (flush_guard + 1 > max_flushes_) {
           throw std::runtime_error("PhaseExecutor: planner flush budget exceeded");
         }
         R.pfss_planner->finalize_phase(R.party, *R.pfss_backend, *R.pfss_chan);
         flush_guard++;
+        planner_flushed = true;
         progressed = true;
         continue;
       }

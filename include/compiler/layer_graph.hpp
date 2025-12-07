@@ -43,7 +43,8 @@ enum class OpKind {
   kVar,
   kRsqrt,
   kAffine,
-  kBiasAdd  // add public bias vector (range known from weights)
+  kBiasAdd,  // add public bias vector (range known from weights)
+  kClamp     // explicit range clamp (post-activation)
 };
 
 struct MatmulAttrs {
@@ -77,6 +78,7 @@ struct OpNode {
   int frac_bits = 0;       // for MulConst / Axpy / Hadamard rescale
   int length = 0;          // for LN mean/var length
   std::vector<int64_t> bias;  // for BiasAdd (public, Qf)
+  RangeInterval clamp_range;  // for Clamp op
 };
 
 class LayerGraph {
@@ -108,6 +110,7 @@ class LayerGraph {
   int add_rsqrt(int x, int frac_bits, const Scale& out_scale);
   int add_affine(int x, int gamma, int beta, int frac_bits, const Scale& out_scale);
   int add_bias(int x, const std::vector<int64_t>& bias_qf, const Scale& out_scale);
+  int add_clamp(int x, const RangeInterval& r, const Scale& out_scale);
 
   // Run forward range propagation.
   void propagate_ranges();

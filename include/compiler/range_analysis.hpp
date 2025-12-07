@@ -158,6 +158,17 @@ inline RangeInterval axpy_range(const RangeInterval& x_range,
   return add_range(x_range, scaled);
 }
 
+inline RangeInterval clamp_range(const RangeInterval& in, int64_t lo, int64_t hi, bool is_signed = true) {
+  RangeInterval r;
+  r.is_signed = is_signed;
+  r.lo = std::max(in.lo, lo);
+  r.hi = std::min(in.hi, hi);
+  if (r.lo > r.hi) {
+    r.lo = r.hi = 0;
+  }
+  return r;
+}
+
 inline RangeInterval mul_const_range(const RangeInterval& x_range,
                                      int64_t c,
                                      int frac_bits) {

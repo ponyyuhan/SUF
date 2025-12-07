@@ -105,6 +105,14 @@ struct CompositeKeyPair {
   CompositePartyKey k1;
 };
 
+inline uint64_t r_in_at(const CompositePartyKey& k, size_t idx) {
+  if (!k.r_in_share_vec.empty()) {
+    if (idx >= k.r_in_share_vec.size()) throw std::runtime_error("r_in_share_vec too short");
+    return k.r_in_share_vec[idx];
+  }
+  return k.r_in_share;
+}
+
 struct CompositeBatchInput {
   const uint64_t* hatx; // [N]
   size_t N;
@@ -731,8 +739,9 @@ inline std::vector<uint64_t> composite_eval_share_backend(int party,
     }
     std::vector<uint64_t> ys(compiled.r, 0);
     int stride = compiled.degree + 1;
-    uint64_t x_share = (party == 0) ? proto::sub_mod(hatx, k.r_in_share)
-                                    : proto::sub_mod(0ull, k.r_in_share);
+    uint64_t rin = r_in_at(k, 0);
+    uint64_t x_share = (party == 0) ? proto::sub_mod(hatx, rin)
+                                    : proto::sub_mod(0ull, rin);
     for (int j = 0; j < compiled.r; j++) {
       uint64_t acc = coeff[static_cast<size_t>(j * stride + compiled.degree)];
       for (int d = compiled.degree - 1; d >= 0; d--) {
@@ -802,8 +811,9 @@ inline std::vector<uint64_t> composite_eval_share_backend(int party,
     }
   } else {
     int stride = compiled.degree + 1;
-    uint64_t x_share = (party == 0) ? proto::sub_mod(hatx, k.r_in_share)
-                                    : proto::sub_mod(0ull, k.r_in_share);
+    uint64_t rin = r_in_at(k, 0);
+    uint64_t x_share = (party == 0) ? proto::sub_mod(hatx, rin)
+                                    : proto::sub_mod(0ull, rin);
     for (int j = 0; j < compiled.r; j++) {
       uint64_t acc = coeff[static_cast<size_t>(j * stride + compiled.degree)];
       for (int d = compiled.degree - 1; d >= 0; d--) {
@@ -1033,8 +1043,9 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
             coeff_sel[static_cast<size_t>(j)] = proto::add_mod(coeff_sel[static_cast<size_t>(j)], term);
           }
         }
-        uint64_t x_share = (party == 0) ? proto::sub_mod(in.hatx[blk + off], k.r_in_share)
-                                        : proto::sub_mod(0ull, k.r_in_share);
+        uint64_t rin = r_in_at(k, blk + off);
+        uint64_t x_share = (party == 0) ? proto::sub_mod(in.hatx[blk + off], rin)
+                                        : proto::sub_mod(0ull, rin);
         for (int j = 0; j < compiled.r; j++) {
           uint64_t acc = coeff_sel[static_cast<size_t>(j * stride + compiled.degree)];
           for (int d = compiled.degree - 1; d >= 0; d--) {
@@ -1086,8 +1097,9 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     }
     // Horner with selector-weighted coeffs
     int stride = compiled.degree + 1;
-    uint64_t x_share = (party == 0) ? proto::sub_mod(in.hatx[i], k.r_in_share)
-                                    : proto::sub_mod(0ull, k.r_in_share);
+    uint64_t rin = r_in_at(k, i);
+    uint64_t x_share = (party == 0) ? proto::sub_mod(in.hatx[i], rin)
+                                    : proto::sub_mod(0ull, rin);
     std::fill(coeff_sel.begin(), coeff_sel.end(), 0ull);
     for (size_t p = 0; p < selectors.size(); p++) {
       for (int j = 0; j < compiled.coeff.out_words; j++) {

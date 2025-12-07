@@ -40,6 +40,14 @@ void mlp_forward(const MLPConfig& cfg,
   if (!ctx) {
     throw std::runtime_error("mlp_forward: LayerContext required (no local rescale fallback)");
   }
+  auto record_phase_plan = [&](runtime::PfssPhasePlanner& planner) {
+    if (!ctx || !ctx->pfss_layer_planner) return;
+    const auto& st = planner.stats();
+    if (st.coeff_jobs == 0 && st.trunc_jobs == 0 && st.coeff_flushes == 0 && st.trunc_flushes == 0) return;
+    ctx->pfss_layer_planner->record_phase(planner, pe->pfss_coeff_batch(), pe->pfss_trunc_batch());
+    pe->pfss_coeff_batch().reset_stats();
+    pe->pfss_trunc_batch().reset_stats();
+  };
 
   std::vector<uint64_t> hidden(B * T * H, 0);
   compiler::RangeInterval mat1_x_range;
@@ -123,6 +131,7 @@ void mlp_forward(const MLPConfig& cfg,
   std::vector<uint64_t> hidden_scaled = hidden;
   runtime::PhaseResources R;
   runtime::ProtoChanFromNet pch(ch);
+  runtime::PfssPhasePlanner pfss_phase_planner;
   if (use_phase) {
     R.party = party;
     R.pfss_backend = &ctx->trunc_ctx->backend();
@@ -133,14 +142,16 @@ void mlp_forward(const MLPConfig& cfg,
     R.pfss_trunc = R.pfss_coeff;
     R.opens = &pe->open_collector();
     runtime::PfssSuperBatch::Limits pfss_lim;
-    pfss_lim.max_pending_jobs = 1ull << 16;
-    pfss_lim.max_pending_hatx_words = 1ull << 24;
-    pfss_lim.max_flushes = 1ull << 12;
+    pfss_lim.max_pending_jobs = 1ull << 12;
+    pfss_lim.max_pending_hatx_words = 1ull << 21;
+    pfss_lim.max_flushes = 1ull << 9;
     pe->pfss_coeff_batch().set_limits(pfss_lim);
     runtime::OpenCollector::Limits open_lim;
     open_lim.max_pending_words = 1ull << 22;
     pe->open_collector().set_limits(open_lim);
-    pe->set_max_flushes(1ull << 12);
+    pe->set_max_flushes(1ull << 10);
+    pfss_phase_planner.bind(R.pfss_coeff, R.pfss_trunc);
+    R.pfss_planner = &pfss_phase_planner;
   }
 
   if (use_phase) {
@@ -200,11 +211,13 @@ void mlp_forward(const MLPConfig& cfg,
     pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
     pe->add_task(std::move(trunc_task1));
     pe->run(R);
+    record_phase_plan(pfss_phase_planner);
 
     // Second wave: apply SiLU cubic on the truncated hidden.
     pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
     pe->add_task(std::move(silu_task));
     pe->run(R);
+    record_phase_plan(pfss_phase_planner);
 
     // Linear 2 on the updated hidden.
     matmul_publicW(view2(hidden_scaled.data(), B * T, H),
@@ -221,6 +234,7 @@ void mlp_forward(const MLPConfig& cfg,
         &plan2.bundle, std::span<const uint64_t>(Y_share.data, Y_share.numel()),
         std::span<uint64_t>(y_scaled.data(), y_scaled.size())));
     pe->run(R);
+    record_phase_plan(pfss_phase_planner);
     for (size_t i = 0; i < Y_share.numel() && i < y_scaled.size(); ++i) {
       Y_share.data[i] = y_scaled[i];
     }

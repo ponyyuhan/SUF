@@ -271,6 +271,17 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   if (!ctx || !ctx->trunc_ctx) {
     throw std::runtime_error("transformer_layer_forward: LayerContext with trunc_ctx required");
   }
+  runtime::PfssLayerPlanner::Limits layer_lim;
+  layer_lim.max_coeff_jobs = 1ull << 15;
+  layer_lim.max_trunc_jobs = 1ull << 15;
+  layer_lim.max_coeff_hatx_words = 1ull << 22;
+  layer_lim.max_trunc_hatx_words = 1ull << 22;
+  layer_lim.max_coeff_flushes = 1ull << 9;
+  layer_lim.max_trunc_flushes = 1ull << 9;
+  runtime::PfssLayerPlanner layer_planner;
+  layer_planner.set_limits(layer_lim);
+  runtime::PfssLayerPlanner* prev_layer_planner = ctx->pfss_layer_planner;
+  ctx->pfss_layer_planner = &layer_planner;
   // Share a single PFSS batch for coeff+trunc to maximize fusion.
   if (ctx->pfss_batch == nullptr) ctx->pfss_batch = &pe->pfss_coeff_batch();
   ctx->enable_hoist = true;
@@ -278,15 +289,15 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   proto::PfssBackendBatch& backend = ctx->trunc_ctx->backend();
   // Apply conservative limits to PFSS batches and opens to avoid runaway buffering.
   runtime::PfssSuperBatch::Limits pfss_lim;
-  pfss_lim.max_pending_jobs = 1ull << 16;
-  pfss_lim.max_pending_hatx_words = 1ull << 24;
-  pfss_lim.max_flushes = 1ull << 12;
+  pfss_lim.max_pending_jobs = 1ull << 12;
+  pfss_lim.max_pending_hatx_words = 1ull << 21;
+  pfss_lim.max_flushes = 1ull << 10;
   pe->pfss_coeff_batch().set_limits(pfss_lim);
   pe->pfss_trunc_batch().set_limits(pfss_lim);
   runtime::OpenCollector::Limits open_lim;
   open_lim.max_pending_words = 1ull << 22;
   pe->open_collector().set_limits(open_lim);
-  pe->set_max_flushes(1ull << 12);
+  pe->set_max_flushes(1ull << 11);
 
   size_t B = X_share.shape[0];
   size_t T = X_share.shape[1];
@@ -303,6 +314,19 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   R.pfss_coeff = &pe->pfss_coeff_batch();
   R.pfss_trunc = &pe->pfss_coeff_batch();  // share batch for trunc + coeff
   R.opens = &pe->open_collector();
+  runtime::PfssPhasePlanner phase_planner;
+  auto* layer_planner_ptr = ctx ? ctx->pfss_layer_planner : nullptr;
+  auto record_phase_plan = [&](runtime::PfssPhasePlanner& planner) {
+    if (layer_planner_ptr) {
+      const auto& st = planner.stats();
+      if (st.coeff_jobs == 0 && st.trunc_jobs == 0 && st.coeff_flushes == 0 && st.trunc_flushes == 0) return;
+      layer_planner_ptr->record_phase(planner, pe->pfss_coeff_batch(), pe->pfss_trunc_batch());
+      pe->pfss_coeff_batch().reset_stats();
+      pe->pfss_trunc_batch().reset_stats();
+    }
+  };
+  phase_planner.bind(R.pfss_coeff, R.pfss_trunc);
+  R.pfss_planner = &phase_planner;
 
   int rows = static_cast<int>(B * T);
   int cols = static_cast<int>(D);
@@ -424,6 +448,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
       rows,
       cols));
   pe->run(R);
+  record_phase_plan(phase_planner);
 
   // Attention (already task-based, no local shifts).
   pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
@@ -457,6 +482,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
       rows,
       cols));
   pe->run(R);
+  record_phase_plan(phase_planner);
 
   // MLP (already task-based for trunc/rescale).
   mlp_forward(cfg.mlp,
@@ -474,7 +500,15 @@ void transformer_layer_forward(const TransformerConfig& cfg,
     Y_share.data[i] = proto::add_mod(Y_share.data[i], attn_out[i]);
   }
 
+  // Final safety flush and layer-level accounting for PFSS.
+  if (layer_planner_ptr) {
+    runtime::ProtoChanFromNet pch_layer(ch);
+    runtime::PfssAsyncRunner async_runner;
+    layer_planner_ptr->finalize_layer(
+        party, backend, pe->pfss_coeff_batch(), pe->pfss_trunc_batch(), pch_layer, &async_runner, /*async=*/false);
+  }
   finalize_layer(*ctx, party, ch, backend);
+  ctx->pfss_layer_planner = prev_layer_planner;
 }
 
 }  // namespace nn
