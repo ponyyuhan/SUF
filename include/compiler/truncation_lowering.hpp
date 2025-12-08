@@ -19,6 +19,13 @@ struct TruncationLoweringResult {
   gates::CompositeKeyPair keys;          // PFSS keys + masks
   std::unique_ptr<gates::PostProcHook> hook0;  // postproc for party 0
   std::unique_ptr<gates::PostProcHook> hook1;  // postproc for party 1
+  struct PerElement {
+    suf::SUF<uint64_t> suf;
+    gates::CompositeKeyPair keys;
+    std::unique_ptr<gates::PostProcHook> hook0;
+    std::unique_ptr<gates::PostProcHook> hook1;
+  };
+  std::vector<PerElement> per_elems;  // optional per-element compiled keys/hooks
 };
 
 // Lower a rescale/trunc/ARS GateKind into a new + composite keys + postproc hooks.
@@ -47,6 +54,7 @@ inline TruncationLoweringResult lower_truncation_gate(proto::PfssBackend& backen
     throw std::runtime_error("lower_truncation_gate: GateKind must be TR/ARS/GapARS/AutoTrunc");
   }
   TruncationLoweringResult res;
+  // Legacy single-mask path.
   res.keys = gates::composite_gen_trunc_gate(backend, rng, params.frac_bits, kind, batch_N, &res.suf);
 
   // Build postproc hooks wired with layout + masks.
@@ -70,6 +78,35 @@ inline TruncationLoweringResult lower_truncation_gate(proto::PfssBackend& backen
     h1->r_in = res.keys.k1.compiled.r_in;
     res.hook0 = std::move(h0);
     res.hook1 = std::move(h1);
+  }
+  // Optional per-element path: generate distinct masks/compiled keys per element.
+  if (params.per_element_masks && batch_N > 1) {
+    res.per_elems.resize(batch_N);
+    for (size_t i = 0; i < batch_N; ++i) {
+      auto& pe = res.per_elems[i];
+      pe.keys = gates::composite_gen_trunc_gate(backend, rng, params.frac_bits, kind, 1, &pe.suf);
+      if (kind == GateKind::FaithfulTR) {
+        auto h0 = std::make_unique<gates::FaithfulTruncPostProc>();
+        auto h1 = std::make_unique<gates::FaithfulTruncPostProc>();
+        h0->f = h1->f = params.frac_bits;
+        h0->r_hi_share = pe.keys.k0.r_hi_share;
+        h1->r_hi_share = pe.keys.k1.r_hi_share;
+        h0->r_in = pe.keys.k0.compiled.r_in;
+        h1->r_in = pe.keys.k1.compiled.r_in;
+        pe.hook0 = std::move(h0);
+        pe.hook1 = std::move(h1);
+      } else {
+        auto h0 = std::make_unique<gates::FaithfulArsPostProc>();
+        auto h1 = std::make_unique<gates::FaithfulArsPostProc>();
+        h0->f = h1->f = params.frac_bits;
+        h0->r_hi_share = pe.keys.k0.r_hi_share;
+        h1->r_hi_share = pe.keys.k1.r_hi_share;
+        h0->r_in = pe.keys.k0.compiled.r_in;
+        h1->r_in = pe.keys.k1.compiled.r_in;
+        pe.hook0 = std::move(h0);
+        pe.hook1 = std::move(h1);
+      }
+    }
   }
   return res;
 }

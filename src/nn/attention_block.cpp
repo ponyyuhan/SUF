@@ -323,6 +323,7 @@ void attention_forward(const AttentionConfig& cfg,
     pe->pfss_trunc_batch().reset_stats();
   };
   auto barrier = [&](const runtime::PfssLayerPlanner::BarrierPolicy& pol) {
+    if (ctx && ctx->disable_inner_barriers) return;
     if (ctx && ctx->pfss_layer_planner) {
       runtime::ProtoChanFromNet pch_bar(*pfss_nc);
       ctx->pfss_layer_planner->barrier(
@@ -352,6 +353,7 @@ void attention_forward(const AttentionConfig& cfg,
   trunc_params_qkv.frac_bits = fb;
   trunc_params_qkv.range_hint = compiler::matmul_accum_range(
       q_range, wqkv_range, D);
+  trunc_params_qkv.per_element_masks = true;
   compiler::AbsBound qkv_acc_abs =
       compiler::matmul_accum_abs(have_x_abs ? x_abs_hint : compiler::abs_from_range(q_range, true),
                                  wqkv_abs,
@@ -450,15 +452,16 @@ void attention_forward(const AttentionConfig& cfg,
                                                        rng,
                                                        static_cast<size_t>(B * H));
     recip_bundle = gates::make_recip_bundle(*recip_mat);
-    compiler::GateParams gap_p;
-    gap_p.kind = compiler::GateKind::AutoTrunc;
-    gap_p.frac_bits = fb;
-    gap_p.range_hint = clamp_softmax_range(fb);
-    gap_p.abs_hint = compiler::AbsBound{
-        /*is_signed=*/true,
-        static_cast<uint64_t>(1ull << fb),
-        compiler::RangeKind::Proof};
-    gap_p.gap_hint = compiler::gap_from_abs(gap_p.abs_hint, fb);
+      compiler::GateParams gap_p;
+      gap_p.kind = compiler::GateKind::AutoTrunc;
+      gap_p.frac_bits = fb;
+      gap_p.range_hint = clamp_softmax_range(fb);
+      gap_p.per_element_masks = true;
+      gap_p.abs_hint = compiler::AbsBound{
+          /*is_signed=*/true,
+          static_cast<uint64_t>(1ull << fb),
+          compiler::RangeKind::Proof};
+      gap_p.gap_hint = compiler::gap_from_abs(gap_p.abs_hint, fb);
     prob_gapars = compiler::lower_truncation_gate(
         ctx->trunc_ctx->backend(), rng, gap_p, static_cast<size_t>(B * H * cache.S_max));
     compiler::GateParams faithful_p;
@@ -628,6 +631,7 @@ void attention_forward(const AttentionConfig& cfg,
         compiler::matmul_accum_range(q_range, q_range, Dh);
     score_trunc_p.kind = compiler::GateKind::AutoTrunc;
     score_trunc_p.range_hint = score_acc_range;
+    score_trunc_p.per_element_masks = true;
     compiler::AbsBound q_abs = have_qkv_abs ? qkv_abs_hint : compiler::abs_from_range(q_range, true);
     compiler::AbsBound score_acc_abs = compiler::matmul_accum_abs(q_abs, q_abs, Dh);
     score_trunc_p.abs_hint = score_acc_abs;

@@ -236,8 +236,10 @@ RsqrtMaterial make_rsqrt_material(int frac_bits,
   compiler::GateParams p;
   p.kind = compiler::GateKind::FaithfulARS;
   p.frac_bits = frac_bits;
+  p.per_element_masks = true;
   mat.trunc_f = compiler::lower_truncation_gate(backend, rng, p, static_cast<size_t>(rows));
   p.frac_bits = 2 * frac_bits;
+  p.per_element_masks = true;
   mat.trunc_2f = compiler::lower_truncation_gate(backend, rng, p, static_cast<size_t>(rows));
   std::fill(mat.trunc_f.keys.k0.r_out_share.begin(), mat.trunc_f.keys.k0.r_out_share.end(), 0ull);
   std::fill(mat.trunc_f.keys.k1.r_out_share.begin(), mat.trunc_f.keys.k1.r_out_share.end(), 0ull);

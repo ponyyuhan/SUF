@@ -340,6 +340,11 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   if (layer_planner_ptr) {
     layer_planner_ptr->begin_layer();
   }
+  bool restore_disable = false;
+  if (ctx && !ctx->disable_inner_barriers) {
+    restore_disable = true;
+    ctx->disable_inner_barriers = true;  // enable full layer super-plan (drain only at end)
+  }
   auto record_phase_plan = [&](runtime::PfssPhasePlanner& planner) {
     if (layer_planner_ptr) {
       const auto& st = planner.stats();
@@ -370,6 +375,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   compiler::GateParams p_faithful;
   p_faithful.kind = compiler::GateKind::FaithfulARS;
   p_faithful.frac_bits = fb;
+  p_faithful.per_element_masks = true;
   compiler::GateParams p_gap = p_faithful;
   p_gap.kind = compiler::GateKind::GapARS;
 
@@ -480,8 +486,10 @@ void transformer_layer_forward(const TransformerConfig& cfg,
       rows,
       cols));
   pe->run(R);
-  drain_barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
-  record_phase_plan(phase_planner);
+  if (!ctx || !ctx->disable_inner_barriers) {
+    drain_barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
+    record_phase_plan(phase_planner);
+  }
 
   // Record a clamp for LN1 output to tighten ranges for downstream attention.
   if (ctx) {
@@ -511,8 +519,10 @@ void transformer_layer_forward(const TransformerConfig& cfg,
     attn_out[i] = proto::add_mod(attn_out[i], X_share.data[i]);
   }
   // Barrier after attention region to drain PFSS/Open if planner is present.
-  drain_barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
-  record_phase_plan(phase_planner);
+  if (!ctx || !ctx->disable_inner_barriers) {
+    drain_barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
+    record_phase_plan(phase_planner);
+  }
 
   // LayerNorm 2 via task.
   std::vector<uint64_t> ln2(attn_out.size(), 0);
@@ -528,8 +538,10 @@ void transformer_layer_forward(const TransformerConfig& cfg,
       rows,
       cols));
   pe->run(R);
-  drain_barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
-  record_phase_plan(phase_planner);
+  if (!ctx || !ctx->disable_inner_barriers) {
+    drain_barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
+    record_phase_plan(phase_planner);
+  }
 
   // Clamp LN2 output to feed tighter ranges into the MLP.
   if (ctx) {
@@ -550,8 +562,10 @@ void transformer_layer_forward(const TransformerConfig& cfg,
               ctx,
               pe);
   // Barrier after MLP region before final residual/flush.
-  drain_barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
-  record_phase_plan(phase_planner);
+  if (!ctx || !ctx->disable_inner_barriers) {
+    drain_barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
+    record_phase_plan(phase_planner);
+  }
 
   // Residual add
   for (size_t i = 0; i < Y_share.numel(); ++i) {
@@ -588,9 +602,17 @@ void transformer_layer_forward(const TransformerConfig& cfg,
                 << " coeff_hatx=" << totals.coeff_hatx_words
                 << " trunc_hatx=" << totals.trunc_hatx_words << "\n";
     }
+  } else {
+    // No layer planner: flush any pending batches once at layer end.
+    runtime::ProtoChanFromNet pch_final(*pfss_nc);
+    pe->finalize_pfss_once(party, backend, pch_final);
+    if (pe->open_collector().has_pending()) {
+      pe->open_collector().flush(party, ch);
+    }
   }
   bool flush_pfss = !(ctx && ctx->allow_async_pfss);
   finalize_layer(*ctx, party, ch, backend, flush_pfss);
+  if (ctx && restore_disable) ctx->disable_inner_barriers = false;
   ctx->pfss_layer_planner = prev_layer_planner;
 }
 

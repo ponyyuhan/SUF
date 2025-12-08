@@ -192,6 +192,19 @@ test_compile_pfss/fast:
 .PHONY : test_compile_pfss/fast
 
 #=============================================================================
+# Target rules for targets named test_gapars_selector
+
+# Build rule for target.
+test_gapars_selector: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_gapars_selector
+.PHONY : test_gapars_selector
+
+# fast build rule for target.
+test_gapars_selector/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_gapars_selector.dir/build.make CMakeFiles/test_gapars_selector.dir/build
+.PHONY : test_gapars_selector/fast
+
+#=============================================================================
 # Target rules for targets named compiler_passes
 
 # Build rule for target.
@@ -452,6 +465,32 @@ test_trunc_task/fast:
 .PHONY : test_trunc_task/fast
 
 #=============================================================================
+# Target rules for targets named test_staged_trunc
+
+# Build rule for target.
+test_staged_trunc: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_staged_trunc
+.PHONY : test_staged_trunc
+
+# fast build rule for target.
+test_staged_trunc/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_staged_trunc.dir/build.make CMakeFiles/test_staged_trunc.dir/build
+.PHONY : test_staged_trunc/fast
+
+#=============================================================================
+# Target rules for targets named test_staged_softmax
+
+# Build rule for target.
+test_staged_softmax: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_staged_softmax
+.PHONY : test_staged_softmax
+
+# fast build rule for target.
+test_staged_softmax/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_staged_softmax.dir/build.make CMakeFiles/test_staged_softmax.dir/build
+.PHONY : test_staged_softmax/fast
+
+#=============================================================================
 # Target rules for targets named test_layernorm_task
 
 # Build rule for target.
@@ -463,6 +502,71 @@ test_layernorm_task: cmake_check_build_system
 test_layernorm_task/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_layernorm_task.dir/build.make CMakeFiles/test_layernorm_task.dir/build
 .PHONY : test_layernorm_task/fast
+
+#=============================================================================
+# Target rules for targets named test_pfss_planner
+
+# Build rule for target.
+test_pfss_planner: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_pfss_planner
+.PHONY : test_pfss_planner
+
+# fast build rule for target.
+test_pfss_planner/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pfss_planner.dir/build.make CMakeFiles/test_pfss_planner.dir/build
+.PHONY : test_pfss_planner/fast
+
+#=============================================================================
+# Target rules for targets named test_pfss_async
+
+# Build rule for target.
+test_pfss_async: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_pfss_async
+.PHONY : test_pfss_async
+
+# fast build rule for target.
+test_pfss_async/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pfss_async.dir/build.make CMakeFiles/test_pfss_async.dir/build
+.PHONY : test_pfss_async/fast
+
+#=============================================================================
+# Target rules for targets named test_pfss_async_stress
+
+# Build rule for target.
+test_pfss_async_stress: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_pfss_async_stress
+.PHONY : test_pfss_async_stress
+
+# fast build rule for target.
+test_pfss_async_stress/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pfss_async_stress.dir/build.make CMakeFiles/test_pfss_async_stress.dir/build
+.PHONY : test_pfss_async_stress/fast
+
+#=============================================================================
+# Target rules for targets named test_transformer_async
+
+# Build rule for target.
+test_transformer_async: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_transformer_async
+.PHONY : test_transformer_async
+
+# fast build rule for target.
+test_transformer_async/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_transformer_async.dir/build.make CMakeFiles/test_transformer_async.dir/build
+.PHONY : test_transformer_async/fast
+
+#=============================================================================
+# Target rules for targets named test_planner_causal
+
+# Build rule for target.
+test_planner_causal: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_planner_causal
+.PHONY : test_planner_causal
+
+# fast build rule for target.
+test_planner_causal/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_planner_causal.dir/build.make CMakeFiles/test_planner_causal.dir/build
+.PHONY : test_planner_causal/fast
 
 #=============================================================================
 # Target rules for targets named bench_gemm
@@ -911,6 +1015,30 @@ src/demo/test_composite_runtime.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_runtime.dir/build.make CMakeFiles/test_composite_runtime.dir/src/demo/test_composite_runtime.cpp.s
 .PHONY : src/demo/test_composite_runtime.cpp.s
 
+src/demo/test_gapars_selector.o: src/demo/test_gapars_selector.cpp.o
+.PHONY : src/demo/test_gapars_selector.o
+
+# target to build an object file
+src/demo/test_gapars_selector.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_gapars_selector.dir/build.make CMakeFiles/test_gapars_selector.dir/src/demo/test_gapars_selector.cpp.o
+.PHONY : src/demo/test_gapars_selector.cpp.o
+
+src/demo/test_gapars_selector.i: src/demo/test_gapars_selector.cpp.i
+.PHONY : src/demo/test_gapars_selector.i
+
+# target to preprocess a source file
+src/demo/test_gapars_selector.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_gapars_selector.dir/build.make CMakeFiles/test_gapars_selector.dir/src/demo/test_gapars_selector.cpp.i
+.PHONY : src/demo/test_gapars_selector.cpp.i
+
+src/demo/test_gapars_selector.s: src/demo/test_gapars_selector.cpp.s
+.PHONY : src/demo/test_gapars_selector.s
+
+# target to generate assembly for a file
+src/demo/test_gapars_selector.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_gapars_selector.dir/build.make CMakeFiles/test_gapars_selector.dir/src/demo/test_gapars_selector.cpp.s
+.PHONY : src/demo/test_gapars_selector.cpp.s
+
 src/demo/test_layernorm_task.o: src/demo/test_layernorm_task.cpp.o
 .PHONY : src/demo/test_layernorm_task.o
 
@@ -1055,6 +1183,102 @@ src/demo/test_myl7_bit_order.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_myl7_bit_order.dir/build.make CMakeFiles/test_myl7_bit_order.dir/src/demo/test_myl7_bit_order.cpp.s
 .PHONY : src/demo/test_myl7_bit_order.cpp.s
 
+src/demo/test_pfss_async.o: src/demo/test_pfss_async.cpp.o
+.PHONY : src/demo/test_pfss_async.o
+
+# target to build an object file
+src/demo/test_pfss_async.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pfss_async.dir/build.make CMakeFiles/test_pfss_async.dir/src/demo/test_pfss_async.cpp.o
+.PHONY : src/demo/test_pfss_async.cpp.o
+
+src/demo/test_pfss_async.i: src/demo/test_pfss_async.cpp.i
+.PHONY : src/demo/test_pfss_async.i
+
+# target to preprocess a source file
+src/demo/test_pfss_async.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pfss_async.dir/build.make CMakeFiles/test_pfss_async.dir/src/demo/test_pfss_async.cpp.i
+.PHONY : src/demo/test_pfss_async.cpp.i
+
+src/demo/test_pfss_async.s: src/demo/test_pfss_async.cpp.s
+.PHONY : src/demo/test_pfss_async.s
+
+# target to generate assembly for a file
+src/demo/test_pfss_async.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pfss_async.dir/build.make CMakeFiles/test_pfss_async.dir/src/demo/test_pfss_async.cpp.s
+.PHONY : src/demo/test_pfss_async.cpp.s
+
+src/demo/test_pfss_async_stress.o: src/demo/test_pfss_async_stress.cpp.o
+.PHONY : src/demo/test_pfss_async_stress.o
+
+# target to build an object file
+src/demo/test_pfss_async_stress.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pfss_async_stress.dir/build.make CMakeFiles/test_pfss_async_stress.dir/src/demo/test_pfss_async_stress.cpp.o
+.PHONY : src/demo/test_pfss_async_stress.cpp.o
+
+src/demo/test_pfss_async_stress.i: src/demo/test_pfss_async_stress.cpp.i
+.PHONY : src/demo/test_pfss_async_stress.i
+
+# target to preprocess a source file
+src/demo/test_pfss_async_stress.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pfss_async_stress.dir/build.make CMakeFiles/test_pfss_async_stress.dir/src/demo/test_pfss_async_stress.cpp.i
+.PHONY : src/demo/test_pfss_async_stress.cpp.i
+
+src/demo/test_pfss_async_stress.s: src/demo/test_pfss_async_stress.cpp.s
+.PHONY : src/demo/test_pfss_async_stress.s
+
+# target to generate assembly for a file
+src/demo/test_pfss_async_stress.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pfss_async_stress.dir/build.make CMakeFiles/test_pfss_async_stress.dir/src/demo/test_pfss_async_stress.cpp.s
+.PHONY : src/demo/test_pfss_async_stress.cpp.s
+
+src/demo/test_pfss_planner.o: src/demo/test_pfss_planner.cpp.o
+.PHONY : src/demo/test_pfss_planner.o
+
+# target to build an object file
+src/demo/test_pfss_planner.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pfss_planner.dir/build.make CMakeFiles/test_pfss_planner.dir/src/demo/test_pfss_planner.cpp.o
+.PHONY : src/demo/test_pfss_planner.cpp.o
+
+src/demo/test_pfss_planner.i: src/demo/test_pfss_planner.cpp.i
+.PHONY : src/demo/test_pfss_planner.i
+
+# target to preprocess a source file
+src/demo/test_pfss_planner.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pfss_planner.dir/build.make CMakeFiles/test_pfss_planner.dir/src/demo/test_pfss_planner.cpp.i
+.PHONY : src/demo/test_pfss_planner.cpp.i
+
+src/demo/test_pfss_planner.s: src/demo/test_pfss_planner.cpp.s
+.PHONY : src/demo/test_pfss_planner.s
+
+# target to generate assembly for a file
+src/demo/test_pfss_planner.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pfss_planner.dir/build.make CMakeFiles/test_pfss_planner.dir/src/demo/test_pfss_planner.cpp.s
+.PHONY : src/demo/test_pfss_planner.cpp.s
+
+src/demo/test_planner_causal.o: src/demo/test_planner_causal.cpp.o
+.PHONY : src/demo/test_planner_causal.o
+
+# target to build an object file
+src/demo/test_planner_causal.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_planner_causal.dir/build.make CMakeFiles/test_planner_causal.dir/src/demo/test_planner_causal.cpp.o
+.PHONY : src/demo/test_planner_causal.cpp.o
+
+src/demo/test_planner_causal.i: src/demo/test_planner_causal.cpp.i
+.PHONY : src/demo/test_planner_causal.i
+
+# target to preprocess a source file
+src/demo/test_planner_causal.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_planner_causal.dir/build.make CMakeFiles/test_planner_causal.dir/src/demo/test_planner_causal.cpp.i
+.PHONY : src/demo/test_planner_causal.cpp.i
+
+src/demo/test_planner_causal.s: src/demo/test_planner_causal.cpp.s
+.PHONY : src/demo/test_planner_causal.s
+
+# target to generate assembly for a file
+src/demo/test_planner_causal.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_planner_causal.dir/build.make CMakeFiles/test_planner_causal.dir/src/demo/test_planner_causal.cpp.s
+.PHONY : src/demo/test_planner_causal.cpp.s
+
 src/demo/test_postproc_hooks.o: src/demo/test_postproc_hooks.cpp.o
 .PHONY : src/demo/test_postproc_hooks.o
 
@@ -1151,6 +1375,54 @@ src/demo/test_softmax_task.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_softmax_task.dir/build.make CMakeFiles/test_softmax_task.dir/src/demo/test_softmax_task.cpp.s
 .PHONY : src/demo/test_softmax_task.cpp.s
 
+src/demo/test_staged_softmax.o: src/demo/test_staged_softmax.cpp.o
+.PHONY : src/demo/test_staged_softmax.o
+
+# target to build an object file
+src/demo/test_staged_softmax.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_staged_softmax.dir/build.make CMakeFiles/test_staged_softmax.dir/src/demo/test_staged_softmax.cpp.o
+.PHONY : src/demo/test_staged_softmax.cpp.o
+
+src/demo/test_staged_softmax.i: src/demo/test_staged_softmax.cpp.i
+.PHONY : src/demo/test_staged_softmax.i
+
+# target to preprocess a source file
+src/demo/test_staged_softmax.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_staged_softmax.dir/build.make CMakeFiles/test_staged_softmax.dir/src/demo/test_staged_softmax.cpp.i
+.PHONY : src/demo/test_staged_softmax.cpp.i
+
+src/demo/test_staged_softmax.s: src/demo/test_staged_softmax.cpp.s
+.PHONY : src/demo/test_staged_softmax.s
+
+# target to generate assembly for a file
+src/demo/test_staged_softmax.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_staged_softmax.dir/build.make CMakeFiles/test_staged_softmax.dir/src/demo/test_staged_softmax.cpp.s
+.PHONY : src/demo/test_staged_softmax.cpp.s
+
+src/demo/test_staged_trunc.o: src/demo/test_staged_trunc.cpp.o
+.PHONY : src/demo/test_staged_trunc.o
+
+# target to build an object file
+src/demo/test_staged_trunc.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_staged_trunc.dir/build.make CMakeFiles/test_staged_trunc.dir/src/demo/test_staged_trunc.cpp.o
+.PHONY : src/demo/test_staged_trunc.cpp.o
+
+src/demo/test_staged_trunc.i: src/demo/test_staged_trunc.cpp.i
+.PHONY : src/demo/test_staged_trunc.i
+
+# target to preprocess a source file
+src/demo/test_staged_trunc.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_staged_trunc.dir/build.make CMakeFiles/test_staged_trunc.dir/src/demo/test_staged_trunc.cpp.i
+.PHONY : src/demo/test_staged_trunc.cpp.i
+
+src/demo/test_staged_trunc.s: src/demo/test_staged_trunc.cpp.s
+.PHONY : src/demo/test_staged_trunc.s
+
+# target to generate assembly for a file
+src/demo/test_staged_trunc.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_staged_trunc.dir/build.make CMakeFiles/test_staged_trunc.dir/src/demo/test_staged_trunc.cpp.s
+.PHONY : src/demo/test_staged_trunc.cpp.s
+
 src/demo/test_suf_ref_eval.o: src/demo/test_suf_ref_eval.cpp.o
 .PHONY : src/demo/test_suf_ref_eval.o
 
@@ -1174,6 +1446,30 @@ src/demo/test_suf_ref_eval.s: src/demo/test_suf_ref_eval.cpp.s
 src/demo/test_suf_ref_eval.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_suf_ref_eval.dir/build.make CMakeFiles/test_suf_ref_eval.dir/src/demo/test_suf_ref_eval.cpp.s
 .PHONY : src/demo/test_suf_ref_eval.cpp.s
+
+src/demo/test_transformer_async.o: src/demo/test_transformer_async.cpp.o
+.PHONY : src/demo/test_transformer_async.o
+
+# target to build an object file
+src/demo/test_transformer_async.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_transformer_async.dir/build.make CMakeFiles/test_transformer_async.dir/src/demo/test_transformer_async.cpp.o
+.PHONY : src/demo/test_transformer_async.cpp.o
+
+src/demo/test_transformer_async.i: src/demo/test_transformer_async.cpp.i
+.PHONY : src/demo/test_transformer_async.i
+
+# target to preprocess a source file
+src/demo/test_transformer_async.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_transformer_async.dir/build.make CMakeFiles/test_transformer_async.dir/src/demo/test_transformer_async.cpp.i
+.PHONY : src/demo/test_transformer_async.cpp.i
+
+src/demo/test_transformer_async.s: src/demo/test_transformer_async.cpp.s
+.PHONY : src/demo/test_transformer_async.s
+
+# target to generate assembly for a file
+src/demo/test_transformer_async.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_transformer_async.dir/build.make CMakeFiles/test_transformer_async.dir/src/demo/test_transformer_async.cpp.s
+.PHONY : src/demo/test_transformer_async.cpp.s
 
 src/demo/test_trunc_task.o: src/demo/test_trunc_task.cpp.o
 .PHONY : src/demo/test_trunc_task.o
@@ -1560,17 +1856,25 @@ help:
 	@echo "... test_composite_equiv_proto_myl7"
 	@echo "... test_composite_equiv_proto_sigmafast"
 	@echo "... test_composite_runtime"
+	@echo "... test_gapars_selector"
 	@echo "... test_layernorm_task"
 	@echo "... test_llm_gates"
 	@echo "... test_mask_rewrite"
 	@echo "... test_matmul"
 	@echo "... test_matmul_and_attention"
 	@echo "... test_myl7_bit_order"
+	@echo "... test_pfss_async"
+	@echo "... test_pfss_async_stress"
+	@echo "... test_pfss_planner"
+	@echo "... test_planner_causal"
 	@echo "... test_postproc_hooks"
 	@echo "... test_pred_semantics"
 	@echo "... test_sigmafast"
 	@echo "... test_softmax_task"
+	@echo "... test_staged_softmax"
+	@echo "... test_staged_trunc"
 	@echo "... test_suf_ref_eval"
+	@echo "... test_transformer_async"
 	@echo "... test_trunc_task"
 	@echo "... test_truncation"
 	@echo "... src/bench/bench_attention.o"
@@ -1624,6 +1928,9 @@ help:
 	@echo "... src/demo/test_composite_runtime.o"
 	@echo "... src/demo/test_composite_runtime.i"
 	@echo "... src/demo/test_composite_runtime.s"
+	@echo "... src/demo/test_gapars_selector.o"
+	@echo "... src/demo/test_gapars_selector.i"
+	@echo "... src/demo/test_gapars_selector.s"
 	@echo "... src/demo/test_layernorm_task.o"
 	@echo "... src/demo/test_layernorm_task.i"
 	@echo "... src/demo/test_layernorm_task.s"
@@ -1642,6 +1949,18 @@ help:
 	@echo "... src/demo/test_myl7_bit_order.o"
 	@echo "... src/demo/test_myl7_bit_order.i"
 	@echo "... src/demo/test_myl7_bit_order.s"
+	@echo "... src/demo/test_pfss_async.o"
+	@echo "... src/demo/test_pfss_async.i"
+	@echo "... src/demo/test_pfss_async.s"
+	@echo "... src/demo/test_pfss_async_stress.o"
+	@echo "... src/demo/test_pfss_async_stress.i"
+	@echo "... src/demo/test_pfss_async_stress.s"
+	@echo "... src/demo/test_pfss_planner.o"
+	@echo "... src/demo/test_pfss_planner.i"
+	@echo "... src/demo/test_pfss_planner.s"
+	@echo "... src/demo/test_planner_causal.o"
+	@echo "... src/demo/test_planner_causal.i"
+	@echo "... src/demo/test_planner_causal.s"
 	@echo "... src/demo/test_postproc_hooks.o"
 	@echo "... src/demo/test_postproc_hooks.i"
 	@echo "... src/demo/test_postproc_hooks.s"
@@ -1654,9 +1973,18 @@ help:
 	@echo "... src/demo/test_softmax_task.o"
 	@echo "... src/demo/test_softmax_task.i"
 	@echo "... src/demo/test_softmax_task.s"
+	@echo "... src/demo/test_staged_softmax.o"
+	@echo "... src/demo/test_staged_softmax.i"
+	@echo "... src/demo/test_staged_softmax.s"
+	@echo "... src/demo/test_staged_trunc.o"
+	@echo "... src/demo/test_staged_trunc.i"
+	@echo "... src/demo/test_staged_trunc.s"
 	@echo "... src/demo/test_suf_ref_eval.o"
 	@echo "... src/demo/test_suf_ref_eval.i"
 	@echo "... src/demo/test_suf_ref_eval.s"
+	@echo "... src/demo/test_transformer_async.o"
+	@echo "... src/demo/test_transformer_async.i"
+	@echo "... src/demo/test_transformer_async.s"
 	@echo "... src/demo/test_trunc_task.o"
 	@echo "... src/demo/test_trunc_task.i"
 	@echo "... src/demo/test_trunc_task.s"

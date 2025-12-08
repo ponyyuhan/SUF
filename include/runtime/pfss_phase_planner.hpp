@@ -109,6 +109,11 @@ class PfssLayerPlanner {
   void record_phase(const PfssPhasePlanner& planner,
                     const PfssSuperBatch& coeff_batch,
                     const PfssSuperBatch& trunc_batch) {
+    if (planner.stats().coeff_jobs == 0 && planner.stats().trunc_jobs == 0 &&
+        coeff_batch.stats().hatx_words == 0 && trunc_batch.stats().hatx_words == 0 &&
+        planner.stats().coeff_flushes == 0 && planner.stats().trunc_flushes == 0) {
+      return;
+    }
     const auto& ps = planner.stats();
     totals_.coeff_jobs += ps.coeff_jobs;
     totals_.trunc_jobs += ps.trunc_jobs;
@@ -123,13 +128,13 @@ class PfssLayerPlanner {
 
   template <typename PfssChanT>
   void barrier(int party,
-               proto::PfssBackendBatch& backend,
-               PfssSuperBatch& coeff_batch,
-               PfssSuperBatch& trunc_batch,
-               PfssChanT& pfss_ch,
-               OpenCollector* opens,
-               net::Chan* net_ch,
-               const BarrierPolicy& policy) {
+              proto::PfssBackendBatch& backend,
+              PfssSuperBatch& coeff_batch,
+              PfssSuperBatch& trunc_batch,
+              PfssChanT& pfss_ch,
+              OpenCollector* opens,
+              net::Chan* net_ch,
+              const BarrierPolicy& policy) {
     auto flush_open = [&](OpenCollector* oc, net::Chan* nc) {
       if (!oc || !nc) return;
       if (oc->has_pending()) {

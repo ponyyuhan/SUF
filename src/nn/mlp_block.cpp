@@ -71,6 +71,7 @@ void mlp_forward(const MLPConfig& cfg,
     pe->pfss_trunc_batch().reset_stats();
   };
   auto barrier = [&](const runtime::PfssLayerPlanner::BarrierPolicy& pol) {
+    if (ctx && ctx->disable_inner_barriers) return;
     if (ctx && ctx->pfss_layer_planner) {
       runtime::ProtoChanFromNet pch_bar(*pfss_nc);
       ctx->pfss_layer_planner->barrier(

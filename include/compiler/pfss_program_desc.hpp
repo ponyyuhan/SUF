@@ -133,6 +133,7 @@ struct GateParams {
   RangeInterval range_hint = RangeInterval::whole(true);
   AbsBound abs_hint;
   std::optional<GapCert> gap_hint;
+  bool per_element_masks = false;  // opt-in: generate per-element trunc/ARS keys (expensive)
 };
 
 } // namespace compiler

@@ -45,6 +45,8 @@ inline MatmulTruncationPlan compile_matmul_truncation(proto::PfssBackendBatch& b
   if (prefer_gapars) {
     accum_abs.kind = RangeKind::Proof;
   }
+  // Matmul outputs: opt in to per-element masks for better masking hygiene.
+  params.per_element_masks = true;
   params.abs_hint = accum_abs;
   params.gap_hint = gap_cert;
   params.kind = select_trunc_kind(accum_abs, frac_bits, gap_cert);

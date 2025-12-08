@@ -182,29 +182,51 @@ class TruncTask final : public detail::PhaseTask {
       throw std::runtime_error("TruncTask: net channel missing");
     }
     // Resolve party-specific view lazily.
-    if (!key_) {
-      key_ = (R.party == 0) ? &bundle_->keys.k0 : &bundle_->keys.k1;
-      hook_ = (R.party == 0) ? bundle_->hook0.get() : bundle_->hook1.get();
-      if (!hook_) throw std::runtime_error("TruncTask: hook missing");
-      hook_->configure(key_->compiled.layout);
-      if (key_->r_in_share_vec.empty() || key_->r_in_share_vec.size() < in_.size()) {
-        // Some generators still provide scalar r_in; repeat it to enforce per-element usage.
-        r_in_fallback_.assign(in_.size(), key_->r_in_share);
-        r_in_src_ = &r_in_fallback_;
+    if (!key_ && !per_element_) {
+      if (!bundle_->per_elems.empty() && bundle_->per_elems.size() == in_.size()) {
+        per_element_ = true;
+        per_keys_.resize(in_.size());
+        per_hooks_.resize(in_.size());
+        for (size_t i = 0; i < in_.size(); ++i) {
+          const auto& pe = bundle_->per_elems[i];
+          per_keys_[i] = (R.party == 0) ? &pe.keys.k0 : &pe.keys.k1;
+          auto* hk = (R.party == 0) ? pe.hook0.get() : pe.hook1.get();
+          if (!hk) throw std::runtime_error("TruncTask: per-element hook missing");
+          hk->configure(per_keys_[i]->compiled.layout);
+          per_hooks_[i] = hk;
+        }
       } else {
-        r_in_src_ = &key_->r_in_share_vec;
+        key_ = (R.party == 0) ? &bundle_->keys.k0 : &bundle_->keys.k1;
+        hook_ = (R.party == 0) ? bundle_->hook0.get() : bundle_->hook1.get();
+        if (!hook_) throw std::runtime_error("TruncTask: hook missing");
+        hook_->configure(key_->compiled.layout);
+        if (key_->r_in_share_vec.empty() || key_->r_in_share_vec.size() < in_.size()) {
+          // Some generators still provide scalar r_in; repeat it to enforce per-element usage.
+          r_in_fallback_.assign(in_.size(), key_->r_in_share);
+          r_in_src_ = &r_in_fallback_;
+        } else {
+          r_in_src_ = &key_->r_in_share_vec;
+        }
       }
     }
 
     switch (st_) {
       case St::OpenXhat: {
         masked_.resize(in_.size());
-        for (size_t i = 0; i < in_.size(); ++i) {
-          if (!r_in_src_ || r_in_src_->size() <= i) {
-            throw std::runtime_error("TruncTask: missing r_in share");
+        if (per_element_) {
+          for (size_t i = 0; i < in_.size(); ++i) {
+            if (!per_keys_[i]) throw std::runtime_error("TruncTask: missing per-element key");
+            uint64_t rin = per_keys_[i]->r_in_share;
+            masked_[i] = proto::add_mod(in_[i], rin);
           }
-          uint64_t rin = (*r_in_src_)[i];
-          masked_[i] = proto::add_mod(in_[i], rin);
+        } else {
+          for (size_t i = 0; i < in_.size(); ++i) {
+            if (!r_in_src_ || r_in_src_->size() <= i) {
+              throw std::runtime_error("TruncTask: missing r_in share");
+            }
+            uint64_t rin = (*r_in_src_)[i];
+            masked_[i] = proto::add_mod(in_[i], rin);
+          }
         }
         if (R.opens) {
           h_open_ = R.opens->enqueue(masked_);
@@ -231,16 +253,30 @@ class TruncTask final : public detail::PhaseTask {
           auto v = R.opens->view(h_open_);
           opened_.assign(v.begin(), v.end());
           if (R.pfss_backend && dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) != nullptr) {
-            int shift = 0;
-            if (!key_->compiled.extra_u64.empty()) {
-              shift = static_cast<int>(key_->compiled.extra_u64[0]);
-            } else if (!bundle_->keys.k0.compiled.extra_u64.empty()) {
-              shift = static_cast<int>(bundle_->keys.k0.compiled.extra_u64[0]);
-            }
-            for (size_t i = 0; i < opened_.size(); ++i) {
-              uint64_t x_plain = proto::sub_mod(static_cast<uint64_t>(opened_[i]), key_->compiled.r_in);
-              int64_t shifted = (shift >= 64) ? 0ll : (static_cast<int64_t>(x_plain) >> shift);
-              out_[i] = (R.party == 0) ? static_cast<uint64_t>(shifted) : 0ull;
+            if (per_element_) {
+              for (size_t i = 0; i < opened_.size(); ++i) {
+                int shift = 0;
+                const auto* k_i = per_keys_[i];
+                if (!k_i) throw std::runtime_error("TruncTask: missing per-element key (ref backend)");
+                if (!k_i->compiled.extra_u64.empty()) {
+                  shift = static_cast<int>(k_i->compiled.extra_u64[0]);
+                }
+                uint64_t x_plain = proto::sub_mod(static_cast<uint64_t>(opened_[i]), k_i->compiled.r_in);
+                int64_t shifted = (shift >= 64) ? 0ll : (static_cast<int64_t>(x_plain) >> shift);
+                out_[i] = (R.party == 0) ? static_cast<uint64_t>(shifted) : 0ull;
+              }
+            } else {
+              int shift = 0;
+              if (!key_->compiled.extra_u64.empty()) {
+                shift = static_cast<int>(key_->compiled.extra_u64[0]);
+              } else if (!bundle_->keys.k0.compiled.extra_u64.empty()) {
+                shift = static_cast<int>(bundle_->keys.k0.compiled.extra_u64[0]);
+              }
+              for (size_t i = 0; i < opened_.size(); ++i) {
+                uint64_t x_plain = proto::sub_mod(static_cast<uint64_t>(opened_[i]), key_->compiled.r_in);
+                int64_t shifted = (shift >= 64) ? 0ll : (static_cast<int64_t>(x_plain) >> shift);
+                out_[i] = (R.party == 0) ? static_cast<uint64_t>(shifted) : 0ull;
+              }
             }
             st_ = St::Done;
             return detail::Need::None;
@@ -250,19 +286,65 @@ class TruncTask final : public detail::PhaseTask {
         [[fallthrough]];
       }
       case St::EnqueuePfss: {
-        PreparedCompositeJob job;
-        job.suf = &bundle_->suf;
-        job.key = key_;
-        job.hook = hook_;
-        job.hatx_public.resize(opened_.size());
-        for (size_t i = 0; i < opened_.size(); ++i) {
-          job.hatx_public[i] = static_cast<uint64_t>(opened_[i]);
+        if (per_element_) {
+          pfss_handles_.clear();
+          pfss_handles_.reserve(opened_.size());
+          for (size_t i = 0; i < opened_.size(); ++i) {
+            PreparedCompositeJob job;
+            job.suf = &bundle_->per_elems[i].suf;
+            job.key = per_keys_[i];
+            job.hook = per_hooks_[i];
+            job.hatx_public.resize(1);
+            job.hatx_public[0] = static_cast<uint64_t>(opened_[i]);
+            pfss_handles_.push_back(R.pfss_trunc->enqueue_composite(std::move(job)));
+          }
+        } else {
+          PreparedCompositeJob job;
+          job.suf = &bundle_->suf;
+          job.key = key_;
+          job.hook = hook_;
+          job.hatx_public.resize(opened_.size());
+          for (size_t i = 0; i < opened_.size(); ++i) {
+            job.hatx_public[i] = static_cast<uint64_t>(opened_[i]);
+          }
+          h_pfss_ = R.pfss_trunc->enqueue_composite(std::move(job));
         }
-        h_pfss_ = R.pfss_trunc->enqueue_composite(std::move(job));
         st_ = St::WaitPfss;
         return detail::Need::PfssTrunc;
       }
       case St::WaitPfss: {
+        if (per_element_) {
+          for (size_t i = 0; i < pfss_handles_.size(); ++i) {
+            if (!R.pfss_trunc->ready(pfss_handles_[i])) return detail::Need::PfssTrunc;
+          }
+          for (size_t i = 0; i < pfss_handles_.size(); ++i) {
+            auto v = R.pfss_trunc->view(pfss_handles_[i]);
+            if (v.arith_words < v.r) {
+              throw std::runtime_error("TruncTask: PFSS arith slice too small (per-element)");
+            }
+            std::vector<uint64_t> hook_out(v.r, 0);
+            size_t need_triples = std::max<size_t>(v.ell, v.r);
+            const auto* key_i = per_keys_[i];
+            const std::vector<proto::BeaverTriple64Share>* triples = &key_i->triples;
+            if (triples->size() < need_triples) {
+              throw std::runtime_error("TruncTask: insufficient triples (per-element)");
+            }
+            proto::BeaverMul64 mul{R.party, *R.pfss_chan, *triples};
+            per_hooks_[i]->run_batch(R.party,
+                                     *R.pfss_chan,
+                                     mul,
+                                     nullptr,
+                                     v.arith,
+                                     v.r,
+                                     v.bools,
+                                     v.ell,
+                                     /*N=*/1,
+                                     hook_out.data());
+            out_[i] = hook_out[0];
+          }
+          st_ = St::Done;
+          return detail::Need::None;
+        }
         if (!R.pfss_trunc->ready(h_pfss_)) return detail::Need::PfssTrunc;
         auto v = R.pfss_trunc->view(h_pfss_);
         size_t elems = in_.size();
@@ -299,6 +381,10 @@ class TruncTask final : public detail::PhaseTask {
   const compiler::TruncationLoweringResult* bundle_ = nullptr;
   const gates::CompositePartyKey* key_ = nullptr;
   gates::PostProcHook* hook_ = nullptr;
+  bool per_element_ = false;
+  std::vector<const gates::CompositePartyKey*> per_keys_;
+  std::vector<gates::PostProcHook*> per_hooks_;
+  std::vector<PfssHandle> pfss_handles_;
   std::span<const uint64_t> in_;
   std::span<uint64_t> out_;
   const std::vector<uint64_t>* r_in_src_ = nullptr;

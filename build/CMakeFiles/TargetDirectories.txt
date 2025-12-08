@@ -3,6 +3,7 @@
 /home/yuhan/new/SUF/build/CMakeFiles/test_suf_ref_eval.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_mask_rewrite.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_compile_pfss.dir
+/home/yuhan/new/SUF/build/CMakeFiles/test_gapars_selector.dir
 /home/yuhan/new/SUF/build/CMakeFiles/compiler_passes.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_sigmafast.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_composite_runtime.dir
@@ -23,7 +24,14 @@
 /home/yuhan/new/SUF/build/CMakeFiles/test_truncation.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_softmax_task.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_trunc_task.dir
+/home/yuhan/new/SUF/build/CMakeFiles/test_staged_trunc.dir
+/home/yuhan/new/SUF/build/CMakeFiles/test_staged_softmax.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_layernorm_task.dir
+/home/yuhan/new/SUF/build/CMakeFiles/test_pfss_planner.dir
+/home/yuhan/new/SUF/build/CMakeFiles/test_pfss_async.dir
+/home/yuhan/new/SUF/build/CMakeFiles/test_pfss_async_stress.dir
+/home/yuhan/new/SUF/build/CMakeFiles/test_transformer_async.dir
+/home/yuhan/new/SUF/build/CMakeFiles/test_planner_causal.dir
 /home/yuhan/new/SUF/build/CMakeFiles/bench_gemm.dir
 /home/yuhan/new/SUF/build/CMakeFiles/bench_truncation.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_myl7_bit_order.dir

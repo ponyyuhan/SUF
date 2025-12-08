@@ -29,6 +29,7 @@ struct TensorFacts {
   Scale scale;
   RangeInterval range = RangeInterval::whole(true);  // conservative ring-range
   AbsBound abs;  // bound on |x_int| with proof kind
+  uint64_t mask_abs = 0;  // bound on |r_in| used by trunc bundle
   std::optional<GapCert> gap;  // optional proof-carrying gap cert
 };
 

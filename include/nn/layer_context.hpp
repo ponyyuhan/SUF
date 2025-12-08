@@ -28,6 +28,9 @@ struct LayerContext {
   runtime::PfssLayerPlanner* pfss_layer_planner = nullptr;  // optional cross-phase planner
   net::Chan* pfss_net_chan = nullptr;  // optional dedicated PFSS channel; defaults to main chan
   int frac_bits = 16;
+  // Enable a layer-wide super-plan: suppress inner PFSS/Open drains inside attention/MLP
+  // and only drain at explicit layer barriers chosen by the caller.
+  bool disable_inner_barriers = false;
   bool enable_hoist = false;  // enable conservative rescale hoisting when finalizing
   bool allow_async_pfss = false;  // if true, caller may detach PFSS flushes (requires safe channel)
   std::unique_ptr<runtime::PfssAsyncRunner> pfss_async_runner;  // retained across layers when async
