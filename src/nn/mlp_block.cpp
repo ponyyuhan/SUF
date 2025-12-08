@@ -43,6 +43,7 @@ void mlp_forward(const MLPConfig& cfg,
   }
   // Preserve PFSS/Open batches across phases so the layer planner can drain explicitly.
   pe->set_keep_batches(true);
+  pe->set_lazy_mode(true);
   compiler::RangeInterval x_range_hint = compiler::RangeInterval::whole(true);
   if (ctx && !ctx->graph.tensors().empty()) {
     x_range_hint = ctx->graph.tensors().back().range;

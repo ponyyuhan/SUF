@@ -112,10 +112,10 @@ class PfssLayerPlanner {
     const auto& ps = planner.stats();
     totals_.coeff_jobs += ps.coeff_jobs;
     totals_.trunc_jobs += ps.trunc_jobs;
-    totals_.coeff_hatx_words += coeff_batch.stats().max_bucket_hatx;
-    totals_.trunc_hatx_words += trunc_batch.stats().max_bucket_hatx;
-    totals_.coeff_hatx_bytes += coeff_batch.stats().max_bucket_hatx * sizeof(uint64_t);
-    totals_.trunc_hatx_bytes += trunc_batch.stats().max_bucket_hatx * sizeof(uint64_t);
+    totals_.coeff_hatx_words += coeff_batch.stats().hatx_words;
+    totals_.trunc_hatx_words += trunc_batch.stats().hatx_words;
+    totals_.coeff_hatx_bytes += coeff_batch.stats().hatx_bytes;
+    totals_.trunc_hatx_bytes += trunc_batch.stats().hatx_bytes;
     totals_.coeff_flushes += ps.coeff_flushes;
     totals_.trunc_flushes += ps.trunc_flushes;
     enforce_limits();
@@ -223,10 +223,11 @@ class PfssLayerPlanner {
         if (b.has_flushed()) {
           b.finalize_all(party, pfss_ch);
         }
-        jobs_counter += b.stats().jobs;
-        hatx_counter += b.stats().max_bucket_hatx;
-        hatx_bytes_counter += b.stats().max_bucket_hatx * sizeof(uint64_t);
-        flush_counter += b.stats().flushes;
+        const auto& st = b.stats();
+        jobs_counter += st.jobs;
+        hatx_counter += st.hatx_words;
+        hatx_bytes_counter += st.hatx_bytes;
+        flush_counter += st.flushes;
         b.clear();
       };
       flush_once(coeff_batch, totals_.coeff_flushes, totals_.coeff_jobs, totals_.coeff_hatx_words, totals_.coeff_hatx_bytes);

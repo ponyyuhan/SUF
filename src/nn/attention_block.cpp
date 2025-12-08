@@ -303,6 +303,8 @@ void attention_forward(const AttentionConfig& cfg,
     throw std::runtime_error("attention_forward: LayerContext required (no local rescale fallback)");
   }
   // Preserve PFSS/Open batches across phases so a layer-level planner can control flushing.
+  // Make stall-driven behavior explicit for attention/softmax/out regions.
+  pe->set_lazy_mode(true);
   pe->set_keep_batches(true);
   auto record_phase_plan = [&](runtime::PfssPhasePlanner& planner) {
     if (!ctx || !ctx->pfss_layer_planner) return;

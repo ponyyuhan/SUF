@@ -35,7 +35,11 @@ inline TruncationLoweringResult lower_truncation_gate(proto::PfssBackend& backen
   }
   GateKind kind = params.kind;
   if (kind == GateKind::AutoTrunc) {
-    kind = select_trunc_kind(abs, params.frac_bits, params.gap_hint);
+    std::optional<GapCert> gap = params.gap_hint;
+    if (gap && gap->mask_abs == std::numeric_limits<uint64_t>::max()) {
+      gap->mask_abs = default_mask_bound(params.frac_bits);
+    }
+    kind = select_trunc_kind(abs, params.frac_bits, gap);
   }
   if (kind != GateKind::FaithfulTR &&
       kind != GateKind::FaithfulARS &&

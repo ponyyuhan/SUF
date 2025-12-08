@@ -100,6 +100,11 @@ class PhaseExecutor {
   OpenCollector& open_collector() { return opens_; }
   const Stats& stats() const { return stats_; }
   void set_max_flushes(size_t max_flushes) { max_flushes_ = max_flushes; }
+  void clear_batches() {
+    pfss_coeff_.clear();
+    pfss_trunc_.clear();
+    opens_.clear();
+  }
   void reset_stats() {
     stats_ = Stats{};
     pfss_coeff_.reset_stats();
@@ -365,8 +370,8 @@ class PhaseExecutor {
   OpenCollector opens_;
   Stats stats_;
   size_t max_flushes_ = 1ull << 16;  // safety guard
-  bool lazy_mode_ = false;
-  bool keep_batches_ = false;
+  bool lazy_mode_ = true;
+  bool keep_batches_ = true;
   LazyLimits lazy_limits_{};
 };
 

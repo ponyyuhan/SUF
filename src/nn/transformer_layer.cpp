@@ -510,6 +510,9 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   for (size_t i = 0; i < attn_out.size(); ++i) {
     attn_out[i] = proto::add_mod(attn_out[i], X_share.data[i]);
   }
+  // Barrier after attention region to drain PFSS/Open if planner is present.
+  drain_barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
+  record_phase_plan(phase_planner);
 
   // LayerNorm 2 via task.
   std::vector<uint64_t> ln2(attn_out.size(), 0);
@@ -546,6 +549,9 @@ void transformer_layer_forward(const TransformerConfig& cfg,
               ch,
               ctx,
               pe);
+  // Barrier after MLP region before final residual/flush.
+  drain_barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
+  record_phase_plan(phase_planner);
 
   // Residual add
   for (size_t i = 0; i < Y_share.numel(); ++i) {

@@ -187,11 +187,8 @@ class TruncTask final : public detail::PhaseTask {
       hook_ = (R.party == 0) ? bundle_->hook0.get() : bundle_->hook1.get();
       if (!hook_) throw std::runtime_error("TruncTask: hook missing");
       hook_->configure(key_->compiled.layout);
-      if (key_->r_in_share_vec.empty()) {
-        r_in_fallback_.assign(in_.size(), key_->r_in_share);
-        r_in_src_ = &r_in_fallback_;
-      } else if (key_->r_in_share_vec.size() < in_.size()) {
-        // Some backends only populate scalar r_in; repeat it to cover the full input.
+      if (key_->r_in_share_vec.empty() || key_->r_in_share_vec.size() < in_.size()) {
+        // Some generators still provide scalar r_in; repeat it to enforce per-element usage.
         r_in_fallback_.assign(in_.size(), key_->r_in_share);
         r_in_src_ = &r_in_fallback_;
       } else {

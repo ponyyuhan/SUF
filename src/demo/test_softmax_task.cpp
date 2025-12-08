@@ -447,6 +447,17 @@ int main() {
               << m0.stats.pfss_trunc_hatx_bytes << " vs " << r0.stats.pfss_trunc_hatx_bytes << ")\n";
     return 1;
   }
+  size_t dense_hatx_bytes = r0.stats.pfss_coeff_hatx_bytes + r0.stats.pfss_trunc_hatx_bytes;
+  size_t masked_hatx_bytes = m0.stats.pfss_coeff_hatx_bytes + m0.stats.pfss_trunc_hatx_bytes;
+  int active = 0;
+  for (int v : valid) active += v;
+  double frac = (rows * cols_masked) > 0 ? static_cast<double>(active) / static_cast<double>(rows * cols_masked) : 1.0;
+  double allowed = frac + 0.15;  // small overhead slack
+  if (masked_hatx_bytes > static_cast<size_t>(dense_hatx_bytes * allowed + 1.0)) {
+    std::cerr << "Masked PFSS hatx bytes exceed budget (masked=" << masked_hatx_bytes
+              << ", dense=" << dense_hatx_bytes << ", frac=" << frac << ")\n";
+    return 1;
+  }
   if (m0.planner_stats.coeff_jobs > r0.planner_stats.coeff_jobs ||
       m0.planner_stats.trunc_jobs > r0.planner_stats.trunc_jobs) {
     std::cerr << "Planner stats did not shrink under valid_lens (coeff " << m0.planner_stats.coeff_jobs
