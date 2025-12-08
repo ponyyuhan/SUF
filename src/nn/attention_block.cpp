@@ -337,6 +337,9 @@ void attention_forward(const AttentionConfig& cfg,
           pol);
     }
   };
+  auto enter_phase = [&]() {
+    if (ctx && ctx->pfss_layer_planner) ctx->pfss_layer_planner->enter_phase();
+  };
 
   matmul_publicW(view2(const_cast<uint64_t*>(X_share.data), B * T, D),
                  Wqkv_public,
@@ -385,14 +388,16 @@ void attention_forward(const AttentionConfig& cfg,
     pe->open_collector().set_limits(open_lim);
     pe->set_max_flushes(1ull << 11);
     pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
-    if (ctx && ctx->pfss_layer_planner) ctx->pfss_layer_planner->enter_phase();
+    enter_phase();
     auto trunc_task = std::make_unique<runtime::TruncTask>(
         &trunc_qkv_bundle,
         std::span<const uint64_t>(qkv.data(), qkv.size()),
         std::span<uint64_t>(qkv.data(), qkv.size()));
     pe->add_task(std::move(trunc_task));
     pe->run(truncR);
-    barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
+    barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
+                                                     .drain_pfss_coeff = true,
+                                                     .drain_pfss_trunc = true});
     record_phase_plan(pfss_phase_planner);
   }
 
@@ -608,7 +613,7 @@ void attention_forward(const AttentionConfig& cfg,
 
     // Phase: score matmul (unscaled Q2f).
     pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
-    if (ctx && ctx->pfss_layer_planner) ctx->pfss_layer_planner->enter_phase();
+    enter_phase();
     for (size_t row = 0; row < rows; ++row) {
       auto q_row = std::span<const uint64_t>(q_mat.data() + row * Dh, Dh);
       auto k_row = std::span<const uint64_t>(k_mat.data() + row * cur_len * Dh, cur_len * Dh);
@@ -620,7 +625,9 @@ void attention_forward(const AttentionConfig& cfg,
       pe->add_task(std::move(score_task));
     }
     pe->run(phase_R);
-    barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
+    barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
+                                                     .drain_pfss_coeff = true,
+                                                     .drain_pfss_trunc = true});
     record_phase_plan(phase_planner);
 
     // Rescale scores Q2f -> Qf via truncation (no inline shift).
@@ -643,14 +650,16 @@ void attention_forward(const AttentionConfig& cfg,
         compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng_score, score_trunc_p, score_share.size());
     {
       pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
-      if (ctx && ctx->pfss_layer_planner) ctx->pfss_layer_planner->enter_phase();
+      enter_phase();
       auto trunc_task = std::make_unique<runtime::TruncTask>(
           &score_trunc_bundle,
           std::span<const uint64_t>(score_share.data(), score_share.size()),
           std::span<uint64_t>(score_qf.data(), score_qf.size()));
       pe->add_task(std::move(trunc_task));
       pe->run(phase_R);
-      barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
+      barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
+                                                       .drain_pfss_coeff = true,
+                                                       .drain_pfss_trunc = true});
       record_phase_plan(phase_planner);
     }
 
@@ -664,14 +673,16 @@ void attention_forward(const AttentionConfig& cfg,
     std::vector<uint64_t> score_scaled_qf(score_qf.size(), 0);
     {
       pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
-      if (ctx && ctx->pfss_layer_planner) ctx->pfss_layer_planner->enter_phase();
+      enter_phase();
       auto trunc_task = std::make_unique<runtime::TruncTask>(
           &score_trunc_bundle,
           std::span<const uint64_t>(score_scaled_q2f.data(), score_scaled_q2f.size()),
           std::span<uint64_t>(score_scaled_qf.data(), score_scaled_qf.size()));
       pe->add_task(std::move(trunc_task));
       pe->run(phase_R);
-      barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
+      barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
+                                                       .drain_pfss_coeff = true,
+                                                       .drain_pfss_trunc = true});
       record_phase_plan(phase_planner);
     }
 
@@ -891,6 +902,7 @@ void attention_forward(const AttentionConfig& cfg,
       };
 
       pe->begin_phase(runtime::PhaseExecutor::Phase::kSoftmax);
+      enter_phase();
       auto sm_task = std::make_unique<nn::SoftmaxBlockTask>(
           plan,
           std::span<const uint64_t>(t_share.data(), t_share.size()),
@@ -912,6 +924,9 @@ void attention_forward(const AttentionConfig& cfg,
                                                      party,
                                                      fb));
       pe->run(phase_R);
+      barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
+                                                       .drain_pfss_coeff = true,
+                                                       .drain_pfss_trunc = true});
       record_phase_plan(phase_planner);
     }
   }
@@ -972,11 +987,15 @@ void attention_forward(const AttentionConfig& cfg,
     planner.bind(&pe->pfss_coeff_batch(), truncR.pfss_trunc);
     truncR.pfss_planner = &planner;
     pe->begin_phase(runtime::PhaseExecutor::Phase::kOutProj);
+    enter_phase();
     pe->add_task(std::make_unique<runtime::TruncTask>(
         &trunc_out_bundle,
         std::span<const uint64_t>(Y_share.data, Y_share.numel()),
         std::span<uint64_t>(Y_share.data, Y_share.numel())));
     pe->run(truncR);
+      barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
+                                                       .drain_pfss_coeff = true,
+                                                       .drain_pfss_trunc = true});
     record_phase_plan(planner);
   }
 }

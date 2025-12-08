@@ -85,6 +85,9 @@ void mlp_forward(const MLPConfig& cfg,
           pol);
     }
   };
+  auto enter_phase = [&]() {
+    if (ctx && ctx->pfss_layer_planner) ctx->pfss_layer_planner->enter_phase();
+  };
 
   std::vector<uint64_t> hidden(B * T * H, 0);
   compiler::RangeInterval mat1_x_range;
@@ -279,18 +282,22 @@ void mlp_forward(const MLPConfig& cfg,
 
     // First wave: trunc hidden matmul accum to Qf.
     pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
-    if (ctx && ctx->pfss_layer_planner) ctx->pfss_layer_planner->enter_phase();
+    enter_phase();
     pe->add_task(std::move(trunc_task1));
     pe->run(R);
-    barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
+    barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
+                                                     .drain_pfss_coeff = true,
+                                                     .drain_pfss_trunc = true});
     record_phase_plan(pfss_phase_planner);
 
     // Second wave: apply SiLU cubic on the truncated hidden.
     pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
-    if (ctx && ctx->pfss_layer_planner) ctx->pfss_layer_planner->enter_phase();
+    enter_phase();
     pe->add_task(std::move(silu_task));
     pe->run(R);
-    barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
+    barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
+                                                     .drain_pfss_coeff = true,
+                                                     .drain_pfss_trunc = true});
     record_phase_plan(pfss_phase_planner);
 
     // Linear 2 on the updated hidden.
@@ -305,12 +312,14 @@ void mlp_forward(const MLPConfig& cfg,
                            have_silu_abs ? std::optional<compiler::AbsBound>(silu_abs_hint) : std::nullopt);
     std::vector<uint64_t> y_scaled(Y_share.numel(), 0);
     pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
-    if (ctx && ctx->pfss_layer_planner) ctx->pfss_layer_planner->enter_phase();
+    enter_phase();
     pe->add_task(std::make_unique<runtime::TruncTask>(
         &plan2.bundle, std::span<const uint64_t>(Y_share.data, Y_share.numel()),
         std::span<uint64_t>(y_scaled.data(), y_scaled.size())));
     pe->run(R);
-    barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
+    barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
+                                                     .drain_pfss_coeff = true,
+                                                     .drain_pfss_trunc = true});
     record_phase_plan(pfss_phase_planner);
     for (size_t i = 0; i < Y_share.numel() && i < y_scaled.size(); ++i) {
       Y_share.data[i] = y_scaled[i];
