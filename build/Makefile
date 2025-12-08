@@ -140,6 +140,19 @@ myl7_core/fast:
 .PHONY : myl7_core/fast
 
 #=============================================================================
+# Target rules for targets named cuda_pfss
+
+# Build rule for target.
+cuda_pfss: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 cuda_pfss
+.PHONY : cuda_pfss
+
+# fast build rule for target.
+cuda_pfss/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/build
+.PHONY : cuda_pfss/fast
+
+#=============================================================================
 # Target rules for targets named sim_harness
 
 # Build rule for target.
@@ -606,6 +619,54 @@ test_myl7_bit_order: cmake_check_build_system
 test_myl7_bit_order/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_myl7_bit_order.dir/build.make CMakeFiles/test_myl7_bit_order.dir/build
 .PHONY : test_myl7_bit_order/fast
+
+cuda/pfss_backend_stub.o: cuda/pfss_backend_stub.cpp.o
+.PHONY : cuda/pfss_backend_stub.o
+
+# target to build an object file
+cuda/pfss_backend_stub.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/pfss_backend_stub.cpp.o
+.PHONY : cuda/pfss_backend_stub.cpp.o
+
+cuda/pfss_backend_stub.i: cuda/pfss_backend_stub.cpp.i
+.PHONY : cuda/pfss_backend_stub.i
+
+# target to preprocess a source file
+cuda/pfss_backend_stub.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/pfss_backend_stub.cpp.i
+.PHONY : cuda/pfss_backend_stub.cpp.i
+
+cuda/pfss_backend_stub.s: cuda/pfss_backend_stub.cpp.s
+.PHONY : cuda/pfss_backend_stub.s
+
+# target to generate assembly for a file
+cuda/pfss_backend_stub.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/pfss_backend_stub.cpp.s
+.PHONY : cuda/pfss_backend_stub.cpp.s
+
+cuda/pfss_stub.o: cuda/pfss_stub.cpp.o
+.PHONY : cuda/pfss_stub.o
+
+# target to build an object file
+cuda/pfss_stub.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/pfss_stub.cpp.o
+.PHONY : cuda/pfss_stub.cpp.o
+
+cuda/pfss_stub.i: cuda/pfss_stub.cpp.i
+.PHONY : cuda/pfss_stub.i
+
+# target to preprocess a source file
+cuda/pfss_stub.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/pfss_stub.cpp.i
+.PHONY : cuda/pfss_stub.cpp.i
+
+cuda/pfss_stub.s: cuda/pfss_stub.cpp.s
+.PHONY : cuda/pfss_stub.s
+
+# target to generate assembly for a file
+cuda/pfss_stub.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/pfss_stub.cpp.s
+.PHONY : cuda/pfss_stub.cpp.s
 
 src/bench/bench_attention.o: src/bench/bench_attention.cpp.o
 .PHONY : src/bench/bench_attention.o
@@ -1848,6 +1909,7 @@ help:
 	@echo "... bench_sigmafast_pred"
 	@echo "... bench_truncation"
 	@echo "... compiler_passes"
+	@echo "... cuda_pfss"
 	@echo "... myl7_core"
 	@echo "... nn_ops"
 	@echo "... sim_harness"
@@ -1877,6 +1939,12 @@ help:
 	@echo "... test_transformer_async"
 	@echo "... test_trunc_task"
 	@echo "... test_truncation"
+	@echo "... cuda/pfss_backend_stub.o"
+	@echo "... cuda/pfss_backend_stub.i"
+	@echo "... cuda/pfss_backend_stub.s"
+	@echo "... cuda/pfss_stub.o"
+	@echo "... cuda/pfss_stub.i"
+	@echo "... cuda/pfss_stub.s"
 	@echo "... src/bench/bench_attention.o"
 	@echo "... src/bench/bench_attention.i"
 	@echo "... src/bench/bench_attention.s"

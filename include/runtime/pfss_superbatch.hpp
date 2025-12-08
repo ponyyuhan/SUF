@@ -47,6 +47,7 @@
 #include "proto/pfss_backend_batch.hpp"
 #include "mpc/net.hpp"
 #include "proto/channel.hpp"
+#include "runtime/pfss_gpu_staging.hpp"
 
 namespace runtime {
 
@@ -143,6 +144,7 @@ class PfssSuperBatch {
     size_t max_pending_jobs = 1ull << 18;         // generous default
     size_t max_pending_hatx_words = 1ull << 26;   // cap total packed hatx per flush
     size_t max_flushes = 1ull << 16;              // safety guard against runaway flushing
+    size_t max_pending_device_bytes = 0;          // optional GPU staging budget
   };
   // Enqueue a composite job; no implicit finalize is performed. Caller should
   // flush(), then read view() to consume outputs.
@@ -161,6 +163,8 @@ class PfssSuperBatch {
   bool ready(const PfssHandle& h) const;
 
   void set_limits(const Limits& lim) { limits_ = lim; }
+  void set_gpu_stager(PfssGpuStager* stager) { gpu_stager_ = stager; }
+  PfssGpuStager* gpu_stager() const { return gpu_stager_; }
 
   // Evaluate all queued composite jobs and store PFSS outputs.
   void flush_eval(int party, proto::PfssBackendBatch& backend, proto::IChannel& ch);
@@ -191,6 +195,7 @@ class PfssSuperBatch {
     size_t max_bucket_jobs = 0;   // largest number of jobs fused into one bucket
     size_t pending_jobs = 0;      // current pending jobs before flush
     size_t pending_hatx = 0;      // pending hatx words before flush
+    size_t pending_device_bytes = 0;  // staged device bytes if GPU stager present
   };
   const Stats& stats() const { return stats_; }
   void reset_stats() { stats_ = Stats{}; }
@@ -221,11 +226,13 @@ class PfssSuperBatch {
   std::vector<CompletedJob> completed_;
   std::vector<JobSlice> slices_;
   std::vector<std::shared_ptr<PfssResultSlot>> slots_;
+  PfssGpuStager* gpu_stager_ = nullptr;  // optional device staging surface
   bool flushed_ = false;
   Stats stats_;
   Limits limits_;
   size_t pending_jobs_ = 0;
   size_t pending_hatx_words_ = 0;
+  size_t pending_dev_bytes_ = 0;
 
   void populate_completed_();
 };

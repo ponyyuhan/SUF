@@ -1045,7 +1045,7 @@ TruncationPassResult LayerGraph::lower_truncations(TruncationPassContext& ctx,
     site.accum_abs = matmul_accum_abs(tin.abs, w_abs, matmul.K);
     std::optional<GapCert> g = tin.gap;
     if (!g && tin.abs.kind == RangeKind::Proof && tin.abs.is_signed) {
-      g = gap_from_abs(tin.abs, src_frac);
+      g = gap_from_abs(tin.abs, src_frac, tin.mask_abs);
     }
     site.prefer_gapars = g && can_gapars(*g);
     site.gap_cert = g;

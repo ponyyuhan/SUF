@@ -76,7 +76,7 @@ void mlp_forward(const MLPConfig& cfg,
       runtime::ProtoChanFromNet pch_bar(*pfss_nc);
       ctx->pfss_layer_planner->barrier(
           party,
-          ctx->trunc_ctx->backend(),
+          ctx->trunc_backend(),
           pe->pfss_coeff_batch(),
           pe->pfss_trunc_batch(),
           pch_bar,
@@ -191,7 +191,7 @@ void mlp_forward(const MLPConfig& cfg,
   runtime::PfssPhasePlanner pfss_phase_planner;
   if (use_phase) {
     R.party = party;
-    R.pfss_backend = &ctx->trunc_ctx->backend();
+    R.pfss_backend = &ctx->trunc_backend();
     R.pfss_chan = &pch;
     R.net_chan = &ch;
     // Share a single PFSS batch for coeff/trunc to fuse flushes.
@@ -246,13 +246,15 @@ void mlp_forward(const MLPConfig& cfg,
       p.range_hint = accum;
       p.abs_hint = accum_abs;
       if (accum_abs.kind == compiler::RangeKind::Proof) {
-        p.gap_hint = compiler::gap_from_abs(accum_abs, cfg.frac_bits);
+        p.gap_hint = compiler::gap_from_abs(accum_abs,
+                                            cfg.frac_bits,
+                                            compiler::default_mask_bound(cfg.frac_bits));
       }
       compiler::MatmulTruncationPlan plan;
       plan.kind = compiler::select_trunc_kind(accum_abs, cfg.frac_bits, p.gap_hint);
       plan.accum_range = accum;
       plan.batch = M * N;
-      plan.bundle = compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng, p, plan.batch);
+      plan.bundle = compiler::lower_truncation_gate(ctx->trunc_backend(), rng, p, plan.batch);
       return plan;
     };
 
@@ -265,7 +267,7 @@ void mlp_forward(const MLPConfig& cfg,
     std::cerr << "mlp_forward: building silu task material frac_bits=" << cfg.frac_bits
               << " elems=" << hidden_scaled.size() << "\n";
     auto mat = gates::dealer_make_silu_task_material(
-        ctx->trunc_ctx->backend(),
+        ctx->trunc_backend(),
         cfg.frac_bits,
         rng2,
         3 * hidden_scaled.size(),

@@ -254,6 +254,9 @@ PKG_CONFIG_ARGN:STRING=
 //pkg-config executable
 PKG_CONFIG_EXECUTABLE:FILEPATH=/usr/bin/pkg-config
 
+//Build CUDA PFSS stubs/backends
+SUF_ENABLE_CUDA:BOOL=OFF
+
 //Fetch myl7/fss from GitHub if not found
 SUF_FETCH_MYL7_FSS:BOOL=ON
 

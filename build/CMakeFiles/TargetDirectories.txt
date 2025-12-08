@@ -1,4 +1,5 @@
 /home/yuhan/new/SUF/build/CMakeFiles/myl7_core.dir
+/home/yuhan/new/SUF/build/CMakeFiles/cuda_pfss.dir
 /home/yuhan/new/SUF/build/CMakeFiles/sim_harness.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_suf_ref_eval.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_mask_rewrite.dir

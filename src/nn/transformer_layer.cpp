@@ -300,7 +300,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   if (ctx->pfss_batch == nullptr) ctx->pfss_batch = &pe->pfss_coeff_batch();
   ctx->enable_hoist = true;
   ctx->open_collector = &pe->open_collector();
-  proto::PfssBackendBatch& backend = ctx->trunc_ctx->backend();
+  proto::PfssBackendBatch& backend = ctx->trunc_backend();
   net::Chan* pfss_nc = (ctx && ctx->pfss_net_chan) ? ctx->pfss_net_chan : &ch;
   // Apply conservative limits to PFSS batches and opens to avoid runaway buffering.
   runtime::PfssSuperBatch::Limits pfss_lim;

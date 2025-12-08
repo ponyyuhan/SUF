@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 
 #include "compiler/range_analysis.hpp"
 #include "compiler/layer_graph.hpp"
@@ -14,6 +15,7 @@
 #include "runtime/open_collector.hpp"
 #include "runtime/pfss_phase_planner.hpp"
 #include "runtime/pfss_async_runner.hpp"
+#include "proto/backend_factory.hpp"
 #include "mpc/net.hpp"
 
 namespace nn {
@@ -26,6 +28,9 @@ struct LayerContext {
   runtime::PfssSuperBatch* pfss_batch = nullptr;         // optional runtime batching surface
   runtime::OpenCollector* open_collector = nullptr;      // optional batched opens surface
   runtime::PfssLayerPlanner* pfss_layer_planner = nullptr;  // optional cross-phase planner
+  runtime::PfssGpuStager* pfss_gpu_stager = nullptr;         // optional device staging surface
+  proto::PfssBackendBatch* pfss_backend_override = nullptr;  // optional backend (e.g., GPU) override
+  std::unique_ptr<proto::PfssBackendBatch> owned_pfss_backend;  // managed override if set
   net::Chan* pfss_net_chan = nullptr;  // optional dedicated PFSS channel; defaults to main chan
   int frac_bits = 16;
   // Enable a layer-wide super-plan: suppress inner PFSS/Open drains inside attention/MLP
@@ -42,6 +47,34 @@ struct LayerContext {
     auto it = bindings.find(tid);
     if (it == bindings.end()) return std::nullopt;
     return it->second;
+  }
+
+  proto::PfssBackendBatch& trunc_backend() {
+    if (pfss_backend_override) return *pfss_backend_override;
+    if (owned_pfss_backend) {
+      pfss_backend_override = owned_pfss_backend.get();
+      return *owned_pfss_backend;
+    }
+    if (!trunc_ctx) throw std::runtime_error("LayerContext: trunc_ctx is required");
+    return trunc_ctx->backend();
+  }
+  const proto::PfssBackendBatch& trunc_backend() const {
+    if (pfss_backend_override) return *pfss_backend_override;
+    if (owned_pfss_backend) return *owned_pfss_backend;
+    if (!trunc_ctx) throw std::runtime_error("LayerContext: trunc_ctx is required");
+    return trunc_ctx->backend();
+  }
+
+  void set_backend_override(std::unique_ptr<proto::PfssBackendBatch> b) {
+    owned_pfss_backend = std::move(b);
+    pfss_backend_override = owned_pfss_backend.get();
+  }
+
+  // Optional helper: select backend from env (SUF_PFSS_BACKEND) if no override present.
+  void select_backend_from_env() {
+    if (pfss_backend_override || owned_pfss_backend) return;
+    owned_pfss_backend = proto::make_pfss_backend_from_env();
+    pfss_backend_override = owned_pfss_backend.get();
   }
 };
 

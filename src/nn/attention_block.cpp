@@ -328,7 +328,7 @@ void attention_forward(const AttentionConfig& cfg,
       runtime::ProtoChanFromNet pch_bar(*pfss_nc);
       ctx->pfss_layer_planner->barrier(
           party,
-          ctx->trunc_ctx->backend(),
+          ctx->trunc_backend(),
           pe->pfss_coeff_batch(),
           pe->pfss_trunc_batch(),
           pch_bar,
@@ -363,17 +363,18 @@ void attention_forward(const AttentionConfig& cfg,
                                  D);
   trunc_params_qkv.abs_hint = qkv_acc_abs;
   if (qkv_acc_abs.kind == compiler::RangeKind::Proof) {
-    trunc_params_qkv.gap_hint = compiler::gap_from_abs(qkv_acc_abs, fb);
+    trunc_params_qkv.gap_hint =
+        compiler::gap_from_abs(qkv_acc_abs, fb, compiler::default_mask_bound(fb));
   }
   std::mt19937_64 rng_qkv(123);
   auto trunc_qkv_bundle =
-      compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng_qkv, trunc_params_qkv, qkv.size());
+      compiler::lower_truncation_gate(ctx->trunc_backend(), rng_qkv, trunc_params_qkv, qkv.size());
   {
     runtime::PhaseResources truncR;
     runtime::ProtoChanFromNet pch(*pfss_nc);
     truncR.party = party;
     truncR.net_chan = &ch;
-    truncR.pfss_backend = &ctx->trunc_ctx->backend();
+    truncR.pfss_backend = &ctx->trunc_backend();
     truncR.pfss_chan = &pch;
     truncR.pfss_trunc = &pe->pfss_coeff_batch();  // share batch for trunc + coeff
     truncR.opens = &pe->open_collector();
@@ -445,13 +446,13 @@ void attention_forward(const AttentionConfig& cfg,
     pe->open_collector().set_limits(open_lim);
     pe->set_max_flushes(1ull << 11);
     size_t triple_need = 3 * cache.S_max * B * H;
-    nexp_mat = gates::dealer_make_nexp_task_material(ctx->trunc_ctx->backend(),
+    nexp_mat = gates::dealer_make_nexp_task_material(ctx->trunc_backend(),
                                                      nexp_params,
                                                      rng,
                                                      triple_need,
                                                      static_cast<size_t>(B * H * cache.S_max));
     nexp_bundle = gates::make_nexp_cubic_bundle(*nexp_mat, fb);
-    recip_mat = gates::dealer_make_recip_task_material(ctx->trunc_ctx->backend(),
+    recip_mat = gates::dealer_make_recip_task_material(ctx->trunc_backend(),
                                                        fb,
                                                        /*nr_iters=*/1,
                                                        rng,
@@ -466,19 +467,20 @@ void attention_forward(const AttentionConfig& cfg,
           /*is_signed=*/true,
           static_cast<uint64_t>(1ull << fb),
           compiler::RangeKind::Proof};
-      gap_p.gap_hint = compiler::gap_from_abs(gap_p.abs_hint, fb);
+      gap_p.gap_hint =
+          compiler::gap_from_abs(gap_p.abs_hint, fb, compiler::default_mask_bound(fb));
     prob_gapars = compiler::lower_truncation_gate(
-        ctx->trunc_ctx->backend(), rng, gap_p, static_cast<size_t>(B * H * cache.S_max));
+        ctx->trunc_backend(), rng, gap_p, static_cast<size_t>(B * H * cache.S_max));
     compiler::GateParams faithful_p;
     faithful_p.kind = compiler::GateKind::FaithfulTR;
     faithful_p.frac_bits = fb;
     prob_faithful = compiler::lower_truncation_gate(
-        ctx->trunc_ctx->backend(), rng, faithful_p, static_cast<size_t>(B * H * cache.S_max));
+        ctx->trunc_backend(), rng, faithful_p, static_cast<size_t>(B * H * cache.S_max));
     prob_choice.gapars = prob_gapars ? &*prob_gapars : nullptr;
     prob_choice.faithful = prob_faithful ? &*prob_faithful : nullptr;
     prob_choice.shift_bits = fb;
     prob_choice.signed_value = false;  // probabilities are non-negative
-    phase_R.pfss_backend = &ctx->trunc_ctx->backend();
+    phase_R.pfss_backend = &ctx->trunc_backend();
     phase_R.pfss_chan = &pch;
     phase_R.pfss_coeff = &pe->pfss_coeff_batch();
     phase_R.pfss_trunc = phase_R.pfss_coeff;
@@ -643,11 +645,12 @@ void attention_forward(const AttentionConfig& cfg,
     compiler::AbsBound score_acc_abs = compiler::matmul_accum_abs(q_abs, q_abs, Dh);
     score_trunc_p.abs_hint = score_acc_abs;
     if (score_acc_abs.kind == compiler::RangeKind::Proof) {
-      score_trunc_p.gap_hint = compiler::gap_from_abs(score_acc_abs, fb);
+      score_trunc_p.gap_hint =
+          compiler::gap_from_abs(score_acc_abs, fb, compiler::default_mask_bound(fb));
     }
     std::mt19937_64 rng_score(0x73636f72u);
     auto score_trunc_bundle =
-        compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng_score, score_trunc_p, score_share.size());
+        compiler::lower_truncation_gate(ctx->trunc_backend(), rng_score, score_trunc_p, score_share.size());
     {
       pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
       enter_phase();
@@ -743,10 +746,11 @@ void attention_forward(const AttentionConfig& cfg,
           /*is_signed=*/true,
           static_cast<uint64_t>(1ull << fb),
           compiler::RangeKind::Proof};
-      ctx_trunc_p.gap_hint = compiler::gap_from_abs(ctx_trunc_p.abs_hint, fb);
+      ctx_trunc_p.gap_hint =
+          compiler::gap_from_abs(ctx_trunc_p.abs_hint, fb, compiler::default_mask_bound(fb));
       std::mt19937_64 rng_ctx(77);
       auto ctx_trunc = compiler::lower_truncation_gate(
-          ctx->trunc_ctx->backend(), rng_ctx, ctx_trunc_p, rows * Dh);
+          ctx->trunc_backend(), rng_ctx, ctx_trunc_p, rows * Dh);
 
       // Prepare per-row V material ahead of time.
       std::vector<std::vector<uint64_t>> v_mats(rows);
@@ -969,17 +973,18 @@ void attention_forward(const AttentionConfig& cfg,
   compiler::AbsBound out_abs = compiler::matmul_accum_abs(ctx_abs, w_abs, D);
   trunc_params_out.abs_hint = out_abs;
   if (out_abs.kind == compiler::RangeKind::Proof) {
-    trunc_params_out.gap_hint = compiler::gap_from_abs(out_abs, fb);
+    trunc_params_out.gap_hint =
+        compiler::gap_from_abs(out_abs, fb, compiler::default_mask_bound(fb));
   }
   std::mt19937_64 rng_out(456);
   auto trunc_out_bundle =
-      compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng_out, trunc_params_out, Y_share.numel());
+      compiler::lower_truncation_gate(ctx->trunc_backend(), rng_out, trunc_params_out, Y_share.numel());
   {
     runtime::PhaseResources truncR;
     runtime::ProtoChanFromNet pch(*pfss_nc);
     truncR.party = party;
     truncR.net_chan = &ch;
-    truncR.pfss_backend = &ctx->trunc_ctx->backend();
+    truncR.pfss_backend = &ctx->trunc_backend();
     truncR.pfss_chan = &pch;
     truncR.pfss_trunc = &pe->pfss_coeff_batch();  // share batch for trunc + coeff
     truncR.opens = &pe->open_collector();

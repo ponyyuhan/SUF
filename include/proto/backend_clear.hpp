@@ -5,12 +5,13 @@
 #include <random>
 #include <stdexcept>
 #include <cstring>
+#include <memory>
 
 namespace proto {
 
 // Cleartext backend implementing PfssIntervalLutExt for testing.
 class ClearBackend final : public PfssIntervalLutExt {
-public:
+ public:
   ClearBackend() {
     std::random_device rd;
     seed_ = (static_cast<u64>(rd()) << 32) ^ static_cast<u64>(rd());
@@ -98,7 +99,25 @@ public:
     }
   }
 
-private:
+  // Convenience helper used in CUDA-gated tests.
+  std::vector<uint8_t> eval_interval_lut(const IntervalLutDesc& desc,
+                                         const IntervalLutKeyPair& key,
+                                         const std::vector<uint64_t>& xs) const {
+    if (xs.empty()) return {};
+    std::vector<uint8_t> out(xs.size() * static_cast<size_t>(desc.out_words) * sizeof(uint64_t));
+    auto* out_words = reinterpret_cast<uint64_t*>(out.data());
+    std::vector<uint8_t> key_bytes(key.k0.bytes);
+    // replicate the same key for every x
+    for (size_t i = 1; i < xs.size(); i++) {
+      key_bytes.insert(key_bytes.end(), key.k0.bytes.begin(), key.k0.bytes.end());
+    }
+    eval_interval_lut_many_u64(key.k0.bytes.size(), key_bytes.data(), xs, desc.out_words, out_words);
+    return out;
+  }
+
+  static std::unique_ptr<PfssBackendBatch> make() { return std::make_unique<ClearBackend>(); }
+
+ private:
   struct DcfDesc {
     int in_bits;
     size_t key_bytes;

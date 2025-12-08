@@ -1,6 +1,8 @@
 #pragma once
 
+#include <memory>
 #include <random>
+#include <stdexcept>
 #include <vector>
 
 #include "compiler/matmul_truncation.hpp"
@@ -21,7 +23,14 @@ struct TruncationPassResult {
 class TruncationPassContext {
  public:
   explicit TruncationPassContext(proto::PfssBackendBatch& backend, uint64_t seed = 0)
-      : backend_(backend), rng_(seed) {}
+      : backend_(&backend), rng_(seed) {}
+
+  explicit TruncationPassContext(std::unique_ptr<proto::PfssBackendBatch> backend, uint64_t seed = 0)
+      : owned_backend_(std::move(backend)), backend_(owned_backend_.get()), rng_(seed) {
+    if (backend_ == nullptr) {
+      throw std::runtime_error("TruncationPassContext: null backend");
+    }
+  }
 
   // Register a matmul rescale; returns a reference that stays valid for the
   // lifetime of this context.
@@ -34,7 +43,7 @@ class TruncationPassContext {
                                               bool prefer_gapars = false,
                                               std::optional<GapCert> gap_cert = std::nullopt) {
     matmul_plans_.push_back(
-        compile_matmul_truncation(backend_, rng_, M, K, N, frac_bits, x_range, w_range, prefer_gapars, gap_cert));
+        compile_matmul_truncation(*backend_, rng_, M, K, N, frac_bits, x_range, w_range, prefer_gapars, gap_cert));
     const auto& plan = matmul_plans_.back();
     bundles_.push_back(&plan.bundle);
     return plan;
@@ -46,11 +55,12 @@ class TruncationPassContext {
     return r;
   }
 
-  proto::PfssBackendBatch& backend() { return backend_; }
-  const proto::PfssBackendBatch& backend() const { return backend_; }
+  proto::PfssBackendBatch& backend() { return *backend_; }
+  const proto::PfssBackendBatch& backend() const { return *backend_; }
 
  private:
-  proto::PfssBackendBatch& backend_;
+  std::unique_ptr<proto::PfssBackendBatch> owned_backend_;
+  proto::PfssBackendBatch* backend_ = nullptr;
   std::mt19937_64 rng_;
   std::vector<MatmulTruncationPlan> matmul_plans_;
   std::vector<const TruncationLoweringResult*> bundles_;

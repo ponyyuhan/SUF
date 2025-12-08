@@ -20,6 +20,7 @@ PfssHandle PfssSuperBatch::enqueue_composite(PreparedCompositeJob job) {
     slots_[job.token]->bool_storage = std::make_shared<std::vector<uint64_t>>();
   }
   size_t hatx_words = job.hatx_public.size();
+  size_t hatx_bytes = hatx_words * sizeof(uint64_t);
   size_t new_pending_jobs = pending_jobs_ + 1;
   size_t new_pending_hatx = pending_hatx_words_ + hatx_words;
   if (limits_.max_pending_jobs > 0 && new_pending_jobs > limits_.max_pending_jobs) {
@@ -28,10 +29,18 @@ PfssHandle PfssSuperBatch::enqueue_composite(PreparedCompositeJob job) {
   if (limits_.max_pending_hatx_words > 0 && new_pending_hatx > limits_.max_pending_hatx_words) {
     throw std::runtime_error("PfssSuperBatch: pending hatx packing limit exceeded");
   }
+  if (gpu_stager_ && limits_.max_pending_device_bytes > 0) {
+    size_t new_pending_dev = pending_dev_bytes_ + hatx_bytes;
+    if (new_pending_dev > limits_.max_pending_device_bytes) {
+      throw std::runtime_error("PfssSuperBatch: pending device staging budget exceeded");
+    }
+    pending_dev_bytes_ = new_pending_dev;
+  }
   pending_jobs_ = new_pending_jobs;
   pending_hatx_words_ = new_pending_hatx;
   stats_.pending_jobs = pending_jobs_;
   stats_.pending_hatx = pending_hatx_words_;
+  stats_.pending_device_bytes = pending_dev_bytes_;
   if (completed_.size() <= job.token) {
     completed_.resize(job.token + 1);
   }
@@ -111,6 +120,7 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
     const suf::SUF<uint64_t>* suf = nullptr;
     std::vector<BucketJob> jobs;
     std::vector<uint64_t> hatx;
+    DeviceBufferRef dev_hatx;
     size_t r = 0;
     size_t ell = 0;
   };
@@ -186,6 +196,10 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
     for (auto& b : buckets) {
       stats_.max_bucket_hatx = std::max(stats_.max_bucket_hatx, b.hatx.size());
       stats_.max_bucket_jobs = std::max(stats_.max_bucket_jobs, b.jobs.size());
+      if (gpu_stager_) {
+        HostBufferRef host{b.hatx.data(), b.hatx.size() * sizeof(uint64_t)};
+        b.dev_hatx = gpu_stager_->stage_to_device(host);
+      }
       gates::CompositeBatchInput in{b.hatx.data(), b.hatx.size()};
       auto out = gates::composite_eval_batch_backend(party, backend, ch, *b.key, *b.suf, in);
       size_t gr_idx = group_results_.size();
@@ -214,8 +228,10 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
   stats_.hatx_bytes += total_hatx_words * sizeof(uint64_t);
   pending_jobs_ = 0;
   pending_hatx_words_ = 0;
+  pending_dev_bytes_ = 0;
   stats_.pending_jobs = 0;
   stats_.pending_hatx = 0;
+  stats_.pending_device_bytes = 0;
   populate_completed_();
 }
 
@@ -318,6 +334,7 @@ void PfssSuperBatch::clear() {
   pending_hatx_words_ = 0;
   stats_.pending_jobs = 0;
   stats_.pending_hatx = 0;
+  stats_.pending_device_bytes = 0;
 }
 
 void PfssSuperBatch::finalize_all(int party, proto::IChannel& ch) {

@@ -2,6 +2,10 @@ cmake_minimum_required(VERSION 3.15)
 project(suf_fss LANGUAGES C CXX)
 enable_testing()
 
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+set(CMAKE_CUDA_EXTENSIONS OFF)
+
 set(CMAKE_CXX_EXTENSIONS ON)
 # OpenMP (needed for myl7/fss); if missing, targets will not link.
 find_package(OpenMP)
@@ -14,7 +18,7 @@ if (HAS_GNU_20)
   set(CMAKE_CXX_STANDARD 20)
   set(CMAKE_CXX_STANDARD_REQUIRED ON)
 else()
-  add_compile_options(-std=gnu++2a)
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-std=gnu++2a>)
   set(CMAKE_CXX_STANDARD 17)
 endif()
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -24,7 +28,9 @@ target_include_directories(suf_fss INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include
 
 option(SUF_USE_MYL7_FSS "Enable myl7/fss backend adapter" ON)
 option(SUF_FETCH_MYL7_FSS "Fetch myl7/fss from GitHub if not found" ON)
+option(SUF_ENABLE_CUDA "Build CUDA PFSS stubs/backends" OFF)
 set(HAVE_MYL7_FSS OFF)
+set(HAVE_SUF_CUDA OFF)
 
 if(SUF_USE_MYL7_FSS)
   find_path(MYL7_FSS_INCLUDE_DIR fss/dcf.h HINTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/myl7_fss/include)
@@ -94,9 +100,56 @@ if(SUF_USE_MYL7_FSS)
   endif()
 endif()
 
+if(SUF_ENABLE_CUDA)
+  find_package(CUDAToolkit)
+  if(CUDAToolkit_FOUND)
+    add_library(cuda_pfss STATIC
+      cuda/pfss_kernels.cu
+      cuda/poly_kernels.cu
+      cuda/pfss_backend_gpu.cu)
+    target_include_directories(cuda_pfss PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/cuda ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(cuda_pfss PUBLIC CUDA::cudart)
+    set_target_properties(cuda_pfss PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    set(HAVE_SUF_CUDA ON)
+  endif()
+endif()
+
+if(NOT HAVE_SUF_CUDA)
+  include(CheckLanguage)
+  check_language(CUDA)
+  if(CMAKE_CUDA_COMPILER)
+    enable_language(CUDA)
+    add_library(cuda_pfss STATIC
+      cuda/pfss_kernels.cu
+      cuda/poly_kernels.cu
+      cuda/pfss_backend_gpu.cu)
+    target_include_directories(cuda_pfss PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/cuda ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(TARGET CUDA::cudart)
+      target_link_libraries(cuda_pfss PUBLIC CUDA::cudart)
+    else()
+      target_link_libraries(cuda_pfss PUBLIC cudart)
+    endif()
+    set_target_properties(cuda_pfss PROPERTIES POSITION_INDEPENDENT_CODE ON CUDA_ARCHITECTURES "52")
+    set_target_properties(cuda_pfss PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    set(HAVE_SUF_CUDA ON)
+  endif()
+endif()
+
+if(NOT HAVE_SUF_CUDA)
+  add_library(cuda_pfss STATIC
+    cuda/pfss_stub.cpp
+    cuda/pfss_backend_stub.cpp)
+  target_include_directories(cuda_pfss PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/cuda ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  set_target_properties(cuda_pfss PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
+
+if(HAVE_SUF_CUDA)
+  add_compile_definitions(SUF_HAVE_CUDA=1)
+endif()
+
 add_executable(sim_harness src/demo/sim_harness.cpp)
 target_include_directories(sim_harness PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(sim_harness PRIVATE suf_fss ${MYL7_LINK_LIBS})
+target_link_libraries(sim_harness PRIVATE suf_fss cuda_pfss ${MYL7_LINK_LIBS})
 if (HAS_GNU_20)
   set_property(TARGET sim_harness PROPERTY CXX_STANDARD 20)
 else()
@@ -105,19 +158,19 @@ endif()
 
 add_executable(test_suf_ref_eval src/demo/test_suf_ref_eval.cpp)
 target_include_directories(test_suf_ref_eval PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_suf_ref_eval PRIVATE suf_fss ${MYL7_LINK_LIBS})
+target_link_libraries(test_suf_ref_eval PRIVATE suf_fss cuda_pfss ${MYL7_LINK_LIBS})
 
 add_executable(test_mask_rewrite src/demo/test_mask_rewrite.cpp)
 target_include_directories(test_mask_rewrite PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_mask_rewrite PRIVATE suf_fss ${MYL7_LINK_LIBS})
+target_link_libraries(test_mask_rewrite PRIVATE suf_fss cuda_pfss ${MYL7_LINK_LIBS})
 
 add_executable(test_compile_pfss src/demo/test_compile_pfss.cpp)
 target_include_directories(test_compile_pfss PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_compile_pfss PRIVATE compiler_passes suf_fss ${MYL7_LINK_LIBS})
+target_link_libraries(test_compile_pfss PRIVATE compiler_passes suf_fss cuda_pfss ${MYL7_LINK_LIBS})
 
 add_executable(test_gapars_selector src/demo/test_gapars_selector.cpp)
 target_include_directories(test_gapars_selector PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_gapars_selector PRIVATE compiler_passes suf_fss ${MYL7_LINK_LIBS})
+target_link_libraries(test_gapars_selector PRIVATE compiler_passes suf_fss cuda_pfss ${MYL7_LINK_LIBS})
 
 add_library(compiler_passes STATIC
   src/compiler/truncation_pass.cpp
@@ -125,39 +178,39 @@ add_library(compiler_passes STATIC
   src/compiler/layer_graph.cpp
   src/compiler/suf_to_pfss.cpp)
 target_include_directories(compiler_passes PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(compiler_passes PUBLIC suf_fss ${MYL7_LINK_LIBS})
+target_link_libraries(compiler_passes PUBLIC suf_fss cuda_pfss ${MYL7_LINK_LIBS})
 
 add_executable(test_sigmafast src/demo/test_sigmafast.cpp)
 target_include_directories(test_sigmafast PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_sigmafast PRIVATE suf_fss ${MYL7_LINK_LIBS})
+target_link_libraries(test_sigmafast PRIVATE suf_fss cuda_pfss ${MYL7_LINK_LIBS})
 
 add_executable(test_composite_runtime src/demo/test_composite_runtime.cpp)
 target_include_directories(test_composite_runtime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_composite_runtime PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
+target_link_libraries(test_composite_runtime PRIVATE nn_ops compiler_passes suf_fss cuda_pfss ${MYL7_LINK_LIBS})
 
 add_executable(test_pred_semantics src/demo/test_pred_semantics.cpp)
 target_include_directories(test_pred_semantics PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_pred_semantics PRIVATE suf_fss ${MYL7_LINK_LIBS})
+target_link_libraries(test_pred_semantics PRIVATE suf_fss cuda_pfss ${MYL7_LINK_LIBS})
 
 add_executable(test_composite_equiv_proto src/demo/test_composite_equiv_proto.cpp)
 target_include_directories(test_composite_equiv_proto PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_composite_equiv_proto PRIVATE compiler_passes suf_fss ${MYL7_LINK_LIBS})
+target_link_libraries(test_composite_equiv_proto PRIVATE compiler_passes suf_fss cuda_pfss ${MYL7_LINK_LIBS})
 
 add_executable(test_composite_equiv_proto_myl7 src/demo/test_composite_equiv_proto_myl7.cpp)
 target_include_directories(test_composite_equiv_proto_myl7 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_composite_equiv_proto_myl7 PRIVATE compiler_passes suf_fss ${MYL7_LINK_LIBS})
+target_link_libraries(test_composite_equiv_proto_myl7 PRIVATE compiler_passes suf_fss cuda_pfss ${MYL7_LINK_LIBS})
 
 add_executable(test_composite_equiv_proto_sigmafast src/demo/test_composite_equiv_proto_sigmafast.cpp)
 target_include_directories(test_composite_equiv_proto_sigmafast PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_composite_equiv_proto_sigmafast PRIVATE compiler_passes suf_fss ${MYL7_LINK_LIBS})
+target_link_libraries(test_composite_equiv_proto_sigmafast PRIVATE compiler_passes suf_fss cuda_pfss ${MYL7_LINK_LIBS})
 
 add_executable(test_postproc_hooks src/demo/test_postproc_hooks.cpp)
 target_include_directories(test_postproc_hooks PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_postproc_hooks PRIVATE suf_fss ${MYL7_LINK_LIBS})
+target_link_libraries(test_postproc_hooks PRIVATE suf_fss cuda_pfss ${MYL7_LINK_LIBS})
 
 add_executable(test_llm_gates src/demo/test_llm_gates.cpp)
 target_include_directories(test_llm_gates PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_link_libraries(test_llm_gates PRIVATE suf_fss ${MYL7_LINK_LIBS})
+target_link_libraries(test_llm_gates PRIVATE suf_fss cuda_pfss ${MYL7_LINK_LIBS})
 
 add_executable(bench_sigmafast_pred src/bench/bench_sigmafast_pred.cpp)
 target_include_directories(bench_sigmafast_pred PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -243,6 +296,12 @@ add_executable(test_planner_causal src/demo/test_planner_causal.cpp)
 target_include_directories(test_planner_causal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_planner_causal PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
 
+if(HAVE_SUF_CUDA)
+add_executable(test_pfss_gpu src/demo/test_pfss_gpu.cpp)
+target_include_directories(test_pfss_gpu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_pfss_gpu PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
+endif()
+
 add_executable(bench_gemm src/bench/bench_gemm.cpp)
 target_include_directories(bench_gemm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(bench_gemm PRIVATE nn_ops suf_fss ${MYL7_LINK_LIBS})
@@ -266,6 +325,9 @@ add_test(NAME test_pfss_async_stress COMMAND test_pfss_async_stress)
 add_test(NAME test_transformer_async COMMAND test_transformer_async)
 add_test(NAME test_planner_causal COMMAND test_planner_causal)
 add_test(NAME test_gapars_selector COMMAND test_gapars_selector)
+if(HAVE_SUF_CUDA)
+add_test(NAME test_pfss_gpu COMMAND test_pfss_gpu)
+endif()
 
 # Placeholder executor coverage for MLP/attention (reuse existing binaries for smoke until dedicated harnesses are added).
 add_test(NAME test_matmul_and_attention_executor COMMAND test_matmul_and_attention)
