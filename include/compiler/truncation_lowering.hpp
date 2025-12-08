@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <random>
+#include <limits>
 
 #include "compiler/pfss_program_desc.hpp"
 #include "compiler/range_analysis.hpp"
@@ -25,9 +26,16 @@ inline TruncationLoweringResult lower_truncation_gate(proto::PfssBackend& backen
                                                       std::mt19937_64& rng,
                                                       const GateParams& params,
                                                       size_t batch_N = 1) {
+  AbsBound abs = params.abs_hint;
+  // If no explicit abs_hint was provided, derive a conservative hint from range.
+  if (abs.max_abs == std::numeric_limits<uint64_t>::max() &&
+      params.range_hint.lo != std::numeric_limits<int64_t>::min() &&
+      params.range_hint.hi != std::numeric_limits<int64_t>::max()) {
+    abs = abs_from_range(params.range_hint, params.range_hint.is_signed);
+  }
   GateKind kind = params.kind;
   if (kind == GateKind::AutoTrunc) {
-    kind = select_trunc_kind(params.range_hint, params.frac_bits);
+    kind = select_trunc_kind(abs, params.frac_bits, params.gap_hint);
   }
   if (kind != GateKind::FaithfulTR &&
       kind != GateKind::FaithfulARS &&

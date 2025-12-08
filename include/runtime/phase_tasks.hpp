@@ -340,6 +340,16 @@ inline const compiler::TruncationLoweringResult* select_trunc_bundle(
   return (kind == compiler::GateKind::GapARS) ? choice.gapars : choice.faithful;
 }
 
+inline const compiler::TruncationLoweringResult* select_trunc_bundle(
+    const TruncChoice& choice,
+    const compiler::AbsBound& abs,
+    int frac_bits,
+    const std::optional<compiler::GapCert>& gap = std::nullopt) {
+  if (!choice.gapars || !choice.faithful) return choice.faithful;
+  auto kind = compiler::select_trunc_kind(abs, frac_bits, gap);
+  return (kind == compiler::GateKind::GapARS) ? choice.gapars : choice.faithful;
+}
+
 struct CubicPolyBundle {
   const suf::SUF<uint64_t>* suf = nullptr;
   const gates::CompositePartyKey* key0 = nullptr;
@@ -1004,7 +1014,11 @@ class LayerNormTask final : public detail::PhaseTask {
       case St::NormMul: {
         auto need = mul_norm_->step(R);
         if (!mul_norm_->done()) return need;
-        const auto* tb = select_trunc_bundle(bundle_.norm_trunc, norm_range_, bundle_.frac_bits);
+        compiler::AbsBound norm_abs = compiler::abs_from_range(norm_range_, /*is_signed=*/true);
+        norm_abs.kind = (norm_range_.lo <= norm_range_.hi) ? compiler::RangeKind::Proof
+                                                           : compiler::RangeKind::Hint;
+        auto gap = compiler::gap_from_abs(norm_abs, bundle_.frac_bits);
+        const auto* tb = select_trunc_bundle(bundle_.norm_trunc, norm_abs, bundle_.frac_bits, gap);
         if (!tb) throw std::runtime_error("LayerNormTask: missing norm trunc bundle");
         trunc_norm_ = std::make_unique<TruncTask>(
             tb, std::span<const uint64_t>(norm_q2f_.data(), norm_q2f_.size()),

@@ -3,6 +3,7 @@
 #include <vector>
 #include <random>
 #include <limits>
+#include <optional>
 #include "gates/tables/silu_spline_table.hpp"
 #include "gates/silu_composite.hpp"
 #include "runtime/pfss_superbatch.hpp"
@@ -40,10 +41,17 @@ void mlp_forward(const MLPConfig& cfg,
   if (!ctx) {
     throw std::runtime_error("mlp_forward: LayerContext required (no local rescale fallback)");
   }
+  // Preserve PFSS/Open batches across phases so the layer planner can drain explicitly.
+  pe->set_keep_batches(true);
   compiler::RangeInterval x_range_hint = compiler::RangeInterval::whole(true);
   if (ctx && !ctx->graph.tensors().empty()) {
     x_range_hint = ctx->graph.tensors().back().range;
   }
+  compiler::AbsBound x_abs_hint{};
+  std::optional<compiler::GapCert> x_gap_hint = std::nullopt;
+  bool have_x_abs = false;
+  compiler::AbsBound silu_abs_hint{};
+  bool have_silu_abs = false;
   net::Chan* pfss_nc = (ctx && ctx->pfss_net_chan) ? ctx->pfss_net_chan : &ch;
   auto record_phase_plan = [&](runtime::PfssPhasePlanner& planner) {
     if (!ctx || !ctx->pfss_layer_planner) return;
@@ -88,6 +96,12 @@ void mlp_forward(const MLPConfig& cfg,
   if (ctx) {
     compiler::Scale q_scale = make_scale(cfg.frac_bits, true);
     SecretTensor x_t = make_secret_tensor(ctx, X_share, q_scale, x_range_hint);
+    if (x_t.valid() && static_cast<size_t>(x_t.tid) < ctx->graph.tensors().size()) {
+      const auto& tf = ctx->graph.tensors()[static_cast<size_t>(x_t.tid)];
+      x_abs_hint = tf.abs;
+      x_gap_hint = tf.gap;
+      have_x_abs = true;
+    }
 
     compiler::MatmulAttrs mat1;
     mat1.M = B * T;
@@ -121,6 +135,15 @@ void mlp_forward(const MLPConfig& cfg,
     // SiLU is tightly bounded; record a clamp so downstream matmul can exploit the gap cert.
     compiler::RangeInterval silu_range = clamp_silu_range(cfg.frac_bits);
     auto silu_t = record_clamp(ctx, hidden_t, silu_range, q_scale);
+    if (silu_t.valid() && static_cast<size_t>(silu_t.tid) < ctx->graph.tensors().size()) {
+      const auto& tf = ctx->graph.tensors()[static_cast<size_t>(silu_t.tid)];
+      silu_abs_hint = tf.abs;
+      have_silu_abs = true;
+    } else {
+      silu_abs_hint = compiler::abs_from_range(silu_range, silu_range.is_signed);
+      silu_abs_hint.kind = compiler::RangeKind::Proof;
+      have_silu_abs = true;
+    }
 
     compiler::MatmulAttrs mat2;
     mat2.M = B * T;
@@ -186,8 +209,13 @@ void mlp_forward(const MLPConfig& cfg,
   if (use_phase) {
     // Faithful truncation via composite (no local shift) batched in phase executor.
     std::mt19937_64 rng(0);
-    auto make_plan = [&](size_t M, size_t K, size_t N, const compiler::RangeInterval& x_range,
-                         const compiler::RangeInterval& w_range, int row_l1_max) {
+    auto make_plan = [&](size_t M,
+                         size_t K,
+                         size_t N,
+                         const compiler::RangeInterval& x_range,
+                         const compiler::RangeInterval& w_range,
+                         int row_l1_max,
+                         const std::optional<compiler::AbsBound>& x_abs_opt) {
       compiler::RangeInterval accum;
       if (row_l1_max > 0) {
         int64_t max_abs_x = std::max(std::llabs(x_range.lo), std::llabs(x_range.hi));
@@ -201,19 +229,30 @@ void mlp_forward(const MLPConfig& cfg,
       } else {
         accum = compiler::matmul_accum_range(x_range, w_range, K);
       }
+      compiler::AbsBound w_abs = compiler::abs_from_range(w_range, true);
+      w_abs.kind = compiler::RangeKind::Proof;
+      compiler::AbsBound x_abs = x_abs_opt ? *x_abs_opt : compiler::abs_from_range(x_range, x_range.is_signed);
+      // Preserve proof-ness if available from the caller; otherwise keep hints.
+      if (x_abs_opt) x_abs.kind = x_abs_opt->kind;
+      compiler::AbsBound accum_abs = compiler::matmul_accum_abs(x_abs, w_abs, K);
       compiler::GateParams p;
       p.frac_bits = cfg.frac_bits;
       p.kind = compiler::GateKind::AutoTrunc;
       p.range_hint = accum;
+      p.abs_hint = accum_abs;
+      if (accum_abs.kind == compiler::RangeKind::Proof) {
+        p.gap_hint = compiler::gap_from_abs(accum_abs, cfg.frac_bits);
+      }
       compiler::MatmulTruncationPlan plan;
-      plan.kind = compiler::select_trunc_kind(accum, cfg.frac_bits);
+      plan.kind = compiler::select_trunc_kind(accum_abs, cfg.frac_bits, p.gap_hint);
       plan.accum_range = accum;
       plan.batch = M * N;
       plan.bundle = compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng, p, plan.batch);
       return plan;
     };
 
-    auto plan1 = make_plan(B * T, D, H, mat1_x_range, mat1_w_range, row_l1_max1);
+    auto plan1 = make_plan(B * T, D, H, mat1_x_range, mat1_w_range, row_l1_max1,
+                           have_x_abs ? std::optional<compiler::AbsBound>(x_abs_hint) : std::nullopt);
     auto trunc_task1 = std::make_unique<runtime::TruncTask>(
         &plan1.bundle, std::span<const uint64_t>(hidden.data(), hidden.size()),
         std::span<uint64_t>(hidden_scaled.data(), hidden_scaled.size()));
@@ -260,7 +299,8 @@ void mlp_forward(const MLPConfig& cfg,
 
     // Second wave: trunc output matmul accum.
     std::mt19937_64 rng_out(1);
-    auto plan2 = make_plan(B * T, H, D, mat2_x_range, mat2_w_range, row_l1_max2);
+    auto plan2 = make_plan(B * T, H, D, mat2_x_range, mat2_w_range, row_l1_max2,
+                           have_silu_abs ? std::optional<compiler::AbsBound>(silu_abs_hint) : std::nullopt);
     std::vector<uint64_t> y_scaled(Y_share.numel(), 0);
     pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
     if (ctx && ctx->pfss_layer_planner) ctx->pfss_layer_planner->enter_phase();

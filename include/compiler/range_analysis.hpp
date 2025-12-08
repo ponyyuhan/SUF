@@ -4,10 +4,60 @@
 #include <cstdint>
 #include <limits>
 #include <type_traits>
+#include <optional>
 
 #include "compiler/pfss_program_desc.hpp"
 
 namespace compiler {
+
+inline bool can_gapars(const GapCert& g, int nbits = 64) {
+  if (g.kind != RangeKind::Proof || !g.is_signed) return false;
+  __int128 lhs = static_cast<__int128>(g.max_abs) + static_cast<__int128>(g.mask_abs);
+  __int128 rhs = static_cast<__int128>(uint64_t(1) << (nbits - 1));
+  return lhs < rhs;
+}
+
+inline uint64_t default_mask_bound(int frac_bits) {
+  if (frac_bits <= 0) return 1ull;
+  if (frac_bits >= 63) return std::numeric_limits<uint64_t>::max();
+  return uint64_t(1) << frac_bits;
+}
+
+inline std::optional<GapCert> gap_from_abs(const AbsBound& ab,
+                                           int frac_bits,
+                                           uint64_t mask_abs = 0) {
+  if (ab.kind != RangeKind::Proof || !ab.is_signed) return std::nullopt;
+  GapCert g;
+  g.is_signed = ab.is_signed;
+  g.frac_bits = frac_bits;
+  g.max_abs = ab.max_abs;
+  g.mask_abs = (mask_abs == 0) ? default_mask_bound(frac_bits) : mask_abs;
+  g.kind = RangeKind::Proof;
+  return g;
+}
+
+inline uint64_t sat_add_u64(uint64_t a, uint64_t b) {
+  __int128 s = static_cast<__int128>(a) + static_cast<__int128>(b);
+  if (s > static_cast<__int128>(std::numeric_limits<uint64_t>::max())) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return static_cast<uint64_t>(s);
+}
+
+inline uint64_t sat_mul_u64(uint64_t a, uint64_t b) {
+  __int128 p = static_cast<__int128>(a) * static_cast<__int128>(b);
+  if (p > static_cast<__int128>(std::numeric_limits<uint64_t>::max())) {
+    return std::numeric_limits<uint64_t>::max();
+  }
+  return static_cast<uint64_t>(p);
+}
+
+inline uint64_t ceil_div_pow2(uint64_t v, int shift) {
+  if (shift <= 0) return v;
+  if (shift >= 63) return (v == 0) ? 0ull : 1ull;
+  uint64_t mask = (uint64_t(1) << shift) - 1;
+  return (v + mask) >> shift;
+}
 
 inline RangeInterval intersect(const RangeInterval& a, const RangeInterval& b) {
   RangeInterval out;
@@ -65,31 +115,86 @@ inline int effective_bits_unsigned(const RangeInterval& r) {
   return std::max(bits, 1);
 }
 
-// Decide GateKind for a rescale based on a conservative range.
-inline GateKind select_trunc_kind(const RangeInterval& r, int frac_bits) {
-  (void)frac_bits;  // current GapARS certificate is frac-agnostic and uses absolute bounds.
-  constexpr uint64_t kGapBound = (uint64_t(1) << 62);  // |x_int| < 2^(n-2) for n=64
-  if (!r.is_signed) return GateKind::FaithfulTR;
-
-  auto abs64 = [](int64_t v) -> uint64_t {
-    return (v < 0) ? static_cast<uint64_t>(-v) : static_cast<uint64_t>(v);
-  };
-  uint64_t abs_lo = abs64(r.lo);
-  uint64_t abs_hi = abs64(r.hi);
-  uint64_t abs_max = std::max(abs_lo, abs_hi);
-  if (abs_max < kGapBound) return GateKind::GapARS;
-  return GateKind::FaithfulARS;
-}
-
-// Lightweight GapARS certificate helper.
-inline bool has_gap_cert(const RangeInterval& r) {
-  constexpr uint64_t kGapBound = (uint64_t(1) << 62);
-  if (!r.is_signed) return false;
+inline AbsBound abs_from_range(const RangeInterval& r, bool is_signed) {
   auto abs64 = [](int64_t v) -> uint64_t { return (v < 0) ? static_cast<uint64_t>(-v) : static_cast<uint64_t>(v); };
   uint64_t abs_lo = abs64(r.lo);
   uint64_t abs_hi = abs64(r.hi);
-  uint64_t abs_max = std::max(abs_lo, abs_hi);
-  return abs_max < kGapBound;
+  AbsBound out;
+  out.is_signed = is_signed;
+  out.max_abs = std::max(abs_lo, abs_hi);
+  out.kind = RangeKind::Hint;
+  return out;
+}
+
+inline AbsBound add_abs(const AbsBound& a, const AbsBound& b) {
+  AbsBound out;
+  out.is_signed = a.is_signed || b.is_signed;
+  out.max_abs = sat_add_u64(a.max_abs, b.max_abs);
+  out.kind = (a.kind == RangeKind::Proof && b.kind == RangeKind::Proof) ? RangeKind::Proof : RangeKind::Hint;
+  return out;
+}
+
+inline AbsBound sub_abs(const AbsBound& a, const AbsBound& b) {
+  return add_abs(a, b);
+}
+
+inline AbsBound shift_down_abs(const AbsBound& a, int shift) {
+  AbsBound out = a;
+  if (shift > 0) {
+    out.max_abs = ceil_div_pow2(out.max_abs, shift);
+  } else if (shift < 0) {
+    int sh = -shift;
+    if (sh >= 63) {
+      out.max_abs = std::numeric_limits<uint64_t>::max();
+    } else {
+      out.max_abs = sat_mul_u64(out.max_abs, static_cast<uint64_t>(uint64_t(1) << sh));
+    }
+  }
+  return out;
+}
+
+inline AbsBound mul_const_abs(const AbsBound& a, int64_t c, int frac_bits) {
+  AbsBound out;
+  out.is_signed = true;
+  uint64_t c_abs = (c < 0) ? static_cast<uint64_t>(-c) : static_cast<uint64_t>(c);
+  uint64_t prod = sat_mul_u64(a.max_abs, c_abs);
+  out.max_abs = ceil_div_pow2(prod, frac_bits);
+  out.kind = (a.kind == RangeKind::Proof) ? RangeKind::Proof : RangeKind::Hint;
+  return out;
+}
+
+inline AbsBound hadamard_abs(const AbsBound& a, const AbsBound& b, int frac_bits) {
+  AbsBound out;
+  out.is_signed = a.is_signed || b.is_signed;
+  uint64_t prod = sat_mul_u64(a.max_abs, b.max_abs);
+  out.max_abs = ceil_div_pow2(prod, frac_bits);
+  out.kind = (a.kind == RangeKind::Proof && b.kind == RangeKind::Proof) ? RangeKind::Proof : RangeKind::Hint;
+  return out;
+}
+
+inline AbsBound axpy_abs(const AbsBound& x, const AbsBound& y, int64_t a, int frac_bits) {
+  AbsBound scaled_y = mul_const_abs(y, a, frac_bits);
+  return add_abs(x, scaled_y);
+}
+
+inline AbsBound matmul_accum_abs(const AbsBound& x, const AbsBound& w, size_t K) {
+  AbsBound out;
+  out.is_signed = true;
+  uint64_t prod = sat_mul_u64(x.max_abs, w.max_abs);
+  uint64_t total = sat_mul_u64(prod, static_cast<uint64_t>(K));
+  out.max_abs = total;
+  out.kind = (x.kind == RangeKind::Proof && w.kind == RangeKind::Proof) ? RangeKind::Proof : RangeKind::Hint;
+  return out;
+}
+
+inline AbsBound matmul_rowl1_abs(const AbsBound& x, int64_t row_l1_max) {
+  AbsBound out;
+  out.is_signed = true;
+  uint64_t l1 = (row_l1_max < 0) ? static_cast<uint64_t>(-row_l1_max)
+                                 : static_cast<uint64_t>(row_l1_max);
+  out.max_abs = sat_mul_u64(x.max_abs, l1);
+  out.kind = (x.kind == RangeKind::Proof) ? RangeKind::Proof : RangeKind::Hint;
+  return out;
 }
 
 // Repeat-add an interval `count` times (conservative clamp to int64_t limits).
@@ -174,6 +279,36 @@ inline RangeInterval mul_const_range(const RangeInterval& x_range,
                                      int frac_bits) {
   RangeInterval prod = mul_range(x_range, RangeInterval{c, c, true});
   return shift_down(prod, frac_bits);
+}
+
+// Decide GateKind for a rescale based on proof-carrying bounds.
+inline GateKind select_trunc_kind(const AbsBound& abs,
+                                  int frac_bits,
+                                  const std::optional<GapCert>& cert = std::nullopt) {
+  if (!abs.is_signed) return GateKind::FaithfulTR;
+  GapCert g;
+  g.is_signed = abs.is_signed;
+  g.frac_bits = frac_bits;
+  g.max_abs = abs.max_abs;
+  g.mask_abs = default_mask_bound(frac_bits);
+  g.kind = abs.kind;
+  if (cert) {
+    g.is_signed = cert->is_signed;
+    g.max_abs = cert->max_abs;
+    g.mask_abs = cert->mask_abs;
+    g.kind = cert->kind;
+  }
+  if (g.kind == RangeKind::Proof && can_gapars(g)) return GateKind::GapARS;
+  return GateKind::FaithfulARS;
+}
+
+inline GateKind select_trunc_kind(const RangeInterval& r,
+                                  int frac_bits,
+                                  RangeKind kind = RangeKind::Hint,
+                                  const std::optional<GapCert>& cert = std::nullopt) {
+  AbsBound abs = abs_from_range(r, r.is_signed);
+  abs.kind = kind;
+  return select_trunc_kind(abs, frac_bits, cert);
 }
 
 }  // namespace compiler

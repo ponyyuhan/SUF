@@ -267,12 +267,22 @@ void transformer_layer_forward(const TransformerConfig& cfg,
                                LayerContext* ctx,
                                runtime::PhaseExecutor* pe) {
   runtime::PhaseExecutor local_pe;
-  if (pe == nullptr) pe = &local_pe;
+  bool created_local_pe = false;
+  if (pe == nullptr) {
+    pe = &local_pe;
+    created_local_pe = true;
+  }
   if (!ctx || !ctx->trunc_ctx) {
     throw std::runtime_error("transformer_layer_forward: LayerContext with trunc_ctx required");
   }
-  // Enable async PFSS when a dedicated PFSS channel is present (guarded by a shared mutex at finalize).
-  if (ctx->pfss_net_chan) ctx->allow_async_pfss = true;
+  // Ensure any previous async PFSS flush is complete before reusing batches.
+  if (ctx->pfss_async_runner) {
+    ctx->pfss_async_runner->wait();
+    ctx->pfss_async_runner.reset();
+  }
+  // Enable async PFSS only when a dedicated PFSS channel is present and the caller supplied a long-lived executor.
+  bool can_async_pfss = (ctx->pfss_net_chan != nullptr) && !created_local_pe;
+  ctx->allow_async_pfss = can_async_pfss ? true : false;
   pe->set_lazy_mode(true);
   pe->set_keep_batches(true);
   runtime::PfssLayerPlanner::Limits layer_lim;
@@ -545,7 +555,12 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   // Final safety flush and layer-level accounting for PFSS.
   if (layer_planner_ptr) {
     runtime::ProtoChanFromNet pch_layer(*pfss_nc);
-    runtime::PfssAsyncRunner async_runner;
+    runtime::PfssAsyncRunner local_async_runner;
+    runtime::PfssAsyncRunner* async_runner = &local_async_runner;
+    if (ctx->allow_async_pfss) {
+      if (!ctx->pfss_async_runner) ctx->pfss_async_runner = std::make_unique<runtime::PfssAsyncRunner>();
+      async_runner = ctx->pfss_async_runner.get();
+    }
     static std::shared_ptr<std::mutex> pfss_chan_mu = std::make_shared<std::mutex>();
     bool wait = !(ctx && ctx->allow_async_pfss);
     layer_planner_ptr->finalize_layer(
@@ -554,7 +569,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
         pe->pfss_coeff_batch(),
         pe->pfss_trunc_batch(),
         pch_layer,
-        &async_runner,
+        async_runner,
         wait,
         pfss_chan_mu.get());
     if (party == 0) {

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <vector>
 
 namespace compiler {
@@ -22,6 +23,22 @@ struct RangeInterval {
     }
     return r;
   }
+};
+
+enum class RangeKind : uint8_t { Hint = 0, Proof = 1 };
+
+struct GapCert {
+  bool is_signed = true;
+  int frac_bits = 0;
+  uint64_t max_abs = std::numeric_limits<uint64_t>::max();   // bound on |x_int|
+  uint64_t mask_abs = std::numeric_limits<uint64_t>::max();  // bound on |r_int| used by trunc bundle
+  RangeKind kind = RangeKind::Hint;
+};
+
+struct AbsBound {
+  bool is_signed = true;
+  uint64_t max_abs = std::numeric_limits<uint64_t>::max();
+  RangeKind kind = RangeKind::Hint;
 };
 
 enum class RawPredKind : uint8_t {
@@ -114,6 +131,8 @@ struct GateParams {
   size_t L = 0;
   double eps = 0.0;
   RangeInterval range_hint = RangeInterval::whole(true);
+  AbsBound abs_hint;
+  std::optional<GapCert> gap_hint;
 };
 
 } // namespace compiler

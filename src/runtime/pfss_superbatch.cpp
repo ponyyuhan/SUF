@@ -65,6 +65,7 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
   }
   stats_.flushes += 1;
   stats_.jobs += jobs_.size();
+  size_t total_hatx_words = 0;
   struct GroupKey {
     int r = 0;
     int ell = 0;
@@ -178,6 +179,7 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
       bj.start = b.hatx.size();
       bj.len = job.hatx_public.size();
       b.hatx.insert(b.hatx.end(), job.hatx_public.begin(), job.hatx_public.end());
+      total_hatx_words += job.hatx_public.size();
       b.jobs.push_back(bj);
     }
 
@@ -208,6 +210,8 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
   flushed_ = true;
   stats_.arith_words += total_arith_words;
   stats_.pred_bits += total_bool_words * 64;
+  stats_.hatx_words += total_hatx_words;
+  stats_.hatx_bytes += total_hatx_words * sizeof(uint64_t);
   pending_jobs_ = 0;
   pending_hatx_words_ = 0;
   stats_.pending_jobs = 0;

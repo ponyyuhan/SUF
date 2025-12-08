@@ -31,9 +31,10 @@ class TruncationPassContext {
                                               int frac_bits,
                                               const RangeInterval& x_range,
                                               const RangeInterval& w_range,
-                                              bool prefer_gapars = false) {
+                                              bool prefer_gapars = false,
+                                              std::optional<GapCert> gap_cert = std::nullopt) {
     matmul_plans_.push_back(
-        compile_matmul_truncation(backend_, rng_, M, K, N, frac_bits, x_range, w_range, prefer_gapars));
+        compile_matmul_truncation(backend_, rng_, M, K, N, frac_bits, x_range, w_range, prefer_gapars, gap_cert));
     const auto& plan = matmul_plans_.back();
     bundles_.push_back(&plan.bundle);
     return plan;
@@ -78,6 +79,7 @@ void wire_matmul_truncation(nn::MatmulBeaverParams& params,
                             size_t N,
                             const RangeInterval& x_range,
                             const RangeInterval& w_range,
-                            bool prefer_gapars = false);
+                            bool prefer_gapars = false,
+                            std::optional<GapCert> gap_cert = std::nullopt);
 
 }  // namespace compiler

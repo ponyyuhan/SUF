@@ -100,6 +100,9 @@ class StagedSoftmaxTask : public runtime::detail::PhaseTask {
           prob_range_.lo = 0;
           prob_range_.hi = static_cast<int64_t>(1) << plan_.frac_bits;
           prob_range_.is_signed = false;
+          prob_abs_.is_signed = true;
+          prob_abs_.max_abs = static_cast<uint64_t>(1ull << plan_.frac_bits);
+          prob_abs_.kind = compiler::RangeKind::Proof;
           st_ = St::MulRun;
           break;
         }
@@ -108,7 +111,8 @@ class StagedSoftmaxTask : public runtime::detail::PhaseTask {
           if (!mul_task_->done()) return {need, false};
           prob_qf_.assign(out_.size(), 0);
           if (plan_.prob_range) prob_range_ = *plan_.prob_range;
-          const auto* trunc_bundle = runtime::select_trunc_bundle(plan_.prob_trunc, prob_range_, plan_.frac_bits);
+          auto gap = compiler::gap_from_abs(prob_abs_, plan_.frac_bits);
+          const auto* trunc_bundle = runtime::select_trunc_bundle(plan_.prob_trunc, prob_abs_, plan_.frac_bits, gap);
           if (!trunc_bundle) throw std::runtime_error("StagedSoftmaxTask: missing trunc bundle");
           trunc_task_ = std::make_unique<runtime::TruncTask>(
               trunc_bundle,
@@ -159,6 +163,7 @@ class StagedSoftmaxTask : public runtime::detail::PhaseTask {
   std::vector<uint64_t> prod_q2f_;
   std::vector<uint64_t> prob_qf_;
   compiler::RangeInterval prob_range_;
+  compiler::AbsBound prob_abs_;
   std::vector<uint64_t> t_packed_;
   std::vector<uint64_t> exp_packed_;
   std::vector<int> row_offsets_;

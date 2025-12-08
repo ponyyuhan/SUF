@@ -81,10 +81,16 @@ inline SiluTaskMaterial dealer_make_silu_task_material(proto::PfssBackendBatch& 
   kp.k1.compiled.gate_kind = compiler::GateKind::SiLUSpline;
 
   compiler::GateParams p;
-  p.kind = compiler::GateKind::FaithfulARS;
+  p.kind = compiler::GateKind::AutoTrunc;
+  p.range_hint = nn::clamp_silu_range(frac_bits);
+  p.abs_hint = compiler::abs_from_range(p.range_hint, /*is_signed=*/true);
+  p.abs_hint.kind = compiler::RangeKind::Proof;
+  p.gap_hint = compiler::gap_from_abs(p.abs_hint, frac_bits);
   p.frac_bits = frac_bits;
   auto trunc_f = compiler::lower_truncation_gate(backend, rng, p, batch_N);
   p.frac_bits = 2 * frac_bits;
+  p.abs_hint.max_abs = static_cast<uint64_t>(1ull << p.frac_bits);
+  p.gap_hint = compiler::gap_from_abs(p.abs_hint, p.frac_bits);
   auto trunc_2f = compiler::lower_truncation_gate(backend, rng, p, batch_N);
 
   if (triple_need > 0) {

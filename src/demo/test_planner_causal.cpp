@@ -103,6 +103,8 @@ int main() {
   lim.max_trunc_jobs = 8;
   lim.max_coeff_hatx_words = 32;
   lim.max_trunc_hatx_words = 32;
+  lim.max_coeff_hatx_bytes = lim.max_coeff_hatx_words * sizeof(uint64_t);
+  lim.max_trunc_hatx_bytes = lim.max_trunc_hatx_words * sizeof(uint64_t);
   lim.max_phases = 32;
   planner0.set_limits(lim);
   planner1.set_limits(lim);
@@ -174,6 +176,10 @@ int main() {
   assert(planner1.totals().coeff_hatx_words <= lim.max_coeff_hatx_words);
   assert(planner0.totals().trunc_hatx_words <= lim.max_trunc_hatx_words);
   assert(planner1.totals().trunc_hatx_words <= lim.max_trunc_hatx_words);
+  assert(planner0.totals().coeff_hatx_bytes <= lim.max_coeff_hatx_bytes);
+  assert(planner1.totals().coeff_hatx_bytes <= lim.max_coeff_hatx_bytes);
+  assert(planner0.totals().trunc_hatx_bytes <= lim.max_trunc_hatx_bytes);
+  assert(planner1.totals().trunc_hatx_bytes <= lim.max_trunc_hatx_bytes);
   assert(planner0.totals().phases <= lim.max_phases);
   assert(planner1.totals().phases <= lim.max_phases);
 

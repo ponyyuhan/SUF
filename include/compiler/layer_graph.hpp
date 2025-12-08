@@ -28,7 +28,8 @@ struct Scale {
 struct TensorFacts {
   Scale scale;
   RangeInterval range = RangeInterval::whole(true);  // conservative ring-range
-  bool gap_cert = false;  // true if range provably satisfies GapARS condition
+  AbsBound abs;  // bound on |x_int| with proof kind
+  std::optional<GapCert> gap;  // optional proof-carrying gap cert
 };
 
 enum class OpKind {

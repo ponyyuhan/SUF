@@ -185,6 +185,8 @@ class PfssSuperBatch {
     size_t jobs = 0;
     size_t arith_words = 0;
     size_t pred_bits = 0;
+    size_t hatx_words = 0;
+    size_t hatx_bytes = 0;
     size_t max_bucket_hatx = 0;   // largest packed hatx length in a bucket
     size_t max_bucket_jobs = 0;   // largest number of jobs fused into one bucket
     size_t pending_jobs = 0;      // current pending jobs before flush

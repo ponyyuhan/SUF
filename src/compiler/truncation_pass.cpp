@@ -15,9 +15,10 @@ void wire_matmul_truncation(nn::MatmulBeaverParams& params,
                             size_t N,
                             const RangeInterval& x_range,
                             const RangeInterval& w_range,
-                            bool prefer_gapars) {
+                            bool prefer_gapars,
+                            std::optional<GapCert> gap_cert) {
   const auto& plan =
-      ctx.add_matmul_plan(M, K, N, params.frac_bits, x_range, w_range, prefer_gapars);
+      ctx.add_matmul_plan(M, K, N, params.frac_bits, x_range, w_range, prefer_gapars, gap_cert);
   attach_matmul_plan(params, ctx.backend(), plan, x_range, w_range);
 }
 

@@ -115,6 +115,10 @@ add_executable(test_compile_pfss src/demo/test_compile_pfss.cpp)
 target_include_directories(test_compile_pfss PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_compile_pfss PRIVATE compiler_passes suf_fss ${MYL7_LINK_LIBS})
 
+add_executable(test_gapars_selector src/demo/test_gapars_selector.cpp)
+target_include_directories(test_gapars_selector PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_gapars_selector PRIVATE compiler_passes suf_fss ${MYL7_LINK_LIBS})
+
 add_library(compiler_passes STATIC
   src/compiler/truncation_pass.cpp
   src/compiler/rescale_pass.cpp
@@ -227,6 +231,14 @@ add_executable(test_pfss_async src/demo/test_pfss_async.cpp)
 target_include_directories(test_pfss_async PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_pfss_async PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
 
+add_executable(test_pfss_async_stress src/demo/test_pfss_async_stress.cpp)
+target_include_directories(test_pfss_async_stress PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_pfss_async_stress PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
+
+add_executable(test_transformer_async src/demo/test_transformer_async.cpp)
+target_include_directories(test_transformer_async PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_transformer_async PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
+
 add_executable(test_planner_causal src/demo/test_planner_causal.cpp)
 target_include_directories(test_planner_causal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_planner_causal PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
@@ -250,7 +262,10 @@ add_test(NAME test_layernorm_task COMMAND test_layernorm_task)
 add_test(NAME test_staged_softmax COMMAND test_staged_softmax)
 add_test(NAME test_pfss_planner COMMAND test_pfss_planner)
 add_test(NAME test_pfss_async COMMAND test_pfss_async)
+add_test(NAME test_pfss_async_stress COMMAND test_pfss_async_stress)
+add_test(NAME test_transformer_async COMMAND test_transformer_async)
 add_test(NAME test_planner_causal COMMAND test_planner_causal)
+add_test(NAME test_gapars_selector COMMAND test_gapars_selector)
 
 # Placeholder executor coverage for MLP/attention (reuse existing binaries for smoke until dedicated harnesses are added).
 add_test(NAME test_matmul_and_attention_executor COMMAND test_matmul_and_attention)

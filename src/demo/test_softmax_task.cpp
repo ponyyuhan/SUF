@@ -433,6 +433,20 @@ int main() {
               << " vs " << r0.stats.pfss_trunc_jobs << ")\n";
     return 1;
   }
+  if (m0.stats.pfss_coeff_hatx_words >= r0.stats.pfss_coeff_hatx_words ||
+      m0.stats.pfss_trunc_hatx_words >= r0.stats.pfss_trunc_hatx_words) {
+    std::cerr << "Masked PFSS hatx did not shrink (coeff hatx " << m0.stats.pfss_coeff_hatx_words
+              << " vs " << r0.stats.pfss_coeff_hatx_words << ", trunc hatx "
+              << m0.stats.pfss_trunc_hatx_words << " vs " << r0.stats.pfss_trunc_hatx_words << ")\n";
+    return 1;
+  }
+  if (m0.stats.pfss_coeff_hatx_bytes >= r0.stats.pfss_coeff_hatx_bytes ||
+      m0.stats.pfss_trunc_hatx_bytes >= r0.stats.pfss_trunc_hatx_bytes) {
+    std::cerr << "Masked PFSS hatx bytes did not shrink (coeff bytes " << m0.stats.pfss_coeff_hatx_bytes
+              << " vs " << r0.stats.pfss_coeff_hatx_bytes << ", trunc bytes "
+              << m0.stats.pfss_trunc_hatx_bytes << " vs " << r0.stats.pfss_trunc_hatx_bytes << ")\n";
+    return 1;
+  }
   if (m0.planner_stats.coeff_jobs > r0.planner_stats.coeff_jobs ||
       m0.planner_stats.trunc_jobs > r0.planner_stats.trunc_jobs) {
     std::cerr << "Planner stats did not shrink under valid_lens (coeff " << m0.planner_stats.coeff_jobs

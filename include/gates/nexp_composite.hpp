@@ -92,8 +92,14 @@ inline NexpTaskMaterial dealer_make_nexp_task_material(proto::PfssBackendBatch& 
   // nExp input is clamped to [0,16]; downstream products stay well within GapARS margin.
   p.kind = compiler::GateKind::GapARS;
   p.frac_bits = params.frac_bits;
+  p.range_hint = compiler::RangeInterval{0, static_cast<int64_t>(1ll << params.frac_bits), true};
+  p.abs_hint = compiler::abs_from_range(p.range_hint, /*is_signed=*/true);
+  p.abs_hint.kind = compiler::RangeKind::Proof;
+  p.gap_hint = compiler::gap_from_abs(p.abs_hint, p.frac_bits);
   auto trunc_f = compiler::lower_truncation_gate(backend, rng, p, batch_N);
   p.frac_bits = 2 * params.frac_bits;
+  p.abs_hint.max_abs = static_cast<uint64_t>(1ull << p.frac_bits);
+  p.gap_hint = compiler::gap_from_abs(p.abs_hint, p.frac_bits);
   auto trunc_2f = compiler::lower_truncation_gate(backend, rng, p, batch_N);
 
   if (triple_need > 0) {

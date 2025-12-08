@@ -13,6 +13,7 @@
 #include "runtime/pfss_superbatch.hpp"
 #include "runtime/open_collector.hpp"
 #include "runtime/pfss_phase_planner.hpp"
+#include "runtime/pfss_async_runner.hpp"
 #include "mpc/net.hpp"
 
 namespace nn {
@@ -29,6 +30,7 @@ struct LayerContext {
   int frac_bits = 16;
   bool enable_hoist = false;  // enable conservative rescale hoisting when finalizing
   bool allow_async_pfss = false;  // if true, caller may detach PFSS flushes (requires safe channel)
+  std::unique_ptr<runtime::PfssAsyncRunner> pfss_async_runner;  // retained across layers when async
   std::optional<compiler::TruncationPassResult> last_trunc;
   std::unordered_map<int, TensorView<uint64_t>> bindings;
 
@@ -180,7 +182,13 @@ inline SecretTensor record_rescale(LayerContext* ctx,
   // Populate missing frac hints from scales.
   if (attrs_copy.from_frac == 0) attrs_copy.from_frac = input.scale.frac_bits;
   if (attrs_copy.to_frac == 0) attrs_copy.to_frac = out_scale.frac_bits;
-  auto kind = compiler::select_trunc_kind(input.range, attrs.to_frac);
+  compiler::GateKind kind = compiler::GateKind::FaithfulARS;
+  if (static_cast<size_t>(input.tid) < ctx->graph.tensors().size()) {
+    const auto& tf = ctx->graph.tensors()[static_cast<size_t>(input.tid)];
+    kind = compiler::select_trunc_kind(tf.abs, attrs_copy.to_frac, tf.gap);
+  } else {
+    kind = compiler::select_trunc_kind(input.range, attrs_copy.to_frac);
+  }
   attrs_copy.prefer_gapars = attrs_copy.prefer_gapars || (kind == compiler::GateKind::GapARS);
   t.tid = ctx->graph.add_rescale(input.tid, attrs_copy, out_scale, out_range);
   compiler::RangeInterval inferred = compiler::shift_down(input.range, attrs_copy.from_frac - attrs_copy.to_frac);

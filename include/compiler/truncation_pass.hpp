@@ -17,7 +17,9 @@ inline TruncationLoweringResult compile_truncation_with_range(proto::PfssBackend
                                                               size_t batch_N = 1) {
   GateParams params;
   params.frac_bits = frac_bits;
-  params.kind = select_trunc_kind(range, frac_bits);
+  params.range_hint = range;
+  params.abs_hint = abs_from_range(range, range.is_signed);
+  params.kind = select_trunc_kind(params.abs_hint, frac_bits);
   return lower_truncation_gate(backend, rng, params, batch_N);
 }
 

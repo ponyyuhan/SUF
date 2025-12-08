@@ -74,6 +74,9 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
           scatter_active(exp_packed_, exp_qf_);
         }
         sum_qf_.assign(plan_.rows, 0);
+        prob_abs_.is_signed = true;
+        prob_abs_.max_abs = static_cast<uint64_t>(1ull << plan_.frac_bits);
+        prob_abs_.kind = compiler::RangeKind::Proof;
         st_ = St::SumLocal;
         return runtime::detail::Need::None;
       }
@@ -124,7 +127,8 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
         }
         // Choose trunc bundle based on range
         if (plan_.prob_range) prob_range_ = *plan_.prob_range;
-        const auto* trunc_bundle = select_trunc_bundle(plan_.prob_trunc, prob_range_, plan_.frac_bits);
+        auto gap = compiler::gap_from_abs(prob_abs_, plan_.frac_bits);
+        const auto* trunc_bundle = select_trunc_bundle(plan_.prob_trunc, prob_abs_, plan_.frac_bits, gap);
         if (!trunc_bundle) throw std::runtime_error("SoftmaxBlockTask: missing trunc bundle");
         prob_qf_.assign(out_.size(), 0);
         if (active_elems_ == prod_q2f_.size()) {
@@ -173,6 +177,7 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
   std::vector<uint64_t> prod_q2f_;
   std::vector<uint64_t> prob_qf_;
   compiler::RangeInterval prob_range_;
+  compiler::AbsBound prob_abs_;
   std::vector<uint64_t> t_packed_;
   std::vector<uint64_t> exp_packed_;
   std::vector<uint64_t> prod_packed_;

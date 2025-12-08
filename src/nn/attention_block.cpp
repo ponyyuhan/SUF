@@ -198,6 +198,12 @@ void attention_forward(const AttentionConfig& cfg,
   std::vector<uint64_t> qkv(B * T * 3 * D, 0);
 
   compiler::RangeInterval q_range = compiler::RangeInterval::whole(true);
+  compiler::AbsBound x_abs_hint{};
+  std::optional<compiler::GapCert> x_gap_hint = std::nullopt;
+  bool have_x_abs = false;
+  compiler::AbsBound qkv_abs_hint{};
+  std::optional<compiler::GapCert> qkv_gap_hint = std::nullopt;
+  bool have_qkv_abs = false;
   if (ctx) {
     compiler::Scale q_scale = make_scale(fb, true);
     compiler::RangeInterval x_range = compiler::RangeInterval::whole(true);
@@ -206,6 +212,12 @@ void attention_forward(const AttentionConfig& cfg,
     }
     SecretTensor x_t = make_secret_tensor(ctx, X_share, q_scale, x_range);
     q_range = x_range;
+    if (x_t.valid() && static_cast<size_t>(x_t.tid) < ctx->graph.tensors().size()) {
+      const auto& tf = ctx->graph.tensors()[static_cast<size_t>(x_t.tid)];
+      x_abs_hint = tf.abs;
+      x_gap_hint = tf.gap;
+      have_x_abs = true;
+    }
 
     compiler::MatmulAttrs qkv_attrs;
     qkv_attrs.M = B * T;
@@ -236,6 +248,12 @@ void attention_forward(const AttentionConfig& cfg,
         record_rescale(ctx, qkv_acc, qkv_rescale_attrs, q_scale, qkv_range,
                        view2(qkv.data(), B * T, 3 * D));
     q_range = qkv_t.range;
+    if (qkv_t.valid() && static_cast<size_t>(qkv_t.tid) < ctx->graph.tensors().size()) {
+      const auto& tf = ctx->graph.tensors()[static_cast<size_t>(qkv_t.tid)];
+      qkv_abs_hint = tf.abs;
+      qkv_gap_hint = tf.gap;
+      have_qkv_abs = true;
+    }
 
     compiler::MatmulAttrs out_attrs;
     out_attrs.M = B * T;
@@ -284,6 +302,8 @@ void attention_forward(const AttentionConfig& cfg,
   if (!ctx) {
     throw std::runtime_error("attention_forward: LayerContext required (no local rescale fallback)");
   }
+  // Preserve PFSS/Open batches across phases so a layer-level planner can control flushing.
+  pe->set_keep_batches(true);
   auto record_phase_plan = [&](runtime::PfssPhasePlanner& planner) {
     if (!ctx || !ctx->pfss_layer_planner) return;
     const auto& st = planner.stats();
@@ -319,6 +339,9 @@ void attention_forward(const AttentionConfig& cfg,
                  Wqkv_public,
                  view2(qkv.data(), B * T, 3 * D),
                  mp);
+  compiler::RangeInterval wqkv_range = range_from_public_weights(Wqkv_public);
+  compiler::AbsBound wqkv_abs = compiler::abs_from_range(wqkv_range, true);
+  wqkv_abs.kind = compiler::RangeKind::Proof;
   runtime::PfssPhasePlanner pfss_phase_planner;
   pfss_phase_planner.bind(&pe->pfss_coeff_batch(), &pe->pfss_trunc_batch());
   // Truncate qkv accum (Q2f -> Qf) via composite truncation (no local shift).
@@ -326,7 +349,15 @@ void attention_forward(const AttentionConfig& cfg,
   trunc_params_qkv.kind = compiler::GateKind::AutoTrunc;
   trunc_params_qkv.frac_bits = fb;
   trunc_params_qkv.range_hint = compiler::matmul_accum_range(
-      q_range, range_from_public_weights(Wqkv_public), D);
+      q_range, wqkv_range, D);
+  compiler::AbsBound qkv_acc_abs =
+      compiler::matmul_accum_abs(have_x_abs ? x_abs_hint : compiler::abs_from_range(q_range, true),
+                                 wqkv_abs,
+                                 D);
+  trunc_params_qkv.abs_hint = qkv_acc_abs;
+  if (qkv_acc_abs.kind == compiler::RangeKind::Proof) {
+    trunc_params_qkv.gap_hint = compiler::gap_from_abs(qkv_acc_abs, fb);
+  }
   std::mt19937_64 rng_qkv(123);
   auto trunc_qkv_bundle =
       compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng_qkv, trunc_params_qkv, qkv.size());
@@ -421,6 +452,11 @@ void attention_forward(const AttentionConfig& cfg,
     gap_p.kind = compiler::GateKind::AutoTrunc;
     gap_p.frac_bits = fb;
     gap_p.range_hint = clamp_softmax_range(fb);
+    gap_p.abs_hint = compiler::AbsBound{
+        /*is_signed=*/true,
+        static_cast<uint64_t>(1ull << fb),
+        compiler::RangeKind::Proof};
+    gap_p.gap_hint = compiler::gap_from_abs(gap_p.abs_hint, fb);
     prob_gapars = compiler::lower_truncation_gate(
         ctx->trunc_ctx->backend(), rng, gap_p, static_cast<size_t>(B * H * cache.S_max));
     compiler::GateParams faithful_p;
@@ -590,6 +626,12 @@ void attention_forward(const AttentionConfig& cfg,
         compiler::matmul_accum_range(q_range, q_range, Dh);
     score_trunc_p.kind = compiler::GateKind::AutoTrunc;
     score_trunc_p.range_hint = score_acc_range;
+    compiler::AbsBound q_abs = have_qkv_abs ? qkv_abs_hint : compiler::abs_from_range(q_range, true);
+    compiler::AbsBound score_acc_abs = compiler::matmul_accum_abs(q_abs, q_abs, Dh);
+    score_trunc_p.abs_hint = score_acc_abs;
+    if (score_acc_abs.kind == compiler::RangeKind::Proof) {
+      score_trunc_p.gap_hint = compiler::gap_from_abs(score_acc_abs, fb);
+    }
     std::mt19937_64 rng_score(0x73636f72u);
     auto score_trunc_bundle =
         compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng_score, score_trunc_p, score_share.size());
@@ -680,6 +722,11 @@ void attention_forward(const AttentionConfig& cfg,
     ctx_trunc_p.kind = compiler::GateKind::AutoTrunc;
     ctx_trunc_p.frac_bits = fb;
     ctx_trunc_p.range_hint = clamp_softmax_range(fb);
+      ctx_trunc_p.abs_hint = compiler::AbsBound{
+          /*is_signed=*/true,
+          static_cast<uint64_t>(1ull << fb),
+          compiler::RangeKind::Proof};
+      ctx_trunc_p.gap_hint = compiler::gap_from_abs(ctx_trunc_p.abs_hint, fb);
       std::mt19937_64 rng_ctx(77);
       auto ctx_trunc = compiler::lower_truncation_gate(
           ctx->trunc_ctx->backend(), rng_ctx, ctx_trunc_p, rows * Dh);
@@ -881,9 +928,28 @@ void attention_forward(const AttentionConfig& cfg,
                  Y_share,
                  mp);
   // Truncate output accum (Q2f -> Qf) via composite truncation.
+  compiler::RangeInterval prob_r = clamp_softmax_range(fb);
+  compiler::RangeInterval ctx_r =
+      compiler::propagate_matmul_out(prob_r, q_range, static_cast<size_t>(std::max(cache.S_max, T)), fb);
+  compiler::RangeInterval wout_r = range_from_public_weights(Wout_public);
+  int row_l1_out = row_l1_max(Wout_public, mp.w_transposed);
+  compiler::RangeInterval out_acc =
+      (row_l1_out > 0)
+          ? compiler::propagate_matmul_accum_rowl1(ctx_r, row_l1_out)
+          : compiler::propagate_matmul_accum(ctx_r, wout_r, D);
   compiler::GateParams trunc_params_out;
-  trunc_params_out.kind = compiler::select_trunc_kind(compiler::RangeInterval::whole(true), fb);
+  trunc_params_out.kind = compiler::GateKind::AutoTrunc;
   trunc_params_out.frac_bits = fb;
+  trunc_params_out.range_hint = out_acc;
+  compiler::AbsBound ctx_abs = compiler::abs_from_range(ctx_r, ctx_r.is_signed);
+  ctx_abs.kind = have_qkv_abs ? compiler::RangeKind::Proof : compiler::RangeKind::Hint;
+  compiler::AbsBound w_abs = compiler::abs_from_range(wout_r, true);
+  w_abs.kind = compiler::RangeKind::Proof;
+  compiler::AbsBound out_abs = compiler::matmul_accum_abs(ctx_abs, w_abs, D);
+  trunc_params_out.abs_hint = out_abs;
+  if (out_abs.kind == compiler::RangeKind::Proof) {
+    trunc_params_out.gap_hint = compiler::gap_from_abs(out_abs, fb);
+  }
   std::mt19937_64 rng_out(456);
   auto trunc_out_bundle =
       compiler::lower_truncation_gate(ctx->trunc_ctx->backend(), rng_out, trunc_params_out, Y_share.numel());

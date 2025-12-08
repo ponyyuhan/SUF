@@ -69,9 +69,13 @@ class PhaseExecutor {
     size_t pfss_coeff_jobs = 0;
     size_t pfss_coeff_arith_words = 0;
     size_t pfss_coeff_pred_bits = 0;
+    size_t pfss_coeff_hatx_words = 0;
+    size_t pfss_coeff_hatx_bytes = 0;
     size_t pfss_trunc_jobs = 0;
     size_t pfss_trunc_arith_words = 0;
     size_t pfss_trunc_pred_bits = 0;
+    size_t pfss_trunc_hatx_words = 0;
+    size_t pfss_trunc_hatx_bytes = 0;
   };
 
   // Legacy single-flush path (used by existing callers).
@@ -79,15 +83,15 @@ class PhaseExecutor {
   void flush_phase(int party, proto::PfssBackendBatch& backend, PfssChanT& pfss_ch, net::Chan& net_ch) {
     if (!pfss_coeff_.empty()) {
       pfss_coeff_.flush_and_finalize(party, backend, pfss_ch);
-      pfss_coeff_.clear();
+      if (!keep_batches_) pfss_coeff_.clear();
     }
     if (!pfss_trunc_.empty()) {
       pfss_trunc_.flush_and_finalize(party, backend, pfss_ch);
-      pfss_trunc_.clear();
+      if (!keep_batches_) pfss_trunc_.clear();
     }
     if (!opens_.empty()) {
       opens_.flush(party, net_ch);
-      opens_.clear();
+      if (!keep_batches_) opens_.clear();
     }
   }
 
@@ -148,14 +152,65 @@ class PhaseExecutor {
         if (need == detail::Need::None) progressed = true;
       }
       if (!any_not_done) break;
-      if (want_open && R.opens && R.net_chan && R.opens->has_pending()) {
+
+      auto do_flush_open = [&]() -> bool {
+        if (!R.opens || !R.net_chan || !R.opens->has_pending()) return false;
         if (flush_guard + 1 > max_flushes_) {
           throw std::runtime_error("PhaseExecutor: open flush budget exceeded");
         }
         R.opens->flush(R.party, *R.net_chan);
         flush_guard++;
-        progressed = true;
+        return true;
+      };
+      auto do_flush_pfss = [&](PfssSuperBatch* b) -> bool {
+        if (!b || !R.pfss_backend || !R.pfss_chan) return false;
+        bool did = false;
+        if (b->has_pending()) {
+          if (flush_guard + 1 > max_flushes_) {
+            throw std::runtime_error("PhaseExecutor: PFSS flush budget exceeded");
+          }
+          b->flush_eval(R.party, *R.pfss_backend, *R.pfss_chan);
+          flush_guard++;
+          did = true;
+        }
+        if (b->has_flushed()) {
+          if (flush_guard + 1 > max_flushes_) {
+            throw std::runtime_error("PhaseExecutor: PFSS finalize budget exceeded");
+          }
+          b->finalize_all(R.party, *R.pfss_chan);
+          flush_guard++;
+          did = true;
+        }
+        return did;
+      };
+
+      bool budget_open = R.opens &&
+                         lazy_limits_.open_pending_words > 0 &&
+                         R.opens->pending_words() >= lazy_limits_.open_pending_words;
+      auto coeff_stats = pfss_coeff_.stats();
+      auto trunc_stats = pfss_trunc_.stats();
+      bool budget_coeff = lazy_limits_.coeff_pending_jobs > 0 &&
+                          coeff_stats.pending_jobs >= lazy_limits_.coeff_pending_jobs;
+      bool budget_trunc = lazy_limits_.trunc_pending_jobs > 0 &&
+                          trunc_stats.pending_jobs >= lazy_limits_.trunc_pending_jobs;
+      bool budget_hatx = lazy_limits_.hatx_pending_words > 0 &&
+                         coeff_stats.pending_hatx >= lazy_limits_.hatx_pending_words;
+
+      if (progressed) {
+        if (budget_open) {
+          do_flush_open();
+        } else if (budget_coeff || budget_hatx) {
+          do_flush_pfss(&pfss_coeff_);
+        } else if (budget_trunc) {
+          do_flush_pfss(&pfss_trunc_);
+        }
+        continue;
       }
+
+      // Deadlock handling: nothing progressed; force flushes on demand.
+      if (want_open && do_flush_open()) continue;
+      if (want_pfss_coeff && do_flush_pfss(&pfss_coeff_)) continue;
+      if (want_pfss_trunc && do_flush_pfss(&pfss_trunc_)) continue;
       if (R.pfss_planner && (want_pfss_coeff || want_pfss_trunc)) {
         if (!R.pfss_backend || !R.pfss_chan) {
           throw std::runtime_error("PhaseExecutor: PFSS planner missing backend/channel");
@@ -169,50 +224,9 @@ class PhaseExecutor {
         R.pfss_planner->finalize_phase(R.party, *R.pfss_backend, *R.pfss_chan);
         flush_guard++;
         planner_flushed = true;
-        progressed = true;
         continue;
       }
-      if (want_pfss_coeff && R.pfss_coeff && R.pfss_backend && R.pfss_chan &&
-          (R.pfss_coeff->has_pending() || R.pfss_coeff->has_flushed())) {
-        if (R.pfss_coeff->has_pending()) {
-          if (flush_guard + 1 > max_flushes_) {
-            throw std::runtime_error("PhaseExecutor: coeff flush budget exceeded");
-          }
-          R.pfss_coeff->flush_eval(R.party, *R.pfss_backend, *R.pfss_chan);
-          flush_guard++;
-          progressed = true;
-        }
-        if (R.pfss_coeff->has_flushed()) {
-          if (flush_guard + 1 > max_flushes_) {
-            throw std::runtime_error("PhaseExecutor: coeff finalize budget exceeded");
-          }
-          R.pfss_coeff->finalize_all(R.party, *R.pfss_chan);
-          flush_guard++;
-          progressed = true;
-        }
-      }
-      if (want_pfss_trunc && R.pfss_trunc && R.pfss_backend && R.pfss_chan &&
-          (R.pfss_trunc->has_pending() || R.pfss_trunc->has_flushed())) {
-        if (R.pfss_trunc->has_pending()) {
-          if (flush_guard + 1 > max_flushes_) {
-            throw std::runtime_error("PhaseExecutor: trunc flush budget exceeded");
-          }
-          R.pfss_trunc->flush_eval(R.party, *R.pfss_backend, *R.pfss_chan);
-          flush_guard++;
-          progressed = true;
-        }
-        if (R.pfss_trunc->has_flushed()) {
-          if (flush_guard + 1 > max_flushes_) {
-            throw std::runtime_error("PhaseExecutor: trunc finalize budget exceeded");
-          }
-          R.pfss_trunc->finalize_all(R.party, *R.pfss_chan);
-          flush_guard++;
-          progressed = true;
-        }
-      }
-      if (!progressed) {
-        throw std::runtime_error("PhaseExecutor deadlock: tasks waiting but no pending flush");
-      }
+      throw std::runtime_error("PhaseExecutor deadlock: tasks waiting but no pending flush");
     }
     const auto& os = opens_.stats();
     stats_.open_flushes = os.flushes;
@@ -223,15 +237,21 @@ class PhaseExecutor {
     stats_.pfss_coeff_jobs = pcs.jobs;
     stats_.pfss_coeff_arith_words = pcs.arith_words;
     stats_.pfss_coeff_pred_bits = pcs.pred_bits;
+    stats_.pfss_coeff_hatx_words = pcs.hatx_words;
+    stats_.pfss_coeff_hatx_bytes = pcs.hatx_bytes;
     stats_.pfss_trunc_flushes = pts.flushes;
     stats_.pfss_trunc_jobs = pts.jobs;
     stats_.pfss_trunc_arith_words = pts.arith_words;
     stats_.pfss_trunc_pred_bits = pts.pred_bits;
+    stats_.pfss_trunc_hatx_words = pts.hatx_words;
+    stats_.pfss_trunc_hatx_bytes = pts.hatx_bytes;
 
-    // Clear batches/opens for next phase; stats already recorded.
-    pfss_coeff_.clear();
-    pfss_trunc_.clear();
-    opens_.clear();
+    // Clear batches/opens for next phase unless caller wants to keep them alive across phases.
+    if (!keep_batches_) {
+      pfss_coeff_.clear();
+      pfss_trunc_.clear();
+      opens_.clear();
+    }
   }
 
  private:
@@ -323,10 +343,14 @@ class PhaseExecutor {
     stats_.pfss_coeff_jobs = pcs.jobs;
     stats_.pfss_coeff_arith_words = pcs.arith_words;
     stats_.pfss_coeff_pred_bits = pcs.pred_bits;
+    stats_.pfss_coeff_hatx_words = pcs.hatx_words;
+    stats_.pfss_coeff_hatx_bytes = pcs.hatx_bytes;
     stats_.pfss_trunc_flushes = pts.flushes;
     stats_.pfss_trunc_jobs = pts.jobs;
     stats_.pfss_trunc_arith_words = pts.arith_words;
     stats_.pfss_trunc_pred_bits = pts.pred_bits;
+    stats_.pfss_trunc_hatx_words = pts.hatx_words;
+    stats_.pfss_trunc_hatx_bytes = pts.hatx_bytes;
 
     if (!keep_batches_) {
       pfss_coeff_.clear();

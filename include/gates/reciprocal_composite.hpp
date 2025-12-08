@@ -54,7 +54,8 @@ inline RecipTaskMaterial dealer_make_recip_task_material(proto::PfssBackendBatch
                                                          int nr_iters,
                                                          std::mt19937_64& rng,
                                                          size_t batch_N = 1) {
-  auto spec = make_recip_affine_init_spec(frac_bits, /*nmax=*/1024.0);
+  double nmax = 1024.0;
+  auto spec = make_recip_affine_init_spec(frac_bits, nmax);
   auto suf_gate = suf::build_silu_suf_from_piecewise(spec);
   std::vector<uint64_t> r_out(static_cast<size_t>(suf_gate.r_out), 0ull);
   auto kp = gates::composite_gen_backend_with_masks(
@@ -65,9 +66,13 @@ inline RecipTaskMaterial dealer_make_recip_task_material(proto::PfssBackendBatch
   compiler::GateParams p;
   p.kind = compiler::GateKind::AutoTrunc;  // recip input is positive and bounded
   p.frac_bits = frac_bits;
-  p.range_hint = compiler::RangeInterval{0,
-                                         static_cast<int64_t>(1ll << (2 * frac_bits)),
-                                         true};
+  int64_t recip_hi = static_cast<int64_t>(1ll << frac_bits);
+  int64_t recip_lo = static_cast<int64_t>(
+      std::llround((1.0 / std::max(nmax, 1.0)) * std::ldexp(1.0, frac_bits)));
+  p.range_hint = compiler::RangeInterval{recip_lo, recip_hi, true};
+  p.abs_hint = compiler::abs_from_range(p.range_hint, /*is_signed=*/true);
+  p.abs_hint.kind = compiler::RangeKind::Proof;
+  p.gap_hint = compiler::gap_from_abs(p.abs_hint, p.frac_bits);
   auto trunc_fb = compiler::lower_truncation_gate(backend, rng, p, batch_N);
 
   // Two muls per NR iter: y*x and y*(2 - xy). Each mul needs a trunc back to Qf.

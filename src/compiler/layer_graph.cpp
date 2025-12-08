@@ -1,6 +1,8 @@
 #include "compiler/layer_graph.hpp"
 
+#include <cmath>
 #include <stdexcept>
+#include <limits>
 
 namespace compiler {
 
@@ -8,6 +10,7 @@ int LayerGraph::add_tensor(const Scale& scale, const RangeInterval& r) {
   TensorFacts t;
   t.scale = scale;
   t.range = r;
+  t.abs = abs_from_range(r, scale.is_signed);
   tensors_.push_back(t);
   return static_cast<int>(tensors_.size() - 1);
 }
@@ -158,77 +161,122 @@ int LayerGraph::add_clamp(int x, const RangeInterval& r, const Scale& out_scale)
 
 void LayerGraph::propagate_ranges() {
   for (const auto& op : ops_) {
-    auto get_range = [&](int tid) -> const RangeInterval& {
+    auto get_tensor = [&](int tid) -> const TensorFacts& {
       if (tid < 0 || static_cast<size_t>(tid) >= tensors_.size()) {
         throw std::runtime_error("propagate_ranges: tensor id out of range");
       }
-      return tensors_[static_cast<size_t>(tid)].range;
+      return tensors_[static_cast<size_t>(tid)];
     };
+    auto set_tensor = [&](int tid,
+                          const RangeInterval& r,
+                          const AbsBound& ab,
+                          std::optional<GapCert> gap = std::nullopt) {
+      if (tid < 0 || static_cast<size_t>(tid) >= tensors_.size()) {
+        throw std::runtime_error("propagate_ranges: tensor id out of range");
+      }
+      auto& t = tensors_[static_cast<size_t>(tid)];
+      t.range = r;
+      t.abs = ab;
+      if (gap && gap->kind == RangeKind::Proof && gap->is_signed) {
+        t.gap = gap;
+      } else if (ab.kind == RangeKind::Proof && ab.is_signed) {
+        t.gap = gap_from_abs(ab, t.scale.frac_bits);
+      } else {
+        t.gap.reset();
+      }
+    };
+
     switch (op.kind) {
       case OpKind::kMatmulBeaver: {
         const auto& attrs = op.matmul;
-        const auto& xr = get_range(op.inputs[0]);
+        const auto& tx = get_tensor(op.inputs[0]);
         RangeInterval acc;
+        AbsBound acc_abs;
         if (attrs.row_l1_max > 0) {
-          acc = propagate_matmul_accum_rowl1(xr, attrs.row_l1_max);
+          acc = propagate_matmul_accum_rowl1(tx.range, attrs.row_l1_max);
+          acc_abs = matmul_rowl1_abs(tx.abs, attrs.row_l1_max);
         } else {
-          acc = propagate_matmul_accum(xr, attrs.w_range, attrs.K);
+          acc = propagate_matmul_accum(tx.range, attrs.w_range, attrs.K);
+          AbsBound w_abs = abs_from_range(attrs.w_range, true);
+          acc_abs = matmul_accum_abs(tx.abs, w_abs, attrs.K);
         }
-        tensors_[static_cast<size_t>(op.outputs[0])].range = acc;
+        set_tensor(op.outputs[0], acc, acc_abs);
         break;
       }
       case OpKind::kAdd: {
-        tensors_[static_cast<size_t>(op.outputs[0])].range =
-            propagate_add(get_range(op.inputs[0]), get_range(op.inputs[1]));
+        auto ra = propagate_add(get_tensor(op.inputs[0]).range, get_tensor(op.inputs[1]).range);
+        auto ab = add_abs(get_tensor(op.inputs[0]).abs, get_tensor(op.inputs[1]).abs);
+        set_tensor(op.outputs[0], ra, ab);
         break;
       }
       case OpKind::kSub: {
-        tensors_[static_cast<size_t>(op.outputs[0])].range =
-            propagate_sub(get_range(op.inputs[0]), get_range(op.inputs[1]));
+        auto ra = propagate_sub(get_tensor(op.inputs[0]).range, get_tensor(op.inputs[1]).range);
+        auto ab = sub_abs(get_tensor(op.inputs[0]).abs, get_tensor(op.inputs[1]).abs);
+        set_tensor(op.outputs[0], ra, ab);
         break;
       }
       case OpKind::kMulConst: {
-        tensors_[static_cast<size_t>(op.outputs[0])].range =
-            propagate_mul_const(get_range(op.inputs[0]), op.scalar, op.frac_bits);
+        auto ra = propagate_mul_const(get_tensor(op.inputs[0]).range, op.scalar, op.frac_bits);
+        auto ab = mul_const_abs(get_tensor(op.inputs[0]).abs, op.scalar, op.frac_bits);
+        set_tensor(op.outputs[0], ra, ab);
         break;
       }
       case OpKind::kAxpy: {
-        tensors_[static_cast<size_t>(op.outputs[0])].range =
-            propagate_axpy(get_range(op.inputs[0]), get_range(op.inputs[1]), op.scalar,
+        auto ra = propagate_axpy(get_tensor(op.inputs[0]).range,
+                                 get_tensor(op.inputs[1]).range,
+                                 op.scalar,
+                                 op.frac_bits);
+        auto ab = axpy_abs(get_tensor(op.inputs[0]).abs,
+                           get_tensor(op.inputs[1]).abs,
+                           op.scalar,
                            op.frac_bits);
+        set_tensor(op.outputs[0], ra, ab);
         break;
       }
       case OpKind::kHadamard: {
-        RangeInterval prod = mul_range(get_range(op.inputs[0]), get_range(op.inputs[1]));
-        tensors_[static_cast<size_t>(op.outputs[0])].range = shift_down(prod, op.frac_bits);
+        RangeInterval prod = mul_range(get_tensor(op.inputs[0]).range, get_tensor(op.inputs[1]).range);
+        RangeInterval ra = shift_down(prod, op.frac_bits);
+        auto ab = hadamard_abs(get_tensor(op.inputs[0]).abs, get_tensor(op.inputs[1]).abs, op.frac_bits);
+        set_tensor(op.outputs[0], ra, ab);
         break;
       }
       case OpKind::kRescale: {
-        // Conservatively shift-down by the producing matmul's frac bits if present,
-        // otherwise assume frac_bits stored on input scale.
-        RangeInterval r = get_range(op.inputs[0]);
+        RangeInterval r = get_tensor(op.inputs[0]).range;
         int shift = (op.rescale.from_frac - op.rescale.to_frac);
-        tensors_[static_cast<size_t>(op.outputs[0])].range = shift_down(r, shift);
+        RangeInterval ra = shift_down(r, shift);
+        AbsBound ab = shift_down_abs(get_tensor(op.inputs[0]).abs, shift);
+        set_tensor(op.outputs[0], ra, ab);
         break;
       }
       case OpKind::kMean: {
-        RangeInterval xr = get_range(op.inputs[0]);
-        // Mean reduces magnitude by ~length; use shift_down by ceil(log2(length)).
+        RangeInterval xr = get_tensor(op.inputs[0]).range;
         int sh = 0;
         int len = std::max(op.length, 1);
         while ((1 << sh) < len && sh < 30) ++sh;
-        tensors_[static_cast<size_t>(op.outputs[0])].range = shift_down(xr, sh);
+        RangeInterval ra = shift_down(xr, sh);
+        AbsBound ab = shift_down_abs(get_tensor(op.inputs[0]).abs, sh);
+        if (get_tensor(op.inputs[0]).abs.kind == RangeKind::Proof) ab.kind = RangeKind::Proof;
+        set_tensor(op.outputs[0], ra, ab);
         break;
       }
       case OpKind::kVar: {
-        RangeInterval xr = get_range(op.inputs[0]);
-        RangeInterval mr = get_range(op.inputs[1]);
+        RangeInterval xr = get_tensor(op.inputs[0]).range;
+        RangeInterval mr = get_tensor(op.inputs[1]).range;
         RangeInterval diff = propagate_sub(xr, mr);
         RangeInterval sq = propagate_mul(diff, diff, op.frac_bits);
         int sh = 0;
         int len = std::max(op.length, 1);
         while ((1 << sh) < len && sh < 30) ++sh;
-        tensors_[static_cast<size_t>(op.outputs[0])].range = shift_down(sq, sh);
+        RangeInterval ra = shift_down(sq, sh);
+
+        AbsBound ax = get_tensor(op.inputs[0]).abs;
+        AbsBound am = get_tensor(op.inputs[1]).abs;
+        AbsBound diff_abs = add_abs(ax, am);
+        uint64_t sq_abs = sat_mul_u64(diff_abs.max_abs, diff_abs.max_abs);
+        AbsBound sq_b{true, ceil_div_pow2(sq_abs, op.frac_bits),
+                      (diff_abs.kind == RangeKind::Proof) ? RangeKind::Proof : RangeKind::Hint};
+        AbsBound ab = shift_down_abs(sq_b, sh);
+        set_tensor(op.outputs[0], ra, ab, gap_from_abs(ab, op.frac_bits));
         break;
       }
       case OpKind::kRsqrt: {
@@ -236,26 +284,30 @@ void LayerGraph::propagate_ranges() {
         r.is_signed = true;
         r.lo = 0;
         r.hi = static_cast<int64_t>(1ll << op.frac_bits);
-        tensors_[static_cast<size_t>(op.outputs[0])].range = r;
-        tensors_[static_cast<size_t>(op.outputs[0])].gap_cert = has_gap_cert(r);
+        AbsBound ab;
+        ab.is_signed = true;
+        ab.max_abs = static_cast<uint64_t>(1ull << op.frac_bits);
+        ab.kind = RangeKind::Proof;
+        set_tensor(op.outputs[0], r, ab, gap_from_abs(ab, op.frac_bits));
         break;
       }
       case OpKind::kAffine: {
-        // LayerNorm affine output is bounded; clamp to roughly [-8, 8] in Qf.
         int64_t bound = static_cast<int64_t>(8ll << op.frac_bits);
-        RangeInterval r;
-        r.is_signed = true;
-        r.lo = -bound;
-        r.hi = bound;
-        tensors_[static_cast<size_t>(op.outputs[0])].range =
-            clamp_range(get_range(op.inputs[0]), r.lo, r.hi, r.is_signed);
-        tensors_[static_cast<size_t>(op.outputs[0])].gap_cert =
-            has_gap_cert(tensors_[static_cast<size_t>(op.outputs[0])].range);
+        RangeInterval clamp_r;
+        clamp_r.is_signed = true;
+        clamp_r.lo = -bound;
+        clamp_r.hi = bound;
+        RangeInterval ra =
+            clamp_range(get_tensor(op.inputs[0]).range, clamp_r.lo, clamp_r.hi, clamp_r.is_signed);
+        AbsBound ab;
+        ab.is_signed = true;
+        ab.max_abs = static_cast<uint64_t>(bound);
+        ab.kind = RangeKind::Proof;
+        set_tensor(op.outputs[0], ra, ab, gap_from_abs(ab, op.frac_bits));
         break;
       }
       case OpKind::kBiasAdd: {
-        // Bias is public in Qf. Bound output by adding max_abs bias to input range.
-        RangeInterval xr = get_range(op.inputs[0]);
+        RangeInterval xr = get_tensor(op.inputs[0]).range;
         RangeInterval br;
         br.is_signed = true;
         if (!op.bias.empty()) {
@@ -271,26 +323,30 @@ void LayerGraph::propagate_ranges() {
         } else {
           br.lo = br.hi = 0;
         }
-        tensors_[static_cast<size_t>(op.outputs[0])].range = add_range(xr, br);
-        tensors_[static_cast<size_t>(op.outputs[0])].gap_cert =
-            has_gap_cert(tensors_[static_cast<size_t>(op.outputs[0])].range);
+        RangeInterval ra = add_range(xr, br);
+        uint64_t bias_abs = static_cast<uint64_t>(std::max(std::abs(br.lo), std::abs(br.hi)));
+        AbsBound bias_b{true, bias_abs, RangeKind::Proof};
+        AbsBound ab = add_abs(get_tensor(op.inputs[0]).abs, bias_b);
+        set_tensor(op.outputs[0], ra, ab, gap_from_abs(ab, tensors_[static_cast<size_t>(op.outputs[0])].scale.frac_bits));
         break;
       }
       case OpKind::kClamp: {
-        tensors_[static_cast<size_t>(op.outputs[0])].range =
-            clamp_range(get_range(op.inputs[0]), op.clamp_range.lo, op.clamp_range.hi,
+        RangeInterval ra =
+            clamp_range(get_tensor(op.inputs[0]).range, op.clamp_range.lo, op.clamp_range.hi,
                         op.clamp_range.is_signed);
-        tensors_[static_cast<size_t>(op.outputs[0])].gap_cert =
-            has_gap_cert(tensors_[static_cast<size_t>(op.outputs[0])].range);
+        uint64_t max_abs = static_cast<uint64_t>(std::max(std::abs(op.clamp_range.lo),
+                                                          std::abs(op.clamp_range.hi)));
+        AbsBound ab;
+        ab.is_signed = op.clamp_range.is_signed;
+        ab.max_abs = max_abs;
+        ab.kind = RangeKind::Proof;
+        set_tensor(op.outputs[0], ra, ab, gap_from_abs(ab, op.outputs.empty()
+                                                           ? 0
+                                                           : tensors_[static_cast<size_t>(op.outputs[0])].scale.frac_bits));
         break;
       }
       default:
         break;
-    }
-    // After each assignment, refresh gap certificate.
-    for (int out : op.outputs) {
-      if (out < 0 || static_cast<size_t>(out) >= tensors_.size()) continue;
-      tensors_[static_cast<size_t>(out)].gap_cert = has_gap_cert(tensors_[static_cast<size_t>(out)].range);
     }
   }
 }
@@ -307,6 +363,13 @@ void LayerGraph::hoist_rescales() {
       }
     }
     return prod;
+  };
+  auto has_gap = [&](int tid) -> bool {
+    if (tid < 0 || static_cast<size_t>(tid) >= tensors_.size()) return false;
+    const auto& t = tensors_[static_cast<size_t>(tid)];
+    if (t.gap && can_gapars(*t.gap)) return true;
+    auto g = gap_from_abs(t.abs, t.scale.frac_bits);
+    return g && can_gapars(*g);
   };
   std::vector<int> producer = rebuild_producer();
 
@@ -360,8 +423,7 @@ void LayerGraph::hoist_rescales() {
     const auto& ar = a_prod.rescale;
     const auto& br = b_prod.rescale;
     bool same_shift = (ar.from_frac == br.from_frac) && (ar.to_frac == br.to_frac);
-    bool gap_ok = tensors_[static_cast<size_t>(a_prod.outputs[0])].gap_cert &&
-                  tensors_[static_cast<size_t>(b_prod.outputs[0])].gap_cert;
+    bool gap_ok = has_gap(a_prod.outputs[0]) && has_gap(b_prod.outputs[0]);
     bool same_sign = (tensors_[static_cast<size_t>(a_prod.outputs[0])].scale.is_signed ==
                       tensors_[static_cast<size_t>(b_prod.outputs[0])].scale.is_signed);
     if (!same_shift || (!same_sign && !gap_ok)) continue;
@@ -385,6 +447,25 @@ void LayerGraph::hoist_rescales() {
                           : (op.kind == OpKind::kAxpy) ? axpy_range(ra, rb, op.scalar, op.frac_bits)
                                                        : add_range(ra, rb);
     tensors_[static_cast<size_t>(op.outputs[0])].range = sum_range;
+    // Refresh abs bound after rewriting inputs.
+    if (op.kind == OpKind::kAdd) {
+      tensors_[static_cast<size_t>(op.outputs[0])].abs =
+          add_abs(tensors_[static_cast<size_t>(op.inputs[0])].abs,
+                  tensors_[static_cast<size_t>(op.inputs[1])].abs);
+    } else if (op.kind == OpKind::kSub) {
+      tensors_[static_cast<size_t>(op.outputs[0])].abs =
+          sub_abs(tensors_[static_cast<size_t>(op.inputs[0])].abs,
+                  tensors_[static_cast<size_t>(op.inputs[1])].abs);
+    } else if (op.kind == OpKind::kAxpy) {
+      tensors_[static_cast<size_t>(op.outputs[0])].abs =
+          axpy_abs(tensors_[static_cast<size_t>(op.inputs[0])].abs,
+                   tensors_[static_cast<size_t>(op.inputs[1])].abs,
+                   op.scalar,
+                   op.frac_bits);
+    } else {
+      tensors_[static_cast<size_t>(op.outputs[0])].abs =
+          abs_from_range(sum_range, tensors_[static_cast<size_t>(op.outputs[0])].scale.is_signed);
+    }
 
     // Insert a new rescale op after the add/sub to restore expected frac_bits.
     OpNode new_rescale;
@@ -399,18 +480,21 @@ void LayerGraph::hoist_rescales() {
     ops_.push_back(new_rescale);
     // Redirect the original consumer output to the new rescale output.
     op.outputs[0] = new_rescale.outputs[0];
-    // Update gap certificate metadata after reshaping ranges.
-    tensors_[static_cast<size_t>(op.outputs[0])].gap_cert =
-        has_gap_cert(tensors_[static_cast<size_t>(op.outputs[0])].range);
-    tensors_[static_cast<size_t>(new_rescale.outputs[0])].gap_cert =
-        has_gap_cert(tensors_[static_cast<size_t>(new_rescale.outputs[0])].range);
+    tensors_[static_cast<size_t>(op.outputs[0])].abs =
+        abs_from_range(tensors_[static_cast<size_t>(op.outputs[0])].range,
+                       tensors_[static_cast<size_t>(op.outputs[0])].scale.is_signed);
+    tensors_[static_cast<size_t>(new_rescale.outputs[0])].abs =
+        abs_from_range(tensors_[static_cast<size_t>(new_rescale.outputs[0])].range,
+                       tensors_[static_cast<size_t>(new_rescale.outputs[0])].scale.is_signed);
     // Producer map is now stale; rebuild to keep further hoists consistent.
     producer = rebuild_producer();
   }
 
   // Hoist identical rescales over Hadamard mul when both inputs have the same rescale.
   for (auto& op : ops_) {
-    if (op.kind != OpKind::kHadamard) continue;
+    bool is_mul = (op.kind == OpKind::kHadamard);
+    bool is_axpy_like = (op.kind == OpKind::kAxpy);
+    if (!is_mul && !is_axpy_like) continue;
     if (op.inputs.size() != 2) continue;
     int a_tid = op.inputs[0];
     int b_tid = op.inputs[1];
@@ -426,8 +510,7 @@ void LayerGraph::hoist_rescales() {
     const auto& ar = a_prod.rescale;
     const auto& br = b_prod.rescale;
     bool same_shift = (ar.from_frac == br.from_frac) && (ar.to_frac == br.to_frac);
-    bool gap_ok = tensors_[static_cast<size_t>(a_prod.outputs[0])].gap_cert &&
-                  tensors_[static_cast<size_t>(b_prod.outputs[0])].gap_cert;
+    bool gap_ok = has_gap(a_prod.outputs[0]) && has_gap(b_prod.outputs[0]);
     bool same_sign = (tensors_[static_cast<size_t>(a_prod.outputs[0])].scale.is_signed ==
                       tensors_[static_cast<size_t>(b_prod.outputs[0])].scale.is_signed);
     if (!same_shift || (!same_sign && !gap_ok)) continue;
@@ -440,7 +523,7 @@ void LayerGraph::hoist_rescales() {
     tensors_[static_cast<size_t>(op.outputs[0])].scale.frac_bits = from_frac;
     tensors_[static_cast<size_t>(op.outputs[0])].scale.is_signed =
         tensors_[static_cast<size_t>(a_prod.inputs[0])].scale.is_signed ||
-        tensors_[static_cast<size_t>(b_prod.inputs[0])].scale.is_signed;
+        tensors_[static_cast<size_t>(b_prod.inputs[0])].scale.is_signed || gap_ok;
     RangeInterval ra = tensors_[static_cast<size_t>(op.inputs[0])].range;
     RangeInterval rb = tensors_[static_cast<size_t>(op.inputs[1])].range;
     RangeInterval prod = mul_range(ra, rb);
@@ -457,10 +540,12 @@ void LayerGraph::hoist_rescales() {
     new_rescale.rescale.prefer_gapars = ar.prefer_gapars || br.prefer_gapars || gap_ok;
     ops_.push_back(new_rescale);
     op.outputs[0] = new_rescale.outputs[0];
-    tensors_[static_cast<size_t>(op.outputs[0])].gap_cert =
-        has_gap_cert(tensors_[static_cast<size_t>(op.outputs[0])].range);
-    tensors_[static_cast<size_t>(new_rescale.outputs[0])].gap_cert =
-        has_gap_cert(tensors_[static_cast<size_t>(new_rescale.outputs[0])].range);
+    tensors_[static_cast<size_t>(op.outputs[0])].abs =
+        abs_from_range(tensors_[static_cast<size_t>(op.outputs[0])].range,
+                       tensors_[static_cast<size_t>(op.outputs[0])].scale.is_signed);
+    tensors_[static_cast<size_t>(new_rescale.outputs[0])].abs =
+        abs_from_range(tensors_[static_cast<size_t>(new_rescale.outputs[0])].range,
+                       tensors_[static_cast<size_t>(new_rescale.outputs[0])].scale.is_signed);
     producer = rebuild_producer();
   }
 
@@ -476,7 +561,7 @@ void LayerGraph::hoist_rescales() {
     if (x_prod.kind != OpKind::kRescale) continue;
     bool same_sign = (tensors_[static_cast<size_t>(x_prod.outputs[0])].scale.is_signed ==
                       tensors_[static_cast<size_t>(op.outputs[0])].scale.is_signed);
-    bool gap_ok = tensors_[static_cast<size_t>(x_prod.outputs[0])].gap_cert;
+    bool gap_ok = has_gap(x_prod.outputs[0]);
     if (!same_sign && !gap_ok) continue;
     int from_frac = x_prod.rescale.from_frac
                         ? x_prod.rescale.from_frac
@@ -484,35 +569,146 @@ void LayerGraph::hoist_rescales() {
     int to_frac = x_prod.rescale.to_frac
                       ? x_prod.rescale.to_frac
                       : tensors_[static_cast<size_t>(op.outputs[0])].scale.frac_bits;
+    // For axpy, require the y input to share the same rescale shift to preserve alignment.
+    int y_prod_idx = -1;
+    bool gap_y_ok = false;
+    if (op.kind == OpKind::kAxpy && op.inputs.size() >= 2) {
+      int y_tid = op.inputs[1];
+      if (y_tid < 0 || static_cast<size_t>(y_tid) >= producer.size()) continue;
+      y_prod_idx = producer[static_cast<size_t>(y_tid)];
+      if (y_prod_idx < 0 || static_cast<size_t>(y_prod_idx) >= ops_.size()) continue;
+      auto& y_prod = ops_[static_cast<size_t>(y_prod_idx)];
+      if (y_prod.kind != OpKind::kRescale) continue;
+      bool same_shift_y = (x_prod.rescale.from_frac == y_prod.rescale.from_frac) &&
+                          (x_prod.rescale.to_frac == y_prod.rescale.to_frac);
+      if (!same_shift_y) continue;
+      gap_y_ok = has_gap(y_prod.outputs[0]);
+    }
     // Move rescale after mul_const/axpy when shift matches target scale.
     op.inputs[0] = x_prod.inputs[0];
     tensors_[static_cast<size_t>(op.outputs[0])].scale.frac_bits = from_frac;
     tensors_[static_cast<size_t>(op.outputs[0])].scale.is_signed =
         tensors_[static_cast<size_t>(x_prod.inputs[0])].scale.is_signed || gap_ok;
     RangeInterval xr = tensors_[static_cast<size_t>(op.inputs[0])].range;
-    RangeInterval out_range = (op.kind == OpKind::kMulConst)
-                                  ? mul_const_range(xr, op.scalar, op.frac_bits)
-                                  : axpy_range(xr, tensors_[static_cast<size_t>(op.inputs[1])].range,
-                                               op.scalar, op.frac_bits);
+    RangeInterval out_range = RangeInterval::whole(true);
+    if (op.kind == OpKind::kMulConst) {
+      out_range = mul_const_range(xr, op.scalar, op.frac_bits);
+    } else {
+      if (y_prod_idx < 0) continue;
+      RangeInterval yr = tensors_[static_cast<size_t>(op.inputs[1])].range;
+      out_range = axpy_range(xr, yr, op.scalar, op.frac_bits);
+    }
     tensors_[static_cast<size_t>(op.outputs[0])].range = out_range;
+    // Preserve tighter abs bound when moving the rescale.
+    if (op.kind == OpKind::kMulConst) {
+      tensors_[static_cast<size_t>(op.outputs[0])].abs =
+          mul_const_abs(tensors_[static_cast<size_t>(op.inputs[0])].abs, op.scalar, op.frac_bits);
+    } else {
+      tensors_[static_cast<size_t>(op.outputs[0])].abs =
+          axpy_abs(tensors_[static_cast<size_t>(op.inputs[0])].abs,
+                   tensors_[static_cast<size_t>(op.inputs[1])].abs,
+                   op.scalar,
+                   op.frac_bits);
+    }
     // Insert trailing rescale.
     OpNode new_rescale;
     new_rescale.kind = OpKind::kRescale;
     new_rescale.inputs = {op.outputs[0]};
-    new_rescale.outputs = {add_tensor(tensors_[static_cast<size_t>(op.outputs[0])].scale,
-                                      shift_down(out_range, from_frac - to_frac))};
+      new_rescale.outputs = {add_tensor(tensors_[static_cast<size_t>(op.outputs[0])].scale,
+                                        shift_down(out_range, from_frac - to_frac))};
     new_rescale.rescale.from_frac = from_frac;
     new_rescale.rescale.to_frac = to_frac;
     new_rescale.rescale.signed_ars = x_prod.rescale.signed_ars;
     new_rescale.rescale.prefer_gapars =
-        x_prod.rescale.prefer_gapars || tensors_[static_cast<size_t>(op.outputs[0])].gap_cert ||
-        has_gap_cert(out_range);
+        x_prod.rescale.prefer_gapars || gap_ok || gap_y_ok;
     ops_.push_back(new_rescale);
     op.outputs[0] = new_rescale.outputs[0];
-    tensors_[static_cast<size_t>(op.outputs[0])].gap_cert =
-        has_gap_cert(tensors_[static_cast<size_t>(op.outputs[0])].range);
-    tensors_[static_cast<size_t>(new_rescale.outputs[0])].gap_cert =
-        has_gap_cert(tensors_[static_cast<size_t>(new_rescale.outputs[0])].range);
+    tensors_[static_cast<size_t>(op.outputs[0])].abs =
+        abs_from_range(tensors_[static_cast<size_t>(op.outputs[0])].range,
+                       tensors_[static_cast<size_t>(op.outputs[0])].scale.is_signed);
+    tensors_[static_cast<size_t>(new_rescale.outputs[0])].abs =
+        abs_from_range(tensors_[static_cast<size_t>(new_rescale.outputs[0])].range,
+                       tensors_[static_cast<size_t>(new_rescale.outputs[0])].scale.is_signed);
+    producer = rebuild_producer();
+  }
+
+  // Hoist a rescale past BiasAdd when the bias can be safely upscaled to the
+  // parent precision. This keeps the bias/public weights in the higher-precision
+  // domain and lets downstream truncation reuse the shared rescale.
+  for (auto& op : ops_) {
+    if (op.kind != OpKind::kBiasAdd) continue;
+    if (op.inputs.size() != 1) continue;
+    int x_tid = op.inputs[0];
+    if (x_tid < 0 || static_cast<size_t>(x_tid) >= producer.size()) continue;
+    int x_prod_idx = producer[static_cast<size_t>(x_tid)];
+    if (x_prod_idx < 0 || static_cast<size_t>(x_prod_idx) >= ops_.size()) continue;
+    auto& parent = ops_[static_cast<size_t>(x_prod_idx)];
+    if (parent.kind != OpKind::kRescale) continue;
+    int from_frac = parent.rescale.from_frac
+                        ? parent.rescale.from_frac
+                        : tensors_[static_cast<size_t>(parent.inputs[0])].scale.frac_bits;
+    int to_frac = parent.rescale.to_frac
+                      ? parent.rescale.to_frac
+                      : tensors_[static_cast<size_t>(op.outputs[0])].scale.frac_bits;
+    if (from_frac <= to_frac) continue;  // only down-scaling rescale can be hoisted
+    int shift = from_frac - to_frac;
+    std::vector<int64_t> bias_up(op.bias.size(), 0);
+    bool overflow = false;
+    for (size_t i = 0; i < op.bias.size(); ++i) {
+      __int128 v = static_cast<__int128>(op.bias[i]) << shift;
+      if (v > static_cast<__int128>(std::numeric_limits<int64_t>::max()) ||
+          v < static_cast<__int128>(std::numeric_limits<int64_t>::min())) {
+        overflow = true;
+        break;
+      }
+      bias_up[i] = static_cast<int64_t>(v);
+    }
+    if (overflow) continue;
+
+    op.bias.swap(bias_up);
+    op.inputs[0] = parent.inputs[0];
+    auto& out_t = tensors_[static_cast<size_t>(op.outputs[0])];
+    out_t.scale.frac_bits = from_frac;
+    out_t.scale.is_signed = true;
+    RangeInterval xr = tensors_[static_cast<size_t>(op.inputs[0])].range;
+    RangeInterval br;
+    br.is_signed = true;
+    if (!op.bias.empty()) {
+      br.lo = br.hi = op.bias[0];
+      for (size_t i = 1; i < op.bias.size(); ++i) {
+        int64_t v = op.bias[i];
+        if (v < br.lo) br.lo = v;
+        if (v > br.hi) br.hi = v;
+      }
+    } else {
+      br.lo = br.hi = 0;
+    }
+    RangeInterval out_r = add_range(xr, br);
+    out_t.range = out_r;
+    uint64_t bias_abs = static_cast<uint64_t>(std::max(std::abs(br.lo), std::abs(br.hi)));
+    AbsBound bias_b{true, bias_abs, RangeKind::Proof};
+    out_t.abs = add_abs(tensors_[static_cast<size_t>(op.inputs[0])].abs, bias_b);
+    out_t.gap = gap_from_abs(out_t.abs, from_frac);
+
+    OpNode new_rescale;
+    new_rescale.kind = OpKind::kRescale;
+    new_rescale.inputs = {op.outputs[0]};
+    Scale final_scale = out_t.scale;
+    final_scale.frac_bits = to_frac;
+    new_rescale.outputs = {add_tensor(final_scale, shift_down(out_r, shift))};
+    new_rescale.rescale.from_frac = from_frac;
+    new_rescale.rescale.to_frac = to_frac;
+    new_rescale.rescale.signed_ars = parent.rescale.signed_ars;
+    bool gap_ok = has_gap(parent.outputs[0]) || has_gap(op.outputs[0]);
+    new_rescale.rescale.prefer_gapars = parent.rescale.prefer_gapars || gap_ok;
+    ops_.push_back(new_rescale);
+    op.outputs[0] = new_rescale.outputs[0];
+    tensors_[static_cast<size_t>(op.outputs[0])].abs =
+        abs_from_range(tensors_[static_cast<size_t>(op.outputs[0])].range,
+                       tensors_[static_cast<size_t>(op.outputs[0])].scale.is_signed);
+    tensors_[static_cast<size_t>(new_rescale.outputs[0])].abs =
+        abs_from_range(tensors_[static_cast<size_t>(new_rescale.outputs[0])].range,
+                       tensors_[static_cast<size_t>(new_rescale.outputs[0])].scale.is_signed);
     producer = rebuild_producer();
   }
 
@@ -527,7 +723,7 @@ void LayerGraph::hoist_rescales() {
     auto& parent = ops_[static_cast<size_t>(prod_idx)];
     if (parent.kind != OpKind::kRescale) continue;
     const auto& pr = parent.rescale;
-    bool gap_ok = tensors_[static_cast<size_t>(parent.outputs[0])].gap_cert;
+    bool gap_ok = has_gap(parent.outputs[0]);
     bool same_sign = (tensors_[static_cast<size_t>(parent.outputs[0])].scale.is_signed ==
                       tensors_[static_cast<size_t>(parent.inputs[0])].scale.is_signed);
     if (!same_sign && !gap_ok) continue;
@@ -554,10 +750,12 @@ void LayerGraph::hoist_rescales() {
     new_rescale.rescale.prefer_gapars = pr.prefer_gapars || gap_ok;
     ops_.push_back(new_rescale);
     op.outputs[0] = new_rescale.outputs[0];
-    tensors_[static_cast<size_t>(op.outputs[0])].gap_cert =
-        has_gap_cert(tensors_[static_cast<size_t>(op.outputs[0])].range);
-    tensors_[static_cast<size_t>(new_rescale.outputs[0])].gap_cert =
-        has_gap_cert(tensors_[static_cast<size_t>(new_rescale.outputs[0])].range);
+    tensors_[static_cast<size_t>(op.outputs[0])].abs =
+        abs_from_range(tensors_[static_cast<size_t>(op.outputs[0])].range,
+                       tensors_[static_cast<size_t>(op.outputs[0])].scale.is_signed);
+    tensors_[static_cast<size_t>(new_rescale.outputs[0])].abs =
+        abs_from_range(tensors_[static_cast<size_t>(new_rescale.outputs[0])].range,
+                       tensors_[static_cast<size_t>(new_rescale.outputs[0])].scale.is_signed);
     producer = rebuild_producer();
   }
 }
@@ -594,7 +792,15 @@ TruncationPassResult LayerGraph::lower_truncations(TruncationPassContext& ctx,
     site.x_range = tensors_[static_cast<size_t>(ops_[op.rescale.matmul_op].inputs[0])].range;
     site.w_range = matmul.w_range;
     site.accum_range = matmul_accum_range(site.x_range, site.w_range, matmul.K);
-    site.prefer_gapars = tensors_[static_cast<size_t>(ops_[op.rescale.matmul_op].inputs[0])].gap_cert;
+    const auto& tin = tensors_[static_cast<size_t>(ops_[op.rescale.matmul_op].inputs[0])];
+    AbsBound w_abs = abs_from_range(site.w_range, true);
+    site.accum_abs = matmul_accum_abs(tin.abs, w_abs, matmul.K);
+    std::optional<GapCert> g = tin.gap;
+    if (!g && tin.abs.kind == RangeKind::Proof && tin.abs.is_signed) {
+      g = gap_from_abs(tin.abs, src_frac);
+    }
+    site.prefer_gapars = g && can_gapars(*g);
+    site.gap_cert = g;
     cfg.matmuls.push_back(site);
   }
   return run_truncation_pass(cfg, ctx);

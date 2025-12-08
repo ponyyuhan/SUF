@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <vector>
 
 #include "compiler/range_propagation.hpp"
@@ -17,6 +18,8 @@ struct MatmulRescaleSite {
   RangeInterval x_range = RangeInterval::whole(true);
   RangeInterval w_range = RangeInterval::whole(true);
   RangeInterval accum_range = RangeInterval::whole(true);
+  AbsBound accum_abs;
+  std::optional<GapCert> gap_cert;
   bool prefer_gapars = false;
 };
 

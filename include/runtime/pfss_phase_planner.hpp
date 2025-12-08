@@ -80,6 +80,8 @@ class PfssLayerPlanner {
     size_t max_trunc_jobs = 1ull << 16;
     size_t max_coeff_hatx_words = 1ull << 23;
     size_t max_trunc_hatx_words = 1ull << 23;
+    size_t max_coeff_hatx_bytes = std::numeric_limits<size_t>::max();
+    size_t max_trunc_hatx_bytes = std::numeric_limits<size_t>::max();
     size_t max_coeff_flushes = 1ull << 10;
     size_t max_trunc_flushes = 1ull << 10;
     size_t max_phases = 1ull << 12;
@@ -91,6 +93,8 @@ class PfssLayerPlanner {
     size_t trunc_jobs = 0;
     size_t coeff_hatx_words = 0;
     size_t trunc_hatx_words = 0;
+    size_t coeff_hatx_bytes = 0;
+    size_t trunc_hatx_bytes = 0;
     size_t coeff_flushes = 0;
     size_t trunc_flushes = 0;
   };
@@ -110,6 +114,8 @@ class PfssLayerPlanner {
     totals_.trunc_jobs += ps.trunc_jobs;
     totals_.coeff_hatx_words += coeff_batch.stats().max_bucket_hatx;
     totals_.trunc_hatx_words += trunc_batch.stats().max_bucket_hatx;
+    totals_.coeff_hatx_bytes += coeff_batch.stats().max_bucket_hatx * sizeof(uint64_t);
+    totals_.trunc_hatx_bytes += trunc_batch.stats().max_bucket_hatx * sizeof(uint64_t);
     totals_.coeff_flushes += ps.coeff_flushes;
     totals_.trunc_flushes += ps.trunc_flushes;
     enforce_limits();
@@ -140,14 +146,19 @@ class PfssLayerPlanner {
     };
     if (policy.drain_all || policy.drain_open) {
       flush_open(opens, net_ch);
+      if (opens) opens->clear();
     }
     if (policy.drain_all || policy.drain_pfss_coeff) {
       flush_pfss(coeff_batch);
+      coeff_batch.clear();
     }
     if (policy.drain_all || policy.drain_pfss_trunc) {
-      if (&trunc_batch != &coeff_batch) flush_pfss(trunc_batch);
+      if (&trunc_batch != &coeff_batch) {
+        flush_pfss(trunc_batch);
+        trunc_batch.clear();
+      }
     }
-    // We do not clear batches here; callers can keep slots alive across phases.
+    // Batches are cleared after draining to avoid stale pending state between phases.
     // Totals will be updated when finalize_layer() is invoked.
   }
 
@@ -205,7 +216,7 @@ class PfssLayerPlanner {
         }
       }
     } else {
-      auto flush_once = [&](PfssSuperBatch& b, size_t& flush_counter, size_t& jobs_counter, size_t& hatx_counter) {
+      auto flush_once = [&](PfssSuperBatch& b, size_t& flush_counter, size_t& jobs_counter, size_t& hatx_counter, size_t& hatx_bytes_counter) {
         if (b.has_pending()) {
           b.flush_eval(party, backend, pfss_ch);
         }
@@ -214,12 +225,13 @@ class PfssLayerPlanner {
         }
         jobs_counter += b.stats().jobs;
         hatx_counter += b.stats().max_bucket_hatx;
+        hatx_bytes_counter += b.stats().max_bucket_hatx * sizeof(uint64_t);
         flush_counter += b.stats().flushes;
         b.clear();
       };
-      flush_once(coeff_batch, totals_.coeff_flushes, totals_.coeff_jobs, totals_.coeff_hatx_words);
+      flush_once(coeff_batch, totals_.coeff_flushes, totals_.coeff_jobs, totals_.coeff_hatx_words, totals_.coeff_hatx_bytes);
       if (&trunc_batch != &coeff_batch) {
-        flush_once(trunc_batch, totals_.trunc_flushes, totals_.trunc_jobs, totals_.trunc_hatx_words);
+        flush_once(trunc_batch, totals_.trunc_flushes, totals_.trunc_jobs, totals_.trunc_hatx_words, totals_.trunc_hatx_bytes);
       }
     }
     enforce_limits();
@@ -236,10 +248,12 @@ class PfssLayerPlanner {
     if (totals_.trunc_jobs > limits_.max_trunc_jobs) {
       throw std::runtime_error("PfssLayerPlanner: trunc job budget exceeded");
     }
-    if (totals_.coeff_hatx_words > limits_.max_coeff_hatx_words) {
+    if (totals_.coeff_hatx_words > limits_.max_coeff_hatx_words ||
+        totals_.coeff_hatx_bytes > limits_.max_coeff_hatx_bytes) {
       throw std::runtime_error("PfssLayerPlanner: coeff hatx budget exceeded");
     }
-    if (totals_.trunc_hatx_words > limits_.max_trunc_hatx_words) {
+    if (totals_.trunc_hatx_words > limits_.max_trunc_hatx_words ||
+        totals_.trunc_hatx_bytes > limits_.max_trunc_hatx_bytes) {
       throw std::runtime_error("PfssLayerPlanner: trunc hatx budget exceeded");
     }
     if (totals_.coeff_flushes > limits_.max_coeff_flushes) {
