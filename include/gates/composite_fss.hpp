@@ -59,6 +59,7 @@
 #include "suf/trunc_suf_builders.hpp"
 #include "suf/ref_eval.hpp"
 #include "suf/validate.hpp"
+#include "proto/packed_backend.hpp"
 
 namespace gates {
 
@@ -90,6 +91,16 @@ struct CompositePartyKey {
   compiler::CompiledSUFGate compiled;  // per-instance compiled new (masked)
 
   // Optional packed predicate key (SigmaFast)
+  struct PackedGroup {
+    proto::FssKey key;
+    compiler::RawPredKind kind = compiler::RawPredKind::kLtU64;
+    uint8_t in_bits = 64;
+    size_t bit_base = 0;
+    size_t num_bits = 0;
+    int out_words = 0;
+  };
+  std::vector<PackedGroup> packed_pred_groups;
+  std::vector<PackedGroup> packed_cut_groups;
   proto::FssKey packed_pred_key;
   bool use_packed_pred = false;
   int packed_pred_words = 0;
@@ -269,24 +280,60 @@ inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t
   }
 
   // Pred keys: payload=1 byte (XOR bit). If backend is SigmaFast, also emit packed key.
-  bool is_sigmafast = (dynamic_cast<proto::SigmaFastBackend*>(&backend) != nullptr);
-  if (is_sigmafast && !compiled.pred.queries.empty()) {
-    auto* sb = dynamic_cast<proto::SigmaFastBackend*>(&backend);
-    std::vector<uint64_t> thrs;
-    for (const auto& q : compiled.pred.queries) thrs.push_back(q.theta);
-    auto kp = sb->gen_packed_lt(compiled.pred.n, thrs);
-    out.k0.packed_pred_key = kp.k0;
-    out.k1.packed_pred_key = kp.k1;
-    out.k0.use_packed_pred = out.k1.use_packed_pred = true;
-    out.k0.packed_pred_words = out.k1.packed_pred_words = static_cast<int>((thrs.size() + 63) / 64);
-    // Packed cutpoints (selector predicates)
-    if (!compiled.coeff.cutpoints_ge.empty()) {
-      auto kp_cut = sb->gen_packed_lt(compiled.coeff.n, compiled.coeff.cutpoints_ge);
-      out.k0.packed_cut_key = kp_cut.k0;
-      out.k1.packed_cut_key = kp_cut.k1;
-      out.k0.use_packed_cut = out.k1.use_packed_cut = true;
-      out.k0.packed_cut_words = out.k1.packed_cut_words = static_cast<int>((compiled.coeff.cutpoints_ge.size() + 63) / 64);
+  auto* packed_backend = dynamic_cast<proto::PackedLtBackend*>(&backend);
+  auto make_groups = [&](const std::vector<compiler::RawPredQuery>& qs,
+                         int in_bits_default,
+                         std::vector<typename CompositePartyKey::PackedGroup>& dst0,
+                         std::vector<typename CompositePartyKey::PackedGroup>& dst1,
+                         int& total_words) {
+    if (!packed_backend || qs.empty()) return;
+    size_t idx = 0;
+    const size_t limit = qs.size();
+    while (idx < limit) {
+      const auto& q = qs[idx];
+      compiler::RawPredKind kind = q.kind;
+      uint8_t bits_in = (q.kind == compiler::RawPredKind::kLtU64) ? static_cast<uint8_t>(in_bits_default) : q.f;
+      size_t start = idx;
+      std::vector<uint64_t> thrs;
+      while (idx < limit && thrs.size() < 64) {
+        const auto& qi = qs[idx];
+        uint8_t qi_bits = (qi.kind == compiler::RawPredKind::kLtU64) ? static_cast<uint8_t>(in_bits_default) : qi.f;
+        if (qi.kind != kind || qi_bits != bits_in) break;
+        thrs.push_back(qi.theta);
+        idx++;
+      }
+      auto kp = packed_backend->gen_packed_lt(static_cast<int>(bits_in), thrs);
+      typename CompositePartyKey::PackedGroup g;
+      g.kind = kind;
+      g.in_bits = bits_in;
+      g.bit_base = start;
+      g.num_bits = thrs.size();
+      g.out_words = static_cast<int>((thrs.size() + 63) / 64);
+      g.key = kp.k0;
+      dst0.push_back(g);
+      g.key = kp.k1;
+      dst1.push_back(g);
     }
+    total_words = static_cast<int>((qs.size() + 63) / 64);
+  };
+  if (packed_backend && !compiled.pred.queries.empty()) {
+    out.k0.use_packed_pred = out.k1.use_packed_pred = true;
+    make_groups(compiled.pred.queries, compiled.pred.n,
+                out.k0.packed_pred_groups, out.k1.packed_pred_groups,
+                out.k0.packed_pred_words);
+    out.k1.packed_pred_words = out.k0.packed_pred_words;
+  }
+  if (packed_backend && !compiled.coeff.cutpoints_ge.empty()) {
+    std::vector<compiler::RawPredQuery> cuts;
+    cuts.reserve(compiled.coeff.cutpoints_ge.size());
+    for (auto c : compiled.coeff.cutpoints_ge) {
+      cuts.push_back(compiler::RawPredQuery{compiler::RawPredKind::kLtU64, static_cast<uint8_t>(compiled.coeff.n), c});
+    }
+    out.k0.use_packed_cut = out.k1.use_packed_cut = true;
+    make_groups(cuts, compiled.coeff.n,
+                out.k0.packed_cut_groups, out.k1.packed_cut_groups,
+                out.k0.packed_cut_words);
+    out.k1.packed_cut_words = out.k0.packed_cut_words;
   }
   for (const auto& q : compiled.pred.queries) {
     uint64_t thr = q.theta;
@@ -468,16 +515,47 @@ inline CompositeKeyPair composite_gen_trunc_gate(proto::PfssBackend& backend,
   out.k0.coeff_meta.sem = proto::ShareSemantics::AddU64;
   out.k1.coeff_meta.sem = proto::ShareSemantics::AddU64;
 
-  bool is_sigmafast = (dynamic_cast<proto::SigmaFastBackend*>(&backend) != nullptr);
-  if (is_sigmafast) {
-    auto* sb = dynamic_cast<proto::SigmaFastBackend*>(&backend);
-    std::vector<uint64_t> thrs;
-    for (const auto& q : compiled.pred.queries) thrs.push_back(q.theta);
-    auto kp = sb->gen_packed_lt(compiled.pred.n, thrs);
-    out.k0.packed_pred_key = kp.k0;
-    out.k1.packed_pred_key = kp.k1;
+  auto* packed_backend2 = dynamic_cast<proto::PackedLtBackend*>(&backend);
+  auto make_groups = [&](const std::vector<compiler::RawPredQuery>& qs,
+                         int in_bits_default,
+                         std::vector<typename CompositePartyKey::PackedGroup>& dst0,
+                         std::vector<typename CompositePartyKey::PackedGroup>& dst1,
+                         int& total_words) {
+    if (!packed_backend2 || qs.empty()) return;
+    size_t idx = 0;
+    while (idx < qs.size()) {
+      const auto& q = qs[idx];
+      compiler::RawPredKind kind = q.kind;
+      uint8_t bits_in = (q.kind == compiler::RawPredKind::kLtU64) ? static_cast<uint8_t>(in_bits_default) : q.f;
+      size_t start = idx;
+      std::vector<uint64_t> thrs;
+      while (idx < qs.size() && thrs.size() < 64) {
+        const auto& qi = qs[idx];
+        uint8_t qi_bits = (qi.kind == compiler::RawPredKind::kLtU64) ? static_cast<uint8_t>(in_bits_default) : qi.f;
+        if (qi.kind != kind || qi_bits != bits_in) break;
+        thrs.push_back(qi.theta);
+        idx++;
+      }
+      auto kp = packed_backend2->gen_packed_lt(static_cast<int>(bits_in), thrs);
+      typename CompositePartyKey::PackedGroup g;
+      g.kind = kind;
+      g.in_bits = bits_in;
+      g.bit_base = start;
+      g.num_bits = thrs.size();
+      g.out_words = static_cast<int>((thrs.size() + 63) / 64);
+      g.key = kp.k0;
+      dst0.push_back(g);
+      g.key = kp.k1;
+      dst1.push_back(g);
+    }
+    total_words = static_cast<int>((qs.size() + 63) / 64);
+  };
+  if (packed_backend2 && !compiled.pred.queries.empty()) {
     out.k0.use_packed_pred = out.k1.use_packed_pred = true;
-    out.k0.packed_pred_words = out.k1.packed_pred_words = static_cast<int>((thrs.size() + 63) / 64);
+    make_groups(compiled.pred.queries, compiled.pred.n,
+                out.k0.packed_pred_groups, out.k1.packed_pred_groups,
+                out.k0.packed_pred_words);
+    out.k1.packed_pred_words = out.k0.packed_pred_words;
   }
   for (const auto& q : compiled.pred.queries) {
     uint64_t thr = q.theta;
@@ -687,74 +765,25 @@ inline std::vector<uint64_t> composite_eval_share_backend(int party,
 
   // Pred bits
   std::vector<uint64_t> bits_xor(compiled.pred.queries.size(), 0);
-  auto* sb = dynamic_cast<proto::SigmaFastBackend*>(&backend);
-  if (sb && k.use_packed_pred && k.packed_pred_words > 0) {
-    size_t key_bytes = k.packed_pred_key.bytes.size();
-    std::vector<uint8_t> keys_flat(key_bytes);
-    std::memcpy(keys_flat.data(), k.packed_pred_key.bytes.data(), key_bytes);
-    std::vector<uint64_t> outs(static_cast<size_t>(k.packed_pred_words), 0);
-    sb->eval_packed_lt_many(key_bytes, keys_flat.data(), std::vector<uint64_t>{hatx},
-                            compiled.pred.n, k.packed_pred_words, outs.data());
-    PredViewPacked pv{outs.data(), static_cast<size_t>(k.packed_pred_words)};
-    auto get_pred = [&](size_t idx) { return pv.get(idx); };
-    // Cut predicates remain scalar bits_xor below; we won't fill bits_xor vector here.
-    // Wrap shares already additive.
-    // Build selectors below uses cut_bits_xor.
-    std::vector<uint64_t> cut_bits_xor(k.cut_pred_keys.size(), 0);
-    if (k.use_packed_cut && k.packed_cut_words > 0) {
-      size_t key_bytes_cut = k.packed_cut_key.bytes.size();
-      std::vector<uint8_t> cut_flat(key_bytes_cut);
-      std::memcpy(cut_flat.data(), k.packed_cut_key.bytes.data(), key_bytes_cut);
-      std::vector<uint64_t> cut_masks(static_cast<size_t>(k.packed_cut_words), 0);
-      sb->eval_packed_lt_many(key_bytes_cut, cut_flat.data(), std::vector<uint64_t>{hatx},
-                              compiled.coeff.n, k.packed_cut_words, cut_masks.data());
-      PredViewPacked pc{cut_masks.data(), static_cast<size_t>(k.packed_cut_words)};
-      for (size_t ci = 0; ci < k.cut_pred_keys.size(); ci++) cut_bits_xor[ci] = pc.get(ci);
-    } else {
-      for (size_t ci = 0; ci < k.cut_pred_keys.size(); ci++) {
-        cut_bits_xor[ci] = proto::eval_pred_bit_share(backend, compiled.coeff.n, k.cut_pred_meta, k.cut_pred_keys[ci], hatx) & 1ull;
+  auto* packed = dynamic_cast<proto::PackedLtBackend*>(&backend);
+  if (packed && k.use_packed_pred && !k.packed_pred_groups.empty()) {
+    std::vector<uint64_t> xs_single{hatx};
+    for (const auto& grp : k.packed_pred_groups) {
+      size_t key_bytes = grp.key.bytes.size();
+      std::vector<uint8_t> keys_flat(key_bytes);
+      std::memcpy(keys_flat.data(), grp.key.bytes.data(), key_bytes);
+      std::vector<uint64_t> masks(static_cast<size_t>(grp.out_words), 0);
+      packed->eval_packed_lt_many(key_bytes, keys_flat.data(), xs_single,
+                                  grp.in_bits, grp.out_words, masks.data());
+      for (size_t b = 0; b < grp.num_bits; b++) {
+        size_t global = grp.bit_base + b;
+        if (global >= bits_xor.size()) break;
+        size_t w = b >> 6;
+        size_t bit = b & 63;
+        uint64_t word = masks[w];
+        bits_xor[global] = (word >> bit) & 1ull;
       }
     }
-    auto coeff_table = build_coeff_table(compiled, k, /*add_deltas=*/(party == 0));
-    auto selectors = selectors_from_cutbits(cut_bits_xor, party, mul);
-    // Selector-weighted coeffs (additive)
-    std::vector<uint64_t> coeff(compiled.coeff.out_words, 0);
-    for (size_t p = 0; p < coeff_table.size(); p++) {
-      uint64_t sel_add = selectors[p];
-      for (int j = 0; j < compiled.coeff.out_words; j++) {
-        uint64_t term = mul.mul(sel_add, coeff_table[p][static_cast<size_t>(j)]);
-        coeff[static_cast<size_t>(j)] = proto::add_mod(coeff[static_cast<size_t>(j)], term);
-      }
-    }
-    // Bool outputs blended by selectors
-    std::vector<uint64_t> bools(compiled.ell, 0);
-    for (size_t p = 0; p < selectors.size(); p++) {
-      if (p >= compiled.bool_per_piece.size()) break;
-      for (int j = 0; j < compiled.ell; j++) {
-        uint64_t bx = gates::eval_bool_xor_view(compiled.bool_per_piece[p][static_cast<size_t>(j)], get_pred, k.wrap_share, mul, bit_ptr, &bit_idx) & 1ull;
-        uint64_t badd = gates::b2a_bit(bx, party, mul);
-        uint64_t term = mul.mul(selectors[p], badd);
-        bools[static_cast<size_t>(j)] = proto::add_mod(bools[static_cast<size_t>(j)], term);
-      }
-    }
-    std::vector<uint64_t> ys(compiled.r, 0);
-    int stride = compiled.degree + 1;
-    uint64_t rin = r_in_at(k, 0);
-    uint64_t x_share = (party == 0) ? proto::sub_mod(hatx, rin)
-                                    : proto::sub_mod(0ull, rin);
-    for (int j = 0; j < compiled.r; j++) {
-      uint64_t acc = coeff[static_cast<size_t>(j * stride + compiled.degree)];
-      for (int d = compiled.degree - 1; d >= 0; d--) {
-        acc = mul.mul(acc, x_share);
-        acc = proto::add_mod(acc, coeff[static_cast<size_t>(j * stride + d)]);
-      }
-      ys[static_cast<size_t>(j)] = proto::add_mod(acc, k.r_out_share[static_cast<size_t>(j)]);
-    }
-    std::vector<uint64_t> out;
-    out.reserve(static_cast<size_t>(compiled.r + compiled.ell));
-    for (auto v : ys) out.push_back(v);
-    for (auto v : bools) out.push_back(v);
-    return out;
   } else {
     for (size_t i = 0; i < compiled.pred.queries.size(); i++) {
       int bits_in = (compiled.pred.queries[i].kind == compiler::RawPredKind::kLtU64) ? compiled.pred.n : compiled.pred.queries[i].f;
@@ -763,8 +792,28 @@ inline std::vector<uint64_t> composite_eval_share_backend(int party,
   }
   // Cut predicates for piece selectors
   std::vector<uint64_t> cut_bits_xor(k.cut_pred_keys.size(), 0);
-  for (size_t ci = 0; ci < k.cut_pred_keys.size(); ci++) {
-    cut_bits_xor[ci] = proto::eval_pred_bit_share(backend, compiled.coeff.n, k.cut_pred_meta, k.cut_pred_keys[ci], hatx) & 1ull;
+  if (packed && k.use_packed_cut && !k.packed_cut_groups.empty()) {
+    std::vector<uint64_t> xs_single{hatx};
+    for (const auto& grp : k.packed_cut_groups) {
+      size_t key_bytes = grp.key.bytes.size();
+      std::vector<uint8_t> keys_flat(key_bytes);
+      std::memcpy(keys_flat.data(), grp.key.bytes.data(), key_bytes);
+      std::vector<uint64_t> masks(static_cast<size_t>(grp.out_words), 0);
+      packed->eval_packed_lt_many(key_bytes, keys_flat.data(), xs_single,
+                                  grp.in_bits, grp.out_words, masks.data());
+      for (size_t b = 0; b < grp.num_bits; b++) {
+        size_t global = grp.bit_base + b;
+        if (global >= cut_bits_xor.size()) break;
+        size_t w = b >> 6;
+        size_t bit = b & 63;
+        uint64_t word = masks[w];
+        cut_bits_xor[global] = (word >> bit) & 1ull;
+      }
+    }
+  } else {
+    for (size_t ci = 0; ci < k.cut_pred_keys.size(); ci++) {
+      cut_bits_xor[ci] = proto::eval_pred_bit_share(backend, compiled.coeff.n, k.cut_pred_meta, k.cut_pred_keys[ci], hatx) & 1ull;
+    }
   }
   auto coeff_table = build_coeff_table(compiled, k, /*add_deltas=*/(party == 0));
   auto selectors = selectors_from_cutbits(cut_bits_xor, party, mul);
@@ -884,16 +933,34 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
   std::vector<uint64_t> pred_bits_xor;
   std::vector<uint64_t> pred_masks;
   std::vector<uint64_t> cut_masks;
-  auto* sb = dynamic_cast<proto::SigmaFastBackend*>(&backend);
-  if (sb && k.use_packed_pred && k.packed_pred_words > 0) {
-    size_t key_bytes = k.packed_pred_key.bytes.size();
-    std::vector<uint8_t> keys_flat(N * key_bytes);
-    for (size_t i = 0; i < N; i++) {
-      std::memcpy(keys_flat.data() + i * key_bytes, k.packed_pred_key.bytes.data(), key_bytes);
+  auto* packed = dynamic_cast<proto::PackedLtBackend*>(&backend);
+  std::vector<uint64_t> xs_vec(in.hatx, in.hatx + N);
+  if (packed && k.use_packed_pred && !k.packed_pred_groups.empty()) {
+    pred_masks.assign(N * static_cast<size_t>(k.packed_pred_words), 0);
+    for (const auto& grp : k.packed_pred_groups) {
+      size_t key_bytes = grp.key.bytes.size();
+      std::vector<uint8_t> keys_flat(N * key_bytes);
+      for (size_t i = 0; i < N; i++) {
+        std::memcpy(keys_flat.data() + i * key_bytes, grp.key.bytes.data(), key_bytes);
+      }
+      std::vector<uint64_t> masks(N * static_cast<size_t>(grp.out_words), 0);
+      packed->eval_packed_lt_many(key_bytes, keys_flat.data(), xs_vec,
+                                  grp.in_bits, grp.out_words, masks.data());
+      for (size_t i = 0; i < N; i++) {
+        uint64_t* dst = pred_masks.data() + i * static_cast<size_t>(k.packed_pred_words);
+        const uint64_t* src = masks.data() + i * static_cast<size_t>(grp.out_words);
+        for (size_t b = 0; b < grp.num_bits; b++) {
+          size_t global = grp.bit_base + b;
+          if (global >= compiled.pred.queries.size()) break;
+          size_t w = b >> 6;
+          size_t bit = b & 63;
+          uint64_t val = (src[w] >> bit) & 1ull;
+          size_t dw = global >> 6;
+          size_t db = global & 63;
+          dst[dw] |= (val << db);
+        }
+      }
     }
-    pred_masks.resize(N * static_cast<size_t>(k.packed_pred_words), 0);
-    sb->eval_packed_lt_many(key_bytes, keys_flat.data(), std::vector<uint64_t>(in.hatx, in.hatx + N),
-                            compiled.pred.n, k.packed_pred_words, pred_masks.data());
   } else {
     pred_bits_xor.resize(compiled.pred.queries.size() * N, 0);
     for (size_t qi = 0; qi < compiled.pred.queries.size(); qi++) {
@@ -907,7 +974,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       size_t out_bytes = static_cast<size_t>(k.pred_meta.out_bytes);
       if (out_bytes == 0) throw std::runtime_error("pred_meta.out_bytes must be >0");
       std::vector<uint8_t> outs_flat(N * out_bytes);
-      backend.eval_dcf_many_u64(bits_in, key_bytes, keys_flat.data(), std::vector<uint64_t>(in.hatx, in.hatx + N), k.pred_meta.out_bytes, outs_flat.data());
+      backend.eval_dcf_many_u64(bits_in, key_bytes, keys_flat.data(), xs_vec, k.pred_meta.out_bytes, outs_flat.data());
       for (size_t i = 0; i < N; i++) {
         if (k.pred_meta.sem == proto::ShareSemantics::XorBytes) {
           pred_bits_xor[qi * N + i] = static_cast<uint64_t>(outs_flat[i * out_bytes] & 1u);
@@ -922,15 +989,32 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
 
   // Cut predicate bits (XOR)
   std::vector<uint64_t> cut_bits_xor(k.cut_pred_keys.size() * N, 0);
-  if (sb && k.use_packed_cut && k.packed_cut_words > 0) {
-    size_t key_bytes = k.packed_cut_key.bytes.size();
-    std::vector<uint8_t> keys_flat(N * key_bytes);
-    for (size_t i = 0; i < N; i++) {
-      std::memcpy(keys_flat.data() + i * key_bytes, k.packed_cut_key.bytes.data(), key_bytes);
+  if (packed && k.use_packed_cut && !k.packed_cut_groups.empty()) {
+    cut_masks.assign(N * static_cast<size_t>(k.packed_cut_words), 0);
+    for (const auto& grp : k.packed_cut_groups) {
+      size_t key_bytes = grp.key.bytes.size();
+      std::vector<uint8_t> keys_flat(N * key_bytes);
+      for (size_t i = 0; i < N; i++) {
+        std::memcpy(keys_flat.data() + i * key_bytes, grp.key.bytes.data(), key_bytes);
+      }
+      std::vector<uint64_t> masks(N * static_cast<size_t>(grp.out_words), 0);
+      packed->eval_packed_lt_many(key_bytes, keys_flat.data(), xs_vec,
+                                  grp.in_bits, grp.out_words, masks.data());
+      for (size_t i = 0; i < N; i++) {
+        uint64_t* dst = cut_masks.data() + i * static_cast<size_t>(k.packed_cut_words);
+        const uint64_t* src = masks.data() + i * static_cast<size_t>(grp.out_words);
+        for (size_t b = 0; b < grp.num_bits; b++) {
+          size_t global = grp.bit_base + b;
+          if (global >= k.cut_pred_keys.size()) break;
+          size_t w = b >> 6;
+          size_t bit = b & 63;
+          uint64_t val = (src[w] >> bit) & 1ull;
+          size_t dw = global >> 6;
+          size_t db = global & 63;
+          dst[dw] |= (val << db);
+        }
+      }
     }
-    cut_masks.resize(N * static_cast<size_t>(k.packed_cut_words), 0);
-    sb->eval_packed_lt_many(key_bytes, keys_flat.data(), std::vector<uint64_t>(in.hatx, in.hatx + N),
-                            compiled.coeff.n, k.packed_cut_words, cut_masks.data());
     for (size_t i = 0; i < N; i++) {
       PredViewPacked pc{cut_masks.data() + i * static_cast<size_t>(k.packed_cut_words),
                         static_cast<size_t>(k.packed_cut_words)};
@@ -948,7 +1032,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       size_t out_bytes = static_cast<size_t>(k.cut_pred_meta.out_bytes);
       if (out_bytes == 0) throw std::runtime_error("cut_pred_meta.out_bytes must be >0");
       std::vector<uint8_t> outs_flat(N * out_bytes);
-      backend.eval_dcf_many_u64(compiled.coeff.n, key_bytes, keys_flat.data(), std::vector<uint64_t>(in.hatx, in.hatx + N),
+      backend.eval_dcf_many_u64(compiled.coeff.n, key_bytes, keys_flat.data(), xs_vec,
                                 k.cut_pred_meta.out_bytes, outs_flat.data());
       for (size_t i = 0; i < N; i++) {
         if (k.cut_pred_meta.sem == proto::ShareSemantics::XorBytes) {
@@ -995,7 +1079,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     bit_triples.push_back((party == 0) ? share0 : share1);
   }
   const proto::BeaverTripleBitShare* bit_ptr = bit_triples.data();
-  if (sb && k.use_packed_pred && k.packed_pred_words > 0) {
+  if (k.use_packed_pred && !pred_masks.empty() && k.packed_pred_words > 0) {
     const size_t block_sz = 64;
     size_t pieces = coeff_table.size();
     size_t stride = compiled.degree + 1;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "proto/pfss_interval_lut_ext.hpp"
+#include "proto/packed_backend.hpp"
 #include <array>
 #include <random>
 #include <stdexcept>
@@ -17,9 +18,7 @@
 
 namespace proto {
 
-struct PackedLtKeyPair { FssKey k0, k1; };
-
-class SigmaFastBackend : public PfssIntervalLutExt {
+class SigmaFastBackend : public PfssIntervalLutExt, public PackedLtBackend {
 public:
   struct Params {
     int lambda_bytes = 16;
@@ -69,7 +68,7 @@ public:
   }
 
   // Packed multi-threshold compare (CDPF-style) with AES-CTR masks (party seeds).
-  PackedLtKeyPair gen_packed_lt(int in_bits, const std::vector<u64>& thresholds) {
+  PackedLtKeyPair gen_packed_lt(int in_bits, const std::vector<u64>& thresholds) override {
     if (in_bits <= 0 || in_bits > 64) throw std::runtime_error("SigmaFastBackend: in_bits out of range");
     // Deterministic IDs; store thresholds + AES seeds (one per party).
     u64 id = next_id_++;
@@ -102,7 +101,7 @@ public:
                            const std::vector<u64>& xs_u64,
                            int in_bits,
                            int out_words,
-                           u64* outs_bitmask) const {
+                           u64* outs_bitmask) const override {
     if (key_bytes < 8) throw std::runtime_error("SigmaFastBackend: key size too small");
     if (in_bits <= 0 || in_bits > 64) throw std::runtime_error("SigmaFastBackend: in_bits out of range");
     u64 mask = (in_bits == 64) ? ~0ull : ((u64(1) << in_bits) - 1);

@@ -33,6 +33,10 @@
 /home/yuhan/new/SUF/build/CMakeFiles/test_pfss_async_stress.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_transformer_async.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_planner_causal.dir
+/home/yuhan/new/SUF/build/CMakeFiles/test_pfss_gpu.dir
+/home/yuhan/new/SUF/build/CMakeFiles/test_cuda_prg.dir
+/home/yuhan/new/SUF/build/CMakeFiles/test_cuda_pred_mask.dir
+/home/yuhan/new/SUF/build/CMakeFiles/test_cuda_packed_pfss.dir
 /home/yuhan/new/SUF/build/CMakeFiles/bench_gemm.dir
 /home/yuhan/new/SUF/build/CMakeFiles/bench_truncation.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_myl7_bit_order.dir

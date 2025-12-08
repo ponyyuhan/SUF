@@ -582,6 +582,58 @@ test_planner_causal/fast:
 .PHONY : test_planner_causal/fast
 
 #=============================================================================
+# Target rules for targets named test_pfss_gpu
+
+# Build rule for target.
+test_pfss_gpu: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_pfss_gpu
+.PHONY : test_pfss_gpu
+
+# fast build rule for target.
+test_pfss_gpu/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pfss_gpu.dir/build.make CMakeFiles/test_pfss_gpu.dir/build
+.PHONY : test_pfss_gpu/fast
+
+#=============================================================================
+# Target rules for targets named test_cuda_prg
+
+# Build rule for target.
+test_cuda_prg: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_cuda_prg
+.PHONY : test_cuda_prg
+
+# fast build rule for target.
+test_cuda_prg/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_prg.dir/build.make CMakeFiles/test_cuda_prg.dir/build
+.PHONY : test_cuda_prg/fast
+
+#=============================================================================
+# Target rules for targets named test_cuda_pred_mask
+
+# Build rule for target.
+test_cuda_pred_mask: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_cuda_pred_mask
+.PHONY : test_cuda_pred_mask
+
+# fast build rule for target.
+test_cuda_pred_mask/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_pred_mask.dir/build.make CMakeFiles/test_cuda_pred_mask.dir/build
+.PHONY : test_cuda_pred_mask/fast
+
+#=============================================================================
+# Target rules for targets named test_cuda_packed_pfss
+
+# Build rule for target.
+test_cuda_packed_pfss: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_cuda_packed_pfss
+.PHONY : test_cuda_packed_pfss
+
+# fast build rule for target.
+test_cuda_packed_pfss/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_packed_pfss.dir/build.make CMakeFiles/test_cuda_packed_pfss.dir/build
+.PHONY : test_cuda_packed_pfss/fast
+
+#=============================================================================
 # Target rules for targets named bench_gemm
 
 # Build rule for target.
@@ -620,53 +672,77 @@ test_myl7_bit_order/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_myl7_bit_order.dir/build.make CMakeFiles/test_myl7_bit_order.dir/build
 .PHONY : test_myl7_bit_order/fast
 
-cuda/pfss_backend_stub.o: cuda/pfss_backend_stub.cpp.o
-.PHONY : cuda/pfss_backend_stub.o
+cuda/pfss_backend_gpu.o: cuda/pfss_backend_gpu.cu.o
+.PHONY : cuda/pfss_backend_gpu.o
 
 # target to build an object file
-cuda/pfss_backend_stub.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/pfss_backend_stub.cpp.o
-.PHONY : cuda/pfss_backend_stub.cpp.o
+cuda/pfss_backend_gpu.cu.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/pfss_backend_gpu.cu.o
+.PHONY : cuda/pfss_backend_gpu.cu.o
 
-cuda/pfss_backend_stub.i: cuda/pfss_backend_stub.cpp.i
-.PHONY : cuda/pfss_backend_stub.i
+cuda/pfss_backend_gpu.i: cuda/pfss_backend_gpu.cu.i
+.PHONY : cuda/pfss_backend_gpu.i
 
 # target to preprocess a source file
-cuda/pfss_backend_stub.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/pfss_backend_stub.cpp.i
-.PHONY : cuda/pfss_backend_stub.cpp.i
+cuda/pfss_backend_gpu.cu.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/pfss_backend_gpu.cu.i
+.PHONY : cuda/pfss_backend_gpu.cu.i
 
-cuda/pfss_backend_stub.s: cuda/pfss_backend_stub.cpp.s
-.PHONY : cuda/pfss_backend_stub.s
+cuda/pfss_backend_gpu.s: cuda/pfss_backend_gpu.cu.s
+.PHONY : cuda/pfss_backend_gpu.s
 
 # target to generate assembly for a file
-cuda/pfss_backend_stub.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/pfss_backend_stub.cpp.s
-.PHONY : cuda/pfss_backend_stub.cpp.s
+cuda/pfss_backend_gpu.cu.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/pfss_backend_gpu.cu.s
+.PHONY : cuda/pfss_backend_gpu.cu.s
 
-cuda/pfss_stub.o: cuda/pfss_stub.cpp.o
-.PHONY : cuda/pfss_stub.o
+cuda/pfss_kernels.o: cuda/pfss_kernels.cu.o
+.PHONY : cuda/pfss_kernels.o
 
 # target to build an object file
-cuda/pfss_stub.cpp.o:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/pfss_stub.cpp.o
-.PHONY : cuda/pfss_stub.cpp.o
+cuda/pfss_kernels.cu.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/pfss_kernels.cu.o
+.PHONY : cuda/pfss_kernels.cu.o
 
-cuda/pfss_stub.i: cuda/pfss_stub.cpp.i
-.PHONY : cuda/pfss_stub.i
+cuda/pfss_kernels.i: cuda/pfss_kernels.cu.i
+.PHONY : cuda/pfss_kernels.i
 
 # target to preprocess a source file
-cuda/pfss_stub.cpp.i:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/pfss_stub.cpp.i
-.PHONY : cuda/pfss_stub.cpp.i
+cuda/pfss_kernels.cu.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/pfss_kernels.cu.i
+.PHONY : cuda/pfss_kernels.cu.i
 
-cuda/pfss_stub.s: cuda/pfss_stub.cpp.s
-.PHONY : cuda/pfss_stub.s
+cuda/pfss_kernels.s: cuda/pfss_kernels.cu.s
+.PHONY : cuda/pfss_kernels.s
 
 # target to generate assembly for a file
-cuda/pfss_stub.cpp.s:
-	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/pfss_stub.cpp.s
-.PHONY : cuda/pfss_stub.cpp.s
+cuda/pfss_kernels.cu.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/pfss_kernels.cu.s
+.PHONY : cuda/pfss_kernels.cu.s
+
+cuda/poly_kernels.o: cuda/poly_kernels.cu.o
+.PHONY : cuda/poly_kernels.o
+
+# target to build an object file
+cuda/poly_kernels.cu.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/poly_kernels.cu.o
+.PHONY : cuda/poly_kernels.cu.o
+
+cuda/poly_kernels.i: cuda/poly_kernels.cu.i
+.PHONY : cuda/poly_kernels.i
+
+# target to preprocess a source file
+cuda/poly_kernels.cu.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/poly_kernels.cu.i
+.PHONY : cuda/poly_kernels.cu.i
+
+cuda/poly_kernels.s: cuda/poly_kernels.cu.s
+.PHONY : cuda/poly_kernels.s
+
+# target to generate assembly for a file
+cuda/poly_kernels.cu.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/poly_kernels.cu.s
+.PHONY : cuda/poly_kernels.cu.s
 
 src/bench/bench_attention.o: src/bench/bench_attention.cpp.o
 .PHONY : src/bench/bench_attention.o
@@ -1076,6 +1152,78 @@ src/demo/test_composite_runtime.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_runtime.dir/build.make CMakeFiles/test_composite_runtime.dir/src/demo/test_composite_runtime.cpp.s
 .PHONY : src/demo/test_composite_runtime.cpp.s
 
+src/demo/test_cuda_packed_pfss.o: src/demo/test_cuda_packed_pfss.cpp.o
+.PHONY : src/demo/test_cuda_packed_pfss.o
+
+# target to build an object file
+src/demo/test_cuda_packed_pfss.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_packed_pfss.dir/build.make CMakeFiles/test_cuda_packed_pfss.dir/src/demo/test_cuda_packed_pfss.cpp.o
+.PHONY : src/demo/test_cuda_packed_pfss.cpp.o
+
+src/demo/test_cuda_packed_pfss.i: src/demo/test_cuda_packed_pfss.cpp.i
+.PHONY : src/demo/test_cuda_packed_pfss.i
+
+# target to preprocess a source file
+src/demo/test_cuda_packed_pfss.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_packed_pfss.dir/build.make CMakeFiles/test_cuda_packed_pfss.dir/src/demo/test_cuda_packed_pfss.cpp.i
+.PHONY : src/demo/test_cuda_packed_pfss.cpp.i
+
+src/demo/test_cuda_packed_pfss.s: src/demo/test_cuda_packed_pfss.cpp.s
+.PHONY : src/demo/test_cuda_packed_pfss.s
+
+# target to generate assembly for a file
+src/demo/test_cuda_packed_pfss.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_packed_pfss.dir/build.make CMakeFiles/test_cuda_packed_pfss.dir/src/demo/test_cuda_packed_pfss.cpp.s
+.PHONY : src/demo/test_cuda_packed_pfss.cpp.s
+
+src/demo/test_cuda_pred_mask.o: src/demo/test_cuda_pred_mask.cpp.o
+.PHONY : src/demo/test_cuda_pred_mask.o
+
+# target to build an object file
+src/demo/test_cuda_pred_mask.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_pred_mask.dir/build.make CMakeFiles/test_cuda_pred_mask.dir/src/demo/test_cuda_pred_mask.cpp.o
+.PHONY : src/demo/test_cuda_pred_mask.cpp.o
+
+src/demo/test_cuda_pred_mask.i: src/demo/test_cuda_pred_mask.cpp.i
+.PHONY : src/demo/test_cuda_pred_mask.i
+
+# target to preprocess a source file
+src/demo/test_cuda_pred_mask.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_pred_mask.dir/build.make CMakeFiles/test_cuda_pred_mask.dir/src/demo/test_cuda_pred_mask.cpp.i
+.PHONY : src/demo/test_cuda_pred_mask.cpp.i
+
+src/demo/test_cuda_pred_mask.s: src/demo/test_cuda_pred_mask.cpp.s
+.PHONY : src/demo/test_cuda_pred_mask.s
+
+# target to generate assembly for a file
+src/demo/test_cuda_pred_mask.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_pred_mask.dir/build.make CMakeFiles/test_cuda_pred_mask.dir/src/demo/test_cuda_pred_mask.cpp.s
+.PHONY : src/demo/test_cuda_pred_mask.cpp.s
+
+src/demo/test_cuda_prg.o: src/demo/test_cuda_prg.cpp.o
+.PHONY : src/demo/test_cuda_prg.o
+
+# target to build an object file
+src/demo/test_cuda_prg.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_prg.dir/build.make CMakeFiles/test_cuda_prg.dir/src/demo/test_cuda_prg.cpp.o
+.PHONY : src/demo/test_cuda_prg.cpp.o
+
+src/demo/test_cuda_prg.i: src/demo/test_cuda_prg.cpp.i
+.PHONY : src/demo/test_cuda_prg.i
+
+# target to preprocess a source file
+src/demo/test_cuda_prg.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_prg.dir/build.make CMakeFiles/test_cuda_prg.dir/src/demo/test_cuda_prg.cpp.i
+.PHONY : src/demo/test_cuda_prg.cpp.i
+
+src/demo/test_cuda_prg.s: src/demo/test_cuda_prg.cpp.s
+.PHONY : src/demo/test_cuda_prg.s
+
+# target to generate assembly for a file
+src/demo/test_cuda_prg.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_prg.dir/build.make CMakeFiles/test_cuda_prg.dir/src/demo/test_cuda_prg.cpp.s
+.PHONY : src/demo/test_cuda_prg.cpp.s
+
 src/demo/test_gapars_selector.o: src/demo/test_gapars_selector.cpp.o
 .PHONY : src/demo/test_gapars_selector.o
 
@@ -1291,6 +1439,30 @@ src/demo/test_pfss_async_stress.s: src/demo/test_pfss_async_stress.cpp.s
 src/demo/test_pfss_async_stress.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pfss_async_stress.dir/build.make CMakeFiles/test_pfss_async_stress.dir/src/demo/test_pfss_async_stress.cpp.s
 .PHONY : src/demo/test_pfss_async_stress.cpp.s
+
+src/demo/test_pfss_gpu.o: src/demo/test_pfss_gpu.cpp.o
+.PHONY : src/demo/test_pfss_gpu.o
+
+# target to build an object file
+src/demo/test_pfss_gpu.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pfss_gpu.dir/build.make CMakeFiles/test_pfss_gpu.dir/src/demo/test_pfss_gpu.cpp.o
+.PHONY : src/demo/test_pfss_gpu.cpp.o
+
+src/demo/test_pfss_gpu.i: src/demo/test_pfss_gpu.cpp.i
+.PHONY : src/demo/test_pfss_gpu.i
+
+# target to preprocess a source file
+src/demo/test_pfss_gpu.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pfss_gpu.dir/build.make CMakeFiles/test_pfss_gpu.dir/src/demo/test_pfss_gpu.cpp.i
+.PHONY : src/demo/test_pfss_gpu.cpp.i
+
+src/demo/test_pfss_gpu.s: src/demo/test_pfss_gpu.cpp.s
+.PHONY : src/demo/test_pfss_gpu.s
+
+# target to generate assembly for a file
+src/demo/test_pfss_gpu.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_pfss_gpu.dir/build.make CMakeFiles/test_pfss_gpu.dir/src/demo/test_pfss_gpu.cpp.s
+.PHONY : src/demo/test_pfss_gpu.cpp.s
 
 src/demo/test_pfss_planner.o: src/demo/test_pfss_planner.cpp.o
 .PHONY : src/demo/test_pfss_planner.o
@@ -1918,6 +2090,9 @@ help:
 	@echo "... test_composite_equiv_proto_myl7"
 	@echo "... test_composite_equiv_proto_sigmafast"
 	@echo "... test_composite_runtime"
+	@echo "... test_cuda_packed_pfss"
+	@echo "... test_cuda_pred_mask"
+	@echo "... test_cuda_prg"
 	@echo "... test_gapars_selector"
 	@echo "... test_layernorm_task"
 	@echo "... test_llm_gates"
@@ -1927,6 +2102,7 @@ help:
 	@echo "... test_myl7_bit_order"
 	@echo "... test_pfss_async"
 	@echo "... test_pfss_async_stress"
+	@echo "... test_pfss_gpu"
 	@echo "... test_pfss_planner"
 	@echo "... test_planner_causal"
 	@echo "... test_postproc_hooks"
@@ -1939,12 +2115,15 @@ help:
 	@echo "... test_transformer_async"
 	@echo "... test_trunc_task"
 	@echo "... test_truncation"
-	@echo "... cuda/pfss_backend_stub.o"
-	@echo "... cuda/pfss_backend_stub.i"
-	@echo "... cuda/pfss_backend_stub.s"
-	@echo "... cuda/pfss_stub.o"
-	@echo "... cuda/pfss_stub.i"
-	@echo "... cuda/pfss_stub.s"
+	@echo "... cuda/pfss_backend_gpu.o"
+	@echo "... cuda/pfss_backend_gpu.i"
+	@echo "... cuda/pfss_backend_gpu.s"
+	@echo "... cuda/pfss_kernels.o"
+	@echo "... cuda/pfss_kernels.i"
+	@echo "... cuda/pfss_kernels.s"
+	@echo "... cuda/poly_kernels.o"
+	@echo "... cuda/poly_kernels.i"
+	@echo "... cuda/poly_kernels.s"
 	@echo "... src/bench/bench_attention.o"
 	@echo "... src/bench/bench_attention.i"
 	@echo "... src/bench/bench_attention.s"
@@ -1996,6 +2175,15 @@ help:
 	@echo "... src/demo/test_composite_runtime.o"
 	@echo "... src/demo/test_composite_runtime.i"
 	@echo "... src/demo/test_composite_runtime.s"
+	@echo "... src/demo/test_cuda_packed_pfss.o"
+	@echo "... src/demo/test_cuda_packed_pfss.i"
+	@echo "... src/demo/test_cuda_packed_pfss.s"
+	@echo "... src/demo/test_cuda_pred_mask.o"
+	@echo "... src/demo/test_cuda_pred_mask.i"
+	@echo "... src/demo/test_cuda_pred_mask.s"
+	@echo "... src/demo/test_cuda_prg.o"
+	@echo "... src/demo/test_cuda_prg.i"
+	@echo "... src/demo/test_cuda_prg.s"
 	@echo "... src/demo/test_gapars_selector.o"
 	@echo "... src/demo/test_gapars_selector.i"
 	@echo "... src/demo/test_gapars_selector.s"
@@ -2023,6 +2211,9 @@ help:
 	@echo "... src/demo/test_pfss_async_stress.o"
 	@echo "... src/demo/test_pfss_async_stress.i"
 	@echo "... src/demo/test_pfss_async_stress.s"
+	@echo "... src/demo/test_pfss_gpu.o"
+	@echo "... src/demo/test_pfss_gpu.i"
+	@echo "... src/demo/test_pfss_gpu.s"
 	@echo "... src/demo/test_pfss_planner.o"
 	@echo "... src/demo/test_pfss_planner.i"
 	@echo "... src/demo/test_pfss_planner.s"

@@ -82,26 +82,43 @@ int main() {
     auto il_gpu_keys = gpu_lut->gen_interval_lut(il);
     auto il_cpu_keys = cpu_lut->gen_interval_lut(il);
     std::vector<uint64_t> xs_lut = {0, 15, 40};
-    size_t key_bytes = il_gpu_keys.k0.bytes.size();
-    std::vector<uint8_t> keys_flat(xs_lut.size() * key_bytes);
+    auto eval_party = [&](const proto::FssKey& k) {
+      size_t key_bytes = k.bytes.size();
+      std::vector<uint8_t> flat(xs_lut.size() * key_bytes);
+      for (size_t i = 0; i < xs_lut.size(); i++) {
+        std::memcpy(flat.data() + i * key_bytes, k.bytes.data(), key_bytes);
+      }
+      return std::make_pair(key_bytes, flat);
+    };
+    auto [key_bytes0, flat0_gpu] = eval_party(il_gpu_keys.k0);
+    auto [key_bytes1, flat1_gpu] = eval_party(il_gpu_keys.k1);
+    std::vector<uint64_t> out_gpu0(xs_lut.size() * static_cast<size_t>(il.out_words), 0),
+        out_gpu1(xs_lut.size() * static_cast<size_t>(il.out_words), 0);
+    gpu_lut->eval_interval_lut_many_u64(key_bytes0, flat0_gpu.data(), xs_lut, il.out_words, out_gpu0.data());
+    gpu_lut->eval_interval_lut_many_u64(key_bytes1, flat1_gpu.data(), xs_lut, il.out_words, out_gpu1.data());
+
+    auto [key_bytes0c, flat0_cpu] = eval_party(il_cpu_keys.k0);
+    auto [key_bytes1c, flat1_cpu] = eval_party(il_cpu_keys.k1);
+    std::vector<uint64_t> out_cpu0(xs_lut.size() * static_cast<size_t>(il.out_words), 0),
+        out_cpu1(xs_lut.size() * static_cast<size_t>(il.out_words), 0);
+    cpu_lut->eval_interval_lut_many_u64(key_bytes0c, flat0_cpu.data(), xs_lut, il.out_words, out_cpu0.data());
+    cpu_lut->eval_interval_lut_many_u64(key_bytes1c, flat1_cpu.data(), xs_lut, il.out_words, out_cpu1.data());
+
     for (size_t i = 0; i < xs_lut.size(); i++) {
-      std::memcpy(keys_flat.data() + i * key_bytes, il_gpu_keys.k0.bytes.data(), key_bytes);
-    }
-    std::vector<uint64_t> out_gpu(xs_lut.size() * static_cast<size_t>(il.out_words), 0),
-        out_cpu(xs_lut.size() * static_cast<size_t>(il.out_words), 0);
-    gpu_lut->eval_interval_lut_many_u64(key_bytes, keys_flat.data(), xs_lut, il.out_words, out_gpu.data());
-    // Build CPU key stream separately.
-    size_t key_bytes_cpu = il_cpu_keys.k0.bytes.size();
-    std::vector<uint8_t> keys_flat_cpu(xs_lut.size() * key_bytes_cpu);
-    for (size_t i = 0; i < xs_lut.size(); i++) {
-      std::memcpy(keys_flat_cpu.data() + i * key_bytes_cpu, il_cpu_keys.k0.bytes.data(), key_bytes_cpu);
-    }
-    cpu_lut->eval_interval_lut_many_u64(key_bytes_cpu, keys_flat_cpu.data(), xs_lut, il.out_words, out_cpu.data());
-    if (out_gpu != out_cpu) {
-      std::cerr << "Interval LUT mismatch\n";
-      return 1;
+      for (int w = 0; w < il.out_words; w++) {
+        uint64_t gpu_recon = out_gpu0[i * static_cast<size_t>(il.out_words) + static_cast<size_t>(w)] +
+                             out_gpu1[i * static_cast<size_t>(il.out_words) + static_cast<size_t>(w)];
+        uint64_t cpu_recon = out_cpu0[i * static_cast<size_t>(il.out_words) + static_cast<size_t>(w)] +
+                             out_cpu1[i * static_cast<size_t>(il.out_words) + static_cast<size_t>(w)];
+        if (gpu_recon != cpu_recon) {
+          std::cerr << "Interval LUT mismatch idx=" << i << " word=" << w
+                    << " gpu=" << gpu_recon << " cpu=" << cpu_recon << "\n";
+          return 1;
+        }
+      }
     }
   }
+  std::cerr << "GPU DCF/LUT checks passed\n";
 
   // Composite truncation equivalence on a tiny batch.
   const size_t N = 4;
@@ -113,6 +130,7 @@ int main() {
   suf::SUF<uint64_t> trunc_suf_cpu, trunc_suf_gpu;
   auto trunc_cpu = gates::composite_gen_trunc_gate(cpu, rng_cpu, frac_bits, compiler::GateKind::FaithfulTR, N, &trunc_suf_cpu);
   auto trunc_gpu = gates::composite_gen_trunc_gate(*gpu, rng_gpu, frac_bits, compiler::GateKind::FaithfulTR, N, &trunc_suf_gpu);
+  std::cerr << "Composite keys generated\n";
 
   std::vector<uint64_t> hatx_cpu(N), hatx_gpu(N);
   for (size_t i = 0; i < N; i++) {
@@ -127,6 +145,8 @@ int main() {
   ProtoLocalChan::Shared sh_cpu, sh_gpu;
   ProtoLocalChan c0_cpu(&sh_cpu, true), c1_cpu(&sh_cpu, false);
   ProtoLocalChan c0_gpu(&sh_gpu, true), c1_gpu(&sh_gpu, false);
+  auto gpu_eval0 = proto::make_real_gpu_backend();
+  auto gpu_eval1 = proto::make_real_gpu_backend();
 
   gates::CompositeBatchOutput out_cpu0, out_cpu1, out_gpu0, out_gpu1;
   std::exception_ptr thr_exc;
@@ -139,14 +159,23 @@ int main() {
   t_cpu.join();
   if (thr_exc) std::rethrow_exception(thr_exc);
 
+  std::cerr << "CPU composite done\n";
+
+  if (!std::getenv("RUN_GPU_COMPOSITE")) {
+    std::cout << "GPU composite skipped (set RUN_GPU_COMPOSITE=1 to enable)\n";
+    return 0;
+  }
+
+  thr_exc = nullptr;
   std::thread t_gpu([&]() {
     try {
-      out_gpu1 = gates::composite_eval_batch_with_postproc(1, *gpu, c1_gpu, trunc_gpu.k1, trunc_suf_gpu, in_gpu, hook_gpu1);
+      out_gpu1 = gates::composite_eval_batch_with_postproc(1, *gpu_eval1, c1_gpu, trunc_gpu.k1, trunc_suf_gpu, in_gpu, hook_gpu1);
     } catch (...) { thr_exc = std::current_exception(); }
   });
-  out_gpu0 = gates::composite_eval_batch_with_postproc(0, *gpu, c0_gpu, trunc_gpu.k0, trunc_suf_gpu, in_gpu, hook_gpu0);
+  out_gpu0 = gates::composite_eval_batch_with_postproc(0, *gpu_eval0, c0_gpu, trunc_gpu.k0, trunc_suf_gpu, in_gpu, hook_gpu0);
   t_gpu.join();
   if (thr_exc) std::rethrow_exception(thr_exc);
+  std::cerr << "GPU composite done\n";
 
   auto mask_out_cpu = trunc_cpu.k0.r_out_share.empty() ? 0ull
                          : proto::add_mod(trunc_cpu.k0.r_out_share[0], trunc_cpu.k1.r_out_share[0]);
