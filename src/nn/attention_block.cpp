@@ -15,6 +15,8 @@
 #include "gates/reciprocal_composite.hpp"
 #include "gates/nexp_composite.hpp"
 #include "gates/softmax_composite.hpp"
+#include "nn/matmul_publicW.hpp"
+#include "nn/matmul_gpu.hpp"
 #include "nn/softmax_block_task.hpp"
 #include "runtime/pfss_phase_planner.hpp"
 #include "runtime/pfss_superbatch.hpp"
@@ -187,6 +189,16 @@ void attention_forward(const AttentionConfig& cfg,
   size_t H = cfg.H;
   size_t Dh = cfg.Dh;
   int fb = cfg.frac_bits;
+  if (ctx) {
+    ctx->select_backend_from_env();
+    if (ctx->uses_gpu_backend() && ctx->pfss_gpu_stager == nullptr) {
+      throw std::runtime_error("attention_forward: GPU backend selected but no PfssGpuStager provided");
+    }
+    if (pe && ctx->uses_gpu_backend()) {
+      pe->pfss_coeff_batch().set_gpu_stager(ctx->pfss_gpu_stager);
+      pe->pfss_trunc_batch().set_gpu_stager(ctx->pfss_gpu_stager);
+    }
+  }
   if (!ctx || !ctx->trunc_ctx) {
     throw std::runtime_error("attention_forward: LayerContext with truncation context required (no legacy rescale)");
   }
@@ -342,10 +354,19 @@ void attention_forward(const AttentionConfig& cfg,
     if (ctx && ctx->pfss_layer_planner) ctx->pfss_layer_planner->enter_phase();
   };
 
-  matmul_publicW(view2(const_cast<uint64_t*>(X_share.data), B * T, D),
-                 Wqkv_public,
-                 view2(qkv.data(), B * T, 3 * D),
-                 mp);
+  bool qkv_gpu = false;
+  if (mp.overlap_stream) {
+    qkv_gpu = matmul_publicW_gpu(view2(const_cast<uint64_t*>(X_share.data), B * T, D),
+                                 Wqkv_public,
+                                 view2(qkv.data(), B * T, 3 * D),
+                                 mp);
+  }
+  if (!qkv_gpu) {
+    matmul_publicW(view2(const_cast<uint64_t*>(X_share.data), B * T, D),
+                   Wqkv_public,
+                   view2(qkv.data(), B * T, 3 * D),
+                   mp);
+  }
   compiler::RangeInterval wqkv_range = range_from_public_weights(Wqkv_public);
   compiler::AbsBound wqkv_abs = compiler::abs_from_range(wqkv_range, true);
   wqkv_abs.kind = compiler::RangeKind::Proof;
@@ -384,6 +405,9 @@ void attention_forward(const AttentionConfig& cfg,
     pfss_lim.max_pending_jobs = 1ull << 12;
     pfss_lim.max_pending_hatx_words = 1ull << 21;
     pfss_lim.max_flushes = 1ull << 9;
+    if (ctx && ctx->uses_gpu_backend() && ctx->pfss_gpu_stager) {
+      pfss_lim.max_pending_device_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
+    }
     pe->pfss_trunc_batch().set_limits(pfss_lim);
     runtime::OpenCollector::Limits open_lim;
     open_lim.max_pending_words = 1ull << 22;
@@ -440,6 +464,9 @@ void attention_forward(const AttentionConfig& cfg,
     pfss_lim.max_pending_jobs = 1ull << 12;
     pfss_lim.max_pending_hatx_words = 1ull << 21;
     pfss_lim.max_flushes = 1ull << 9;
+    if (ctx && ctx->uses_gpu_backend() && ctx->pfss_gpu_stager) {
+      pfss_lim.max_pending_device_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
+    }
     pe->pfss_coeff_batch().set_limits(pfss_lim);
     pe->pfss_trunc_batch().set_limits(pfss_lim);
     runtime::OpenCollector::Limits open_lim;
@@ -949,10 +976,19 @@ void attention_forward(const AttentionConfig& cfg,
     }
   }
 
-  matmul_publicW(view2(merged.data(), B * T, D),
-                 Wout_public,
-                 Y_share,
-                 mp);
+  bool out_gpu = false;
+  if (mp.overlap_stream) {
+    out_gpu = matmul_publicW_gpu(view2(merged.data(), B * T, D),
+                                 Wout_public,
+                                 Y_share,
+                                 mp);
+  }
+  if (!out_gpu) {
+    matmul_publicW(view2(merged.data(), B * T, D),
+                   Wout_public,
+                   Y_share,
+                   mp);
+  }
   // Truncate output accum (Q2f -> Qf) via composite truncation.
   compiler::RangeInterval prob_r = clamp_softmax_range(fb);
   compiler::RangeInterval ctx_r =

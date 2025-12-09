@@ -7,6 +7,9 @@ set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_EXTENSIONS OFF)
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --std=c++17 --allow-unsupported-compiler")
 set(CMAKE_CUDA_HOST_COMPILER "/usr/bin/g++")
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "")
+  set(CMAKE_CUDA_ARCHITECTURES "80;86")
+endif()
 
 set(CMAKE_CXX_EXTENSIONS ON)
 # OpenMP (needed for myl7/fss); if missing, targets will not link.
@@ -132,7 +135,7 @@ if(NOT HAVE_SUF_CUDA)
     else()
       target_link_libraries(cuda_pfss PUBLIC cudart OpenSSL::Crypto)
     endif()
-    set_target_properties(cuda_pfss PROPERTIES POSITION_INDEPENDENT_CODE ON CUDA_ARCHITECTURES "52")
+    set_target_properties(cuda_pfss PROPERTIES POSITION_INDEPENDENT_CODE ON CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
     set_target_properties(cuda_pfss PROPERTIES POSITION_INDEPENDENT_CODE ON)
     set(HAVE_SUF_CUDA ON)
   endif()
@@ -231,6 +234,8 @@ add_library(nn_ops STATIC
   src/nn/linops.cpp
   src/nn/matmul_publicW.cpp
   src/nn/matmul_beaver.cpp
+  $<$<BOOL:${HAVE_SUF_CUDA}>:${CMAKE_CURRENT_SOURCE_DIR}/src/nn/matmul_gpu.cu>
+  $<$<BOOL:${HAVE_SUF_CUDA}>:${CMAKE_CURRENT_SOURCE_DIR}/src/runtime/pfss_gpu_stager_cuda.cpp>
   src/nn/attention_block.cpp
   src/nn/mlp_block.cpp
   src/nn/transformer_layer.cpp
@@ -240,6 +245,9 @@ add_library(nn_ops STATIC
   src/runtime/phase_executor.cpp)
 target_include_directories(nn_ops PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(nn_ops PUBLIC suf_fss compiler_passes ${MYL7_LINK_LIBS})
+if(HAVE_SUF_CUDA)
+  target_link_libraries(nn_ops PUBLIC CUDA::cudart)
+endif()
 
 add_executable(bench_llm_gates src/bench/bench_llm_gates.cpp)
 target_include_directories(bench_llm_gates PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -304,9 +312,18 @@ add_executable(test_pfss_gpu src/demo/test_pfss_gpu.cpp)
 target_include_directories(test_pfss_gpu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_pfss_gpu PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
 
+add_executable(test_cuda_trunc_gapars src/demo/test_cuda_trunc_gapars.cpp)
+target_include_directories(test_cuda_trunc_gapars PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_cuda_trunc_gapars PRIVATE nn_ops compiler_passes suf_fss cuda_pfss OpenSSL::Crypto)
+
 add_executable(test_cuda_prg src/demo/test_cuda_prg.cpp)
 target_include_directories(test_cuda_prg PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_cuda_prg PRIVATE suf_fss cuda_pfss OpenSSL::Crypto)
+
+add_executable(test_cuda_pack_effbits src/demo/test_cuda_pack_effbits.cpp)
+target_include_directories(test_cuda_pack_effbits PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_cuda_pack_effbits PRIVATE suf_fss cuda_pfss)
+add_test(NAME test_cuda_pack_effbits COMMAND test_cuda_pack_effbits)
 
 add_executable(test_cuda_pred_mask src/demo/test_cuda_pred_mask.cpp)
 target_include_directories(test_cuda_pred_mask PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -315,11 +332,23 @@ target_link_libraries(test_cuda_pred_mask PRIVATE suf_fss cuda_pfss)
 add_executable(test_cuda_packed_pfss src/demo/test_cuda_packed_pfss.cpp)
 target_include_directories(test_cuda_packed_pfss PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_cuda_packed_pfss PRIVATE suf_fss cuda_pfss OpenSSL::Crypto)
+
+add_executable(test_softmax_gpu_smoke src/demo/test_softmax_gpu_smoke.cpp)
+target_include_directories(test_softmax_gpu_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_softmax_gpu_smoke PRIVATE nn_ops compiler_passes suf_fss cuda_pfss ${MYL7_LINK_LIBS})
+add_test(NAME test_softmax_gpu_smoke COMMAND test_softmax_gpu_smoke)
 endif()
 
 add_executable(bench_gemm src/bench/bench_gemm.cpp)
 target_include_directories(bench_gemm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(bench_gemm PRIVATE nn_ops suf_fss ${MYL7_LINK_LIBS})
+
+if(HAVE_SUF_CUDA)
+add_executable(bench_gemm_overlap src/bench/bench_gemm_overlap.cpp)
+target_include_directories(bench_gemm_overlap PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(bench_gemm_overlap PRIVATE nn_ops suf_fss cuda_pfss OpenSSL::Crypto)
+add_test(NAME bench_gemm_overlap COMMAND bench_gemm_overlap)
+endif()
 
 add_executable(bench_truncation src/bench/bench_truncation.cpp)
 target_include_directories(bench_truncation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -342,6 +371,7 @@ add_test(NAME test_planner_causal COMMAND test_planner_causal)
 add_test(NAME test_gapars_selector COMMAND test_gapars_selector)
 if(HAVE_SUF_CUDA)
 add_test(NAME test_pfss_gpu COMMAND test_pfss_gpu)
+add_test(NAME test_cuda_trunc_gapars COMMAND test_cuda_trunc_gapars)
 add_test(NAME test_cuda_prg COMMAND test_cuda_prg)
 add_test(NAME test_cuda_pred_mask COMMAND test_cuda_pred_mask)
 add_test(NAME test_cuda_packed_pfss COMMAND test_cuda_packed_pfss)

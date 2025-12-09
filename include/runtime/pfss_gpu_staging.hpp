@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <vector>
+#include <cstring>
 
 namespace runtime {
 
@@ -63,5 +64,27 @@ class CpuPassthroughStager final : public PfssGpuStager {
  private:
   std::vector<uint8_t> storage_;
 };
+
+#ifdef SUF_HAVE_CUDA
+// Simple CUDA stager: allocates device buffers and copies on a dedicated stream.
+class CudaPfssStager final : public PfssGpuStager {
+ public:
+  // If an existing CUDA stream is supplied (opaque pointer), it will be reused
+  // without taking ownership; otherwise a new non-blocking stream is created.
+  explicit CudaPfssStager(void* stream = nullptr);
+  ~CudaPfssStager() override;
+
+  DeviceBufferRef alloc_bytes(size_t bytes) override;
+  void free_bytes(DeviceBufferRef buf) override;
+  DeviceBufferRef stage_to_device(const HostBufferRef& host) override;
+  void stage_to_host(const ConstDeviceBufferRef& dev, void* host_out, size_t bytes) override;
+
+  void* stream() const { return stream_; }
+
+ private:
+  void* stream_ = nullptr;
+  bool own_stream_ = false;
+};
+#endif
 
 }  // namespace runtime

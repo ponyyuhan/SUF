@@ -595,6 +595,19 @@ test_pfss_gpu/fast:
 .PHONY : test_pfss_gpu/fast
 
 #=============================================================================
+# Target rules for targets named test_cuda_trunc_gapars
+
+# Build rule for target.
+test_cuda_trunc_gapars: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_cuda_trunc_gapars
+.PHONY : test_cuda_trunc_gapars
+
+# fast build rule for target.
+test_cuda_trunc_gapars/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_trunc_gapars.dir/build.make CMakeFiles/test_cuda_trunc_gapars.dir/build
+.PHONY : test_cuda_trunc_gapars/fast
+
+#=============================================================================
 # Target rules for targets named test_cuda_prg
 
 # Build rule for target.
@@ -606,6 +619,19 @@ test_cuda_prg: cmake_check_build_system
 test_cuda_prg/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_prg.dir/build.make CMakeFiles/test_cuda_prg.dir/build
 .PHONY : test_cuda_prg/fast
+
+#=============================================================================
+# Target rules for targets named test_cuda_pack_effbits
+
+# Build rule for target.
+test_cuda_pack_effbits: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_cuda_pack_effbits
+.PHONY : test_cuda_pack_effbits
+
+# fast build rule for target.
+test_cuda_pack_effbits/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_pack_effbits.dir/build.make CMakeFiles/test_cuda_pack_effbits.dir/build
+.PHONY : test_cuda_pack_effbits/fast
 
 #=============================================================================
 # Target rules for targets named test_cuda_pred_mask
@@ -634,6 +660,19 @@ test_cuda_packed_pfss/fast:
 .PHONY : test_cuda_packed_pfss/fast
 
 #=============================================================================
+# Target rules for targets named test_softmax_gpu_smoke
+
+# Build rule for target.
+test_softmax_gpu_smoke: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_softmax_gpu_smoke
+.PHONY : test_softmax_gpu_smoke
+
+# fast build rule for target.
+test_softmax_gpu_smoke/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_softmax_gpu_smoke.dir/build.make CMakeFiles/test_softmax_gpu_smoke.dir/build
+.PHONY : test_softmax_gpu_smoke/fast
+
+#=============================================================================
 # Target rules for targets named bench_gemm
 
 # Build rule for target.
@@ -645,6 +684,19 @@ bench_gemm: cmake_check_build_system
 bench_gemm/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_gemm.dir/build.make CMakeFiles/bench_gemm.dir/build
 .PHONY : bench_gemm/fast
+
+#=============================================================================
+# Target rules for targets named bench_gemm_overlap
+
+# Build rule for target.
+bench_gemm_overlap: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 bench_gemm_overlap
+.PHONY : bench_gemm_overlap
+
+# fast build rule for target.
+bench_gemm_overlap/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_gemm_overlap.dir/build.make CMakeFiles/bench_gemm_overlap.dir/build
+.PHONY : bench_gemm_overlap/fast
 
 #=============================================================================
 # Target rules for targets named bench_truncation
@@ -791,6 +843,30 @@ src/bench/bench_gemm.s: src/bench/bench_gemm.cpp.s
 src/bench/bench_gemm.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_gemm.dir/build.make CMakeFiles/bench_gemm.dir/src/bench/bench_gemm.cpp.s
 .PHONY : src/bench/bench_gemm.cpp.s
+
+src/bench/bench_gemm_overlap.o: src/bench/bench_gemm_overlap.cpp.o
+.PHONY : src/bench/bench_gemm_overlap.o
+
+# target to build an object file
+src/bench/bench_gemm_overlap.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_gemm_overlap.dir/build.make CMakeFiles/bench_gemm_overlap.dir/src/bench/bench_gemm_overlap.cpp.o
+.PHONY : src/bench/bench_gemm_overlap.cpp.o
+
+src/bench/bench_gemm_overlap.i: src/bench/bench_gemm_overlap.cpp.i
+.PHONY : src/bench/bench_gemm_overlap.i
+
+# target to preprocess a source file
+src/bench/bench_gemm_overlap.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_gemm_overlap.dir/build.make CMakeFiles/bench_gemm_overlap.dir/src/bench/bench_gemm_overlap.cpp.i
+.PHONY : src/bench/bench_gemm_overlap.cpp.i
+
+src/bench/bench_gemm_overlap.s: src/bench/bench_gemm_overlap.cpp.s
+.PHONY : src/bench/bench_gemm_overlap.s
+
+# target to generate assembly for a file
+src/bench/bench_gemm_overlap.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_gemm_overlap.dir/build.make CMakeFiles/bench_gemm_overlap.dir/src/bench/bench_gemm_overlap.cpp.s
+.PHONY : src/bench/bench_gemm_overlap.cpp.s
 
 src/bench/bench_llm_gates.o: src/bench/bench_llm_gates.cpp.o
 .PHONY : src/bench/bench_llm_gates.o
@@ -1152,6 +1228,30 @@ src/demo/test_composite_runtime.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_runtime.dir/build.make CMakeFiles/test_composite_runtime.dir/src/demo/test_composite_runtime.cpp.s
 .PHONY : src/demo/test_composite_runtime.cpp.s
 
+src/demo/test_cuda_pack_effbits.o: src/demo/test_cuda_pack_effbits.cpp.o
+.PHONY : src/demo/test_cuda_pack_effbits.o
+
+# target to build an object file
+src/demo/test_cuda_pack_effbits.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_pack_effbits.dir/build.make CMakeFiles/test_cuda_pack_effbits.dir/src/demo/test_cuda_pack_effbits.cpp.o
+.PHONY : src/demo/test_cuda_pack_effbits.cpp.o
+
+src/demo/test_cuda_pack_effbits.i: src/demo/test_cuda_pack_effbits.cpp.i
+.PHONY : src/demo/test_cuda_pack_effbits.i
+
+# target to preprocess a source file
+src/demo/test_cuda_pack_effbits.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_pack_effbits.dir/build.make CMakeFiles/test_cuda_pack_effbits.dir/src/demo/test_cuda_pack_effbits.cpp.i
+.PHONY : src/demo/test_cuda_pack_effbits.cpp.i
+
+src/demo/test_cuda_pack_effbits.s: src/demo/test_cuda_pack_effbits.cpp.s
+.PHONY : src/demo/test_cuda_pack_effbits.s
+
+# target to generate assembly for a file
+src/demo/test_cuda_pack_effbits.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_pack_effbits.dir/build.make CMakeFiles/test_cuda_pack_effbits.dir/src/demo/test_cuda_pack_effbits.cpp.s
+.PHONY : src/demo/test_cuda_pack_effbits.cpp.s
+
 src/demo/test_cuda_packed_pfss.o: src/demo/test_cuda_packed_pfss.cpp.o
 .PHONY : src/demo/test_cuda_packed_pfss.o
 
@@ -1223,6 +1323,30 @@ src/demo/test_cuda_prg.s: src/demo/test_cuda_prg.cpp.s
 src/demo/test_cuda_prg.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_prg.dir/build.make CMakeFiles/test_cuda_prg.dir/src/demo/test_cuda_prg.cpp.s
 .PHONY : src/demo/test_cuda_prg.cpp.s
+
+src/demo/test_cuda_trunc_gapars.o: src/demo/test_cuda_trunc_gapars.cpp.o
+.PHONY : src/demo/test_cuda_trunc_gapars.o
+
+# target to build an object file
+src/demo/test_cuda_trunc_gapars.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_trunc_gapars.dir/build.make CMakeFiles/test_cuda_trunc_gapars.dir/src/demo/test_cuda_trunc_gapars.cpp.o
+.PHONY : src/demo/test_cuda_trunc_gapars.cpp.o
+
+src/demo/test_cuda_trunc_gapars.i: src/demo/test_cuda_trunc_gapars.cpp.i
+.PHONY : src/demo/test_cuda_trunc_gapars.i
+
+# target to preprocess a source file
+src/demo/test_cuda_trunc_gapars.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_trunc_gapars.dir/build.make CMakeFiles/test_cuda_trunc_gapars.dir/src/demo/test_cuda_trunc_gapars.cpp.i
+.PHONY : src/demo/test_cuda_trunc_gapars.cpp.i
+
+src/demo/test_cuda_trunc_gapars.s: src/demo/test_cuda_trunc_gapars.cpp.s
+.PHONY : src/demo/test_cuda_trunc_gapars.s
+
+# target to generate assembly for a file
+src/demo/test_cuda_trunc_gapars.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_trunc_gapars.dir/build.make CMakeFiles/test_cuda_trunc_gapars.dir/src/demo/test_cuda_trunc_gapars.cpp.s
+.PHONY : src/demo/test_cuda_trunc_gapars.cpp.s
 
 src/demo/test_gapars_selector.o: src/demo/test_gapars_selector.cpp.o
 .PHONY : src/demo/test_gapars_selector.o
@@ -1584,6 +1708,30 @@ src/demo/test_sigmafast.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_sigmafast.dir/build.make CMakeFiles/test_sigmafast.dir/src/demo/test_sigmafast.cpp.s
 .PHONY : src/demo/test_sigmafast.cpp.s
 
+src/demo/test_softmax_gpu_smoke.o: src/demo/test_softmax_gpu_smoke.cpp.o
+.PHONY : src/demo/test_softmax_gpu_smoke.o
+
+# target to build an object file
+src/demo/test_softmax_gpu_smoke.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_softmax_gpu_smoke.dir/build.make CMakeFiles/test_softmax_gpu_smoke.dir/src/demo/test_softmax_gpu_smoke.cpp.o
+.PHONY : src/demo/test_softmax_gpu_smoke.cpp.o
+
+src/demo/test_softmax_gpu_smoke.i: src/demo/test_softmax_gpu_smoke.cpp.i
+.PHONY : src/demo/test_softmax_gpu_smoke.i
+
+# target to preprocess a source file
+src/demo/test_softmax_gpu_smoke.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_softmax_gpu_smoke.dir/build.make CMakeFiles/test_softmax_gpu_smoke.dir/src/demo/test_softmax_gpu_smoke.cpp.i
+.PHONY : src/demo/test_softmax_gpu_smoke.cpp.i
+
+src/demo/test_softmax_gpu_smoke.s: src/demo/test_softmax_gpu_smoke.cpp.s
+.PHONY : src/demo/test_softmax_gpu_smoke.s
+
+# target to generate assembly for a file
+src/demo/test_softmax_gpu_smoke.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_softmax_gpu_smoke.dir/build.make CMakeFiles/test_softmax_gpu_smoke.dir/src/demo/test_softmax_gpu_smoke.cpp.s
+.PHONY : src/demo/test_softmax_gpu_smoke.cpp.s
+
 src/demo/test_softmax_task.o: src/demo/test_softmax_task.cpp.o
 .PHONY : src/demo/test_softmax_task.o
 
@@ -1848,6 +1996,30 @@ src/nn/matmul_beaver.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/matmul_beaver.cpp.s
 .PHONY : src/nn/matmul_beaver.cpp.s
 
+src/nn/matmul_gpu.o: src/nn/matmul_gpu.cu.o
+.PHONY : src/nn/matmul_gpu.o
+
+# target to build an object file
+src/nn/matmul_gpu.cu.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/matmul_gpu.cu.o
+.PHONY : src/nn/matmul_gpu.cu.o
+
+src/nn/matmul_gpu.i: src/nn/matmul_gpu.cu.i
+.PHONY : src/nn/matmul_gpu.i
+
+# target to preprocess a source file
+src/nn/matmul_gpu.cu.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/matmul_gpu.cu.i
+.PHONY : src/nn/matmul_gpu.cu.i
+
+src/nn/matmul_gpu.s: src/nn/matmul_gpu.cu.s
+.PHONY : src/nn/matmul_gpu.s
+
+# target to generate assembly for a file
+src/nn/matmul_gpu.cu.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/nn/matmul_gpu.cu.s
+.PHONY : src/nn/matmul_gpu.cu.s
+
 src/nn/matmul_publicW.o: src/nn/matmul_publicW.cpp.o
 .PHONY : src/nn/matmul_publicW.o
 
@@ -1943,6 +2115,30 @@ src/runtime/open_collector.s: src/runtime/open_collector.cpp.s
 src/runtime/open_collector.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/runtime/open_collector.cpp.s
 .PHONY : src/runtime/open_collector.cpp.s
+
+src/runtime/pfss_gpu_stager_cuda.o: src/runtime/pfss_gpu_stager_cuda.cpp.o
+.PHONY : src/runtime/pfss_gpu_stager_cuda.o
+
+# target to build an object file
+src/runtime/pfss_gpu_stager_cuda.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/runtime/pfss_gpu_stager_cuda.cpp.o
+.PHONY : src/runtime/pfss_gpu_stager_cuda.cpp.o
+
+src/runtime/pfss_gpu_stager_cuda.i: src/runtime/pfss_gpu_stager_cuda.cpp.i
+.PHONY : src/runtime/pfss_gpu_stager_cuda.i
+
+# target to preprocess a source file
+src/runtime/pfss_gpu_stager_cuda.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/runtime/pfss_gpu_stager_cuda.cpp.i
+.PHONY : src/runtime/pfss_gpu_stager_cuda.cpp.i
+
+src/runtime/pfss_gpu_stager_cuda.s: src/runtime/pfss_gpu_stager_cuda.cpp.s
+.PHONY : src/runtime/pfss_gpu_stager_cuda.s
+
+# target to generate assembly for a file
+src/runtime/pfss_gpu_stager_cuda.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/nn_ops.dir/build.make CMakeFiles/nn_ops.dir/src/runtime/pfss_gpu_stager_cuda.cpp.s
+.PHONY : src/runtime/pfss_gpu_stager_cuda.cpp.s
 
 src/runtime/pfss_superbatch.o: src/runtime/pfss_superbatch.cpp.o
 .PHONY : src/runtime/pfss_superbatch.o
@@ -2075,6 +2271,7 @@ help:
 	@echo "... test"
 	@echo "... bench_attention"
 	@echo "... bench_gemm"
+	@echo "... bench_gemm_overlap"
 	@echo "... bench_llm_gates"
 	@echo "... bench_sigmafast_coeff"
 	@echo "... bench_sigmafast_gates"
@@ -2090,9 +2287,11 @@ help:
 	@echo "... test_composite_equiv_proto_myl7"
 	@echo "... test_composite_equiv_proto_sigmafast"
 	@echo "... test_composite_runtime"
+	@echo "... test_cuda_pack_effbits"
 	@echo "... test_cuda_packed_pfss"
 	@echo "... test_cuda_pred_mask"
 	@echo "... test_cuda_prg"
+	@echo "... test_cuda_trunc_gapars"
 	@echo "... test_gapars_selector"
 	@echo "... test_layernorm_task"
 	@echo "... test_llm_gates"
@@ -2108,6 +2307,7 @@ help:
 	@echo "... test_postproc_hooks"
 	@echo "... test_pred_semantics"
 	@echo "... test_sigmafast"
+	@echo "... test_softmax_gpu_smoke"
 	@echo "... test_softmax_task"
 	@echo "... test_staged_softmax"
 	@echo "... test_staged_trunc"
@@ -2130,6 +2330,9 @@ help:
 	@echo "... src/bench/bench_gemm.o"
 	@echo "... src/bench/bench_gemm.i"
 	@echo "... src/bench/bench_gemm.s"
+	@echo "... src/bench/bench_gemm_overlap.o"
+	@echo "... src/bench/bench_gemm_overlap.i"
+	@echo "... src/bench/bench_gemm_overlap.s"
 	@echo "... src/bench/bench_llm_gates.o"
 	@echo "... src/bench/bench_llm_gates.i"
 	@echo "... src/bench/bench_llm_gates.s"
@@ -2175,6 +2378,9 @@ help:
 	@echo "... src/demo/test_composite_runtime.o"
 	@echo "... src/demo/test_composite_runtime.i"
 	@echo "... src/demo/test_composite_runtime.s"
+	@echo "... src/demo/test_cuda_pack_effbits.o"
+	@echo "... src/demo/test_cuda_pack_effbits.i"
+	@echo "... src/demo/test_cuda_pack_effbits.s"
 	@echo "... src/demo/test_cuda_packed_pfss.o"
 	@echo "... src/demo/test_cuda_packed_pfss.i"
 	@echo "... src/demo/test_cuda_packed_pfss.s"
@@ -2184,6 +2390,9 @@ help:
 	@echo "... src/demo/test_cuda_prg.o"
 	@echo "... src/demo/test_cuda_prg.i"
 	@echo "... src/demo/test_cuda_prg.s"
+	@echo "... src/demo/test_cuda_trunc_gapars.o"
+	@echo "... src/demo/test_cuda_trunc_gapars.i"
+	@echo "... src/demo/test_cuda_trunc_gapars.s"
 	@echo "... src/demo/test_gapars_selector.o"
 	@echo "... src/demo/test_gapars_selector.i"
 	@echo "... src/demo/test_gapars_selector.s"
@@ -2229,6 +2438,9 @@ help:
 	@echo "... src/demo/test_sigmafast.o"
 	@echo "... src/demo/test_sigmafast.i"
 	@echo "... src/demo/test_sigmafast.s"
+	@echo "... src/demo/test_softmax_gpu_smoke.o"
+	@echo "... src/demo/test_softmax_gpu_smoke.i"
+	@echo "... src/demo/test_softmax_gpu_smoke.s"
 	@echo "... src/demo/test_softmax_task.o"
 	@echo "... src/demo/test_softmax_task.i"
 	@echo "... src/demo/test_softmax_task.s"
@@ -2262,6 +2474,9 @@ help:
 	@echo "... src/nn/matmul_beaver.o"
 	@echo "... src/nn/matmul_beaver.i"
 	@echo "... src/nn/matmul_beaver.s"
+	@echo "... src/nn/matmul_gpu.o"
+	@echo "... src/nn/matmul_gpu.i"
+	@echo "... src/nn/matmul_gpu.s"
 	@echo "... src/nn/matmul_publicW.o"
 	@echo "... src/nn/matmul_publicW.i"
 	@echo "... src/nn/matmul_publicW.s"
@@ -2274,6 +2489,9 @@ help:
 	@echo "... src/runtime/open_collector.o"
 	@echo "... src/runtime/open_collector.i"
 	@echo "... src/runtime/open_collector.s"
+	@echo "... src/runtime/pfss_gpu_stager_cuda.o"
+	@echo "... src/runtime/pfss_gpu_stager_cuda.i"
+	@echo "... src/runtime/pfss_gpu_stager_cuda.s"
 	@echo "... src/runtime/pfss_superbatch.o"
 	@echo "... src/runtime/pfss_superbatch.i"
 	@echo "... src/runtime/pfss_superbatch.s"

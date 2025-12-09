@@ -4,6 +4,8 @@
 #include <random>
 #include <limits>
 #include <optional>
+#include "nn/matmul_publicW.hpp"
+#include "nn/matmul_gpu.hpp"
 #include "gates/tables/silu_spline_table.hpp"
 #include "gates/silu_composite.hpp"
 #include "runtime/pfss_superbatch.hpp"
@@ -38,7 +40,17 @@ void mlp_forward(const MLPConfig& cfg,
   mp.frac_bits = cfg.frac_bits;
   mp.local_rescale = false;  // explicit rescale via truncation only
   mp.allow_legacy_shift = false;
-  mp.overlap_stream = ctx ? ctx->pfss_compute_stream() : nullptr;
+  if (ctx) {
+    ctx->select_backend_from_env();
+    if (ctx->uses_gpu_backend() && ctx->pfss_gpu_stager == nullptr) {
+      throw std::runtime_error("mlp_forward: GPU backend selected but no PfssGpuStager provided");
+    }
+    if (pe && ctx->uses_gpu_backend()) {
+      pe->pfss_coeff_batch().set_gpu_stager(ctx->pfss_gpu_stager);
+      pe->pfss_trunc_batch().set_gpu_stager(ctx->pfss_gpu_stager);
+    }
+    mp.overlap_stream = ctx->pfss_compute_stream();
+  }
   if (!ctx) {
     throw std::runtime_error("mlp_forward: LayerContext required (no local rescale fallback)");
   }
@@ -180,10 +192,19 @@ void mlp_forward(const MLPConfig& cfg,
     r2.to_frac = cfg.frac_bits;
     (void)record_rescale(ctx, acc2, r2, q_scale, out_range, Y_share);
   }
-  matmul_publicW(view2(const_cast<uint64_t*>(X_share.data), B * T, D),
-                 W1_public,
-                 view2(hidden.data(), B * T, H),
-                 mp);
+  bool w1_gpu = false;
+  if (mp.overlap_stream) {
+    w1_gpu = matmul_publicW_gpu(view2(const_cast<uint64_t*>(X_share.data), B * T, D),
+                                W1_public,
+                                view2(hidden.data(), B * T, H),
+                                mp);
+  }
+  if (!w1_gpu) {
+    matmul_publicW(view2(const_cast<uint64_t*>(X_share.data), B * T, D),
+                   W1_public,
+                   view2(hidden.data(), B * T, H),
+                   mp);
+  }
 
   bool use_phase = (ctx && pe && ctx->trunc_ctx);
   std::vector<uint64_t> hidden_scaled = hidden;
@@ -203,6 +224,9 @@ void mlp_forward(const MLPConfig& cfg,
     pfss_lim.max_pending_jobs = 1ull << 12;
     pfss_lim.max_pending_hatx_words = 1ull << 21;
     pfss_lim.max_flushes = 1ull << 9;
+    if (ctx && ctx->uses_gpu_backend() && ctx->pfss_gpu_stager) {
+      pfss_lim.max_pending_device_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
+    }
     pe->pfss_coeff_batch().set_limits(pfss_lim);
     runtime::OpenCollector::Limits open_lim;
     open_lim.max_pending_words = 1ull << 22;
@@ -304,10 +328,19 @@ void mlp_forward(const MLPConfig& cfg,
     record_phase_plan(pfss_phase_planner);
 
     // Linear 2 on the updated hidden.
-    matmul_publicW(view2(hidden_scaled.data(), B * T, H),
-                   W2_public,
-                   view2(Y_share.data, B * T, D),
-                   mp);
+    bool w2_gpu = false;
+    if (mp.overlap_stream) {
+      w2_gpu = matmul_publicW_gpu(view2(hidden_scaled.data(), B * T, H),
+                                  W2_public,
+                                  view2(Y_share.data, B * T, D),
+                                  mp);
+    }
+    if (!w2_gpu) {
+      matmul_publicW(view2(hidden_scaled.data(), B * T, H),
+                     W2_public,
+                     view2(Y_share.data, B * T, D),
+                     mp);
+    }
 
     // Second wave: trunc output matmul accum.
     std::mt19937_64 rng_out(1);

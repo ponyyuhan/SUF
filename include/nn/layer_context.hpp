@@ -88,6 +88,15 @@ struct LayerContext {
     (void)b;
     return nullptr;
   }
+
+  bool uses_gpu_backend() const {
+#ifdef SUF_HAVE_CUDA
+    const proto::PfssBackendBatch* b = pfss_backend_override ? pfss_backend_override : owned_pfss_backend.get();
+    return (b && dynamic_cast<const proto::PfssGpuStagedEval*>(b) != nullptr);
+#else
+    return false;
+#endif
+  }
 };
 
 inline compiler::Scale make_scale(int frac_bits, bool is_signed = true) {

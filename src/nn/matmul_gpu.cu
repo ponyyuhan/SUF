@@ -1,0 +1,241 @@
+#include "nn/matmul_gpu.hpp"
+
+#ifdef SUF_HAVE_CUDA
+#include <cuda_runtime.h>
+#include <mutex>
+#include <stdexcept>
+
+namespace {
+
+// Split 64-bit multiply into 32-bit halves to keep mod 2^64 semantics while
+// mapping to faster 32-bit mul instructions.
+__device__ __forceinline__ uint64_t mul_mod64(uint64_t a, uint64_t b) {
+  uint64_t alo = static_cast<uint32_t>(a);
+  uint64_t ahi = a >> 32;
+  uint64_t blo = static_cast<uint32_t>(b);
+  uint64_t bhi = b >> 32;
+  uint64_t cross = alo * bhi + ahi * blo;
+  uint64_t low = alo * blo;
+  return low + (cross << 32);
+}
+
+template<int BM, int BN, int BK, int COLS_PER_THREAD>
+__global__ void matmul_publicW_tiled(const uint64_t* __restrict__ X,
+                                     const int64_t* __restrict__ W,
+                                     const int64_t* __restrict__ bias,
+                                     uint64_t* __restrict__ Y,
+                                     size_t batch,
+                                     size_t M,
+                                     size_t K,
+                                     size_t N,
+                                     bool w_transposed) {
+  const int tx = threadIdx.x;
+  const int ty = threadIdx.y;
+  const size_t block_m = static_cast<size_t>(blockIdx.y) * BM;
+  const size_t block_n = static_cast<size_t>(blockIdx.x) * BN;
+  const size_t m = block_m + ty;
+  const size_t col_base = block_n + static_cast<size_t>(tx * COLS_PER_THREAD);
+  const bool active_row = (m < M);
+
+  extern __shared__ uint8_t smem[];
+  uint64_t* sX = reinterpret_cast<uint64_t*>(smem);
+  int64_t* sW = reinterpret_cast<int64_t*>(sX + BM * BK);
+
+  for (size_t b = 0; b < batch; ++b) {
+    uint64_t acc[COLS_PER_THREAD];
+    #pragma unroll
+    for (int c = 0; c < COLS_PER_THREAD; ++c) acc[c] = 0;
+    const uint64_t* Xb = X + b * M * K;
+    const size_t tiles = (K + BK - 1) / BK;
+
+    for (size_t tile = 0; tile < tiles; ++tile) {
+      const size_t k_base = tile * BK;
+      // Load X tile (one row per thread.y, COLS_PER_THREAD columns per thread.x)
+      #pragma unroll
+      for (int c = 0; c < COLS_PER_THREAD; ++c) {
+        const size_t xc = k_base + static_cast<size_t>(tx * COLS_PER_THREAD + c);
+        const size_t x_idx = m * K + xc;
+        uint64_t v = 0;
+        if (active_row && xc < K) v = Xb[x_idx];
+        sX[ty * BK + tx * COLS_PER_THREAD + c] = v;
+      }
+      // Load W tile two rows at a time to cover BK rows.
+      const int wrow0 = static_cast<int>(k_base) + ty;
+      const int wrow1 = wrow0 + BM;
+      #pragma unroll
+      for (int pass = 0; pass < 2; ++pass) {
+        const int wrow = (pass == 0) ? wrow0 : wrow1;
+        if (wrow < static_cast<int>(K) && wrow - static_cast<int>(k_base) < BK) {
+          #pragma unroll
+          for (int c = 0; c < COLS_PER_THREAD; ++c) {
+            const size_t wc = col_base + static_cast<size_t>(c);
+            int64_t wv = 0;
+            if (wc < N) {
+              const size_t widx = w_transposed ? (wc * K + static_cast<size_t>(wrow))
+                                               : (static_cast<size_t>(wrow) * N + wc);
+              wv = W[widx];
+            }
+            sW[(wrow - static_cast<int>(k_base)) * BN + tx * COLS_PER_THREAD + c] = wv;
+          }
+        } else if (wrow - static_cast<int>(k_base) < BK) {
+          #pragma unroll
+          for (int c = 0; c < COLS_PER_THREAD; ++c) {
+            sW[(wrow - static_cast<int>(k_base)) * BN + tx * COLS_PER_THREAD + c] = 0;
+          }
+        }
+      }
+      __syncthreads();
+
+      #pragma unroll
+      for (int k = 0; k < BK; ++k) {
+        const uint64_t xv = sX[ty * BK + k];
+        #pragma unroll
+        for (int c = 0; c < COLS_PER_THREAD; ++c) {
+          const uint64_t wv = static_cast<uint64_t>(sW[k * BN + tx * COLS_PER_THREAD + c]);
+          acc[c] += mul_mod64(xv, wv);
+        }
+      }
+      __syncthreads();
+    }
+
+    #pragma unroll
+    for (int c = 0; c < COLS_PER_THREAD; ++c) {
+      const size_t n = col_base + static_cast<size_t>(c);
+      if (!active_row || n >= N) continue;
+      if (bias) acc[c] += static_cast<uint64_t>(bias[n]);
+      Y[(b * M + m) * N + n] = acc[c];
+    }
+  }
+}
+
+struct MatmulScratch {
+  uint64_t* dX = nullptr;
+  int64_t* dW = nullptr;
+  int64_t* dB = nullptr;
+  uint64_t* dY = nullptr;
+  size_t x_cap = 0;
+  size_t w_cap = 0;
+  size_t b_cap = 0;
+  size_t y_cap = 0;
+  std::mutex mu;
+
+  bool ensure_alloc(size_t bytes, void** ptr, size_t& cap) {
+    if (bytes <= cap) return true;
+    if (*ptr) cudaFree(*ptr);
+    cudaError_t st = cudaMalloc(ptr, bytes);
+    if (st != cudaSuccess) {
+      *ptr = nullptr;
+      cap = 0;
+      return false;
+    }
+    cap = bytes;
+    return true;
+  }
+
+  void release() {
+    if (dX) cudaFree(dX);
+    if (dW) cudaFree(dW);
+    if (dB) cudaFree(dB);
+    if (dY) cudaFree(dY);
+    dX = nullptr; dW = nullptr; dB = nullptr; dY = nullptr;
+    x_cap = w_cap = b_cap = y_cap = 0;
+  }
+};
+
+MatmulScratch& scratch() {
+  static MatmulScratch s;
+  return s;
+}
+
+cudaStream_t get_default_stream() {
+  static cudaStream_t stream = nullptr;
+  static std::once_flag once;
+  std::call_once(once, [] {
+    cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+  });
+  return stream;
+}
+
+inline bool check(cudaError_t st) { return st == cudaSuccess; }
+
+}  // namespace
+#endif  // SUF_HAVE_CUDA
+
+namespace nn {
+
+bool matmul_publicW_gpu(const TensorView<uint64_t>& X_share,
+                        const TensorView<int64_t>& W_public,
+                        TensorView<uint64_t> Y_share,
+                        const MatmulParams& params) {
+#ifndef SUF_HAVE_CUDA
+  (void)X_share;
+  (void)W_public;
+  (void)Y_share;
+  (void)params;
+  return false;
+#else
+  if (params.local_rescale) {
+    throw std::runtime_error("matmul_publicW_gpu: local_rescale is unsupported; insert explicit Rescale");
+  }
+  if (X_share.dims != 2 && X_share.dims != 3) return false;
+  size_t batch = (X_share.dims == 2) ? 1 : X_share.shape[0];
+  size_t M = (X_share.dims == 2) ? X_share.shape[0] : X_share.shape[1];
+  size_t K = (X_share.dims == 2) ? X_share.shape[1] : X_share.shape[2];
+  size_t N = params.w_transposed ? W_public.shape[0] : W_public.shape[1];
+  size_t total_out = batch * M * N;
+
+  cudaStream_t stream = params.overlap_stream ? reinterpret_cast<cudaStream_t>(params.overlap_stream)
+                                              : get_default_stream();
+  auto& sc = scratch();
+  std::unique_lock<std::mutex> lock(sc.mu);
+
+  bool ok = true;
+  ok &= sc.ensure_alloc(sizeof(uint64_t) * batch * M * K, reinterpret_cast<void**>(&sc.dX), sc.x_cap);
+  ok &= sc.ensure_alloc(sizeof(int64_t) * W_public.shape[0] * W_public.shape[1], reinterpret_cast<void**>(&sc.dW), sc.w_cap);
+  if (params.bias) {
+    ok &= sc.ensure_alloc(sizeof(int64_t) * params.bias->size(), reinterpret_cast<void**>(&sc.dB), sc.b_cap);
+  }
+  ok &= sc.ensure_alloc(sizeof(uint64_t) * total_out, reinterpret_cast<void**>(&sc.dY), sc.y_cap);
+  if (!ok) {
+    sc.release();
+    return false;
+  }
+  size_t X_bytes = sizeof(uint64_t) * batch * M * K;
+  size_t W_bytes = sizeof(int64_t) * W_public.shape[0] * W_public.shape[1];
+  ok &= check(cudaMemcpyAsync(sc.dX, X_share.data, X_bytes, cudaMemcpyHostToDevice, stream));
+  ok &= check(cudaMemcpyAsync(sc.dW, W_public.data, W_bytes, cudaMemcpyHostToDevice, stream));
+  if (params.bias) {
+    ok &= check(cudaMemcpyAsync(sc.dB, params.bias->data(), sizeof(int64_t) * params.bias->size(),
+                                cudaMemcpyHostToDevice, stream));
+  } else {
+    sc.dB = nullptr;
+  }
+  if (!ok) {
+    sc.release();
+    return false;
+  }
+  // Use a wider tile along N with two columns per thread to reduce global loads.
+  constexpr int BM = 16;
+  constexpr int BN = 32;
+  constexpr int BK = 32;
+  constexpr int COLS = 2;
+  dim3 threads(BN / COLS, BM);
+  dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
+  size_t smem = sizeof(uint64_t) * BM * BK + sizeof(int64_t) * BK * BN;
+  int64_t* bias_ptr = params.bias ? sc.dB : nullptr;
+  matmul_publicW_tiled<BM, BN, BK, COLS><<<grid, threads, smem, stream>>>(
+      sc.dX, sc.dW, bias_ptr, sc.dY, batch, M, K, N, params.w_transposed);
+  if (!check(cudaGetLastError())) {
+    sc.release();
+    return false;
+  }
+  ok &= check(cudaMemcpyAsync(Y_share.data, sc.dY, sizeof(uint64_t) * total_out,
+                              cudaMemcpyDeviceToHost, stream));
+  ok &= check(cudaStreamSynchronize(stream));
+  // Keep device buffers for reuse; lock held for lifetime of this call to avoid races.
+  lock.unlock();
+  return ok;
+#endif
+}
+
+}  // namespace nn

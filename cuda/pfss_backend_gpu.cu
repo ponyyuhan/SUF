@@ -32,6 +32,10 @@ extern "C" __global__ void vector_lut_kernel_keyed(const uint8_t* keys_flat,
                                                    const uint64_t* xs,
                                                    uint64_t* out,
                                                    size_t N);
+extern "C" __global__ void unpack_eff_bits_kernel(const uint64_t* packed,
+                                                  int eff_bits,
+                                                  uint64_t* out,
+                                                  size_t N);
 
 namespace proto {
 
@@ -75,11 +79,75 @@ inline uint64_t mask_bits(int bits) {
   return (uint64_t(1) << bits) - 1ull;
 }
 
+inline size_t packed_words(size_t elems, int eff_bits) {
+  if (eff_bits <= 0 || eff_bits > 64) return elems;
+  if (eff_bits == 64) return elems;
+  uint64_t bits = static_cast<uint64_t>(elems) * static_cast<uint64_t>(eff_bits);
+  return static_cast<size_t>((bits + 63) >> 6);
+}
+
+std::vector<uint64_t> pack_eff_bits_host(const std::vector<uint64_t>& xs, int eff_bits) {
+  if (eff_bits <= 0 || eff_bits > 64) throw std::runtime_error("pack_eff_bits_host: eff_bits out of range");
+  if (eff_bits == 64) return xs;
+  size_t words = packed_words(xs.size(), eff_bits);
+  std::vector<uint64_t> packed(words, 0);
+  uint64_t mask = mask_bits(eff_bits);
+  for (size_t i = 0; i < xs.size(); i++) {
+    uint64_t v = xs[i] & mask;
+    size_t bit_idx = i * static_cast<size_t>(eff_bits);
+    size_t w = bit_idx >> 6;
+    int off = static_cast<int>(bit_idx & 63);
+    packed[w] |= (v << off);
+    int spill = off + eff_bits - 64;
+    if (spill > 0 && w + 1 < packed.size()) {
+      packed[w + 1] |= (v >> (eff_bits - spill));
+    }
+  }
+  return packed;
+}
+
+inline uint8_t aes_sbox(uint8_t x) {
+  static const uint8_t sbox[256] = {
+      0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+      0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+      0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+      0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+      0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+      0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+      0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+      0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+      0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+      0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+      0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+      0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+      0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+      0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+      0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+      0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16};
+  return sbox[x];
+}
+
 inline std::array<uint8_t,176> expand_aes_round_keys(const std::array<uint8_t,16>& seed) {
-  AES_KEY key;
-  AES_set_encrypt_key(seed.data(), 128, &key);
   std::array<uint8_t,176> rk{};
-  std::memcpy(rk.data(), key.rd_key, 176);
+  std::memcpy(rk.data(), seed.data(), 16);
+  int bytes_gen = 16;
+  uint8_t rcon = 1;
+  auto xtime = [](uint8_t x) { return static_cast<uint8_t>((x << 1) ^ (((x >> 7) & 1u) * 0x1b)); };
+  while (bytes_gen < 176) {
+    uint8_t t[4];
+    for (int i = 0; i < 4; i++) t[i] = rk[bytes_gen - 4 + i];
+    if (bytes_gen % 16 == 0) {
+      uint8_t tmp = t[0];
+      t[0] = t[1]; t[1] = t[2]; t[2] = t[3]; t[3] = tmp;
+      for (int i = 0; i < 4; i++) t[i] = aes_sbox(t[i]);
+      t[0] ^= rcon;
+      rcon = xtime(rcon);
+    }
+    for (int i = 0; i < 4; i++) {
+      rk[bytes_gen] = rk[bytes_gen - 16] ^ t[i];
+      bytes_gen++;
+    }
+  }
   return rk;
 }
 
@@ -323,6 +391,7 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
     keys_buf_.release();
     xs_buf_.release();
     out_buf_.release();
+    packed_buf_.release();
     if (h2d_done_) cudaEventDestroy(h2d_done_);
     if (compute_done_) cudaEventDestroy(compute_done_);
     if (copy_stream_) cudaStreamDestroy(copy_stream_);
@@ -387,18 +456,47 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
       ensure_streams();
       size_t keys_size = key_bytes * xs_u64.size();
       keys_buf_.ensure(keys_size);
-      xs_buf_.ensure(xs_u64.size() * sizeof(uint64_t));
+      bool pack_eff = (in_bits > 0 && in_bits < 64);
+      std::vector<uint64_t> packed_xs;
+      size_t xs_bytes = xs_u64.size() * sizeof(uint64_t);
+      if (pack_eff) {
+        packed_xs = pack_eff_bits_host(xs_u64, in_bits);
+        xs_bytes = packed_xs.size() * sizeof(uint64_t);
+      }
+      if (pack_eff) {
+        packed_buf_.ensure(xs_bytes);
+      } else {
+        xs_buf_.ensure(xs_bytes);
+      }
       out_buf_.ensure(xs_u64.size() * static_cast<size_t>(out_bytes));
       check_cuda(cudaMemcpyAsync(keys_buf_.ptr, keys_flat, keys_size, cudaMemcpyHostToDevice, copy_stream_),
                  "cudaMemcpy keys");
-      check_cuda(cudaMemcpyAsync(xs_buf_.ptr, xs_u64.data(), xs_u64.size() * sizeof(uint64_t),
-                                 cudaMemcpyHostToDevice, copy_stream_), "cudaMemcpy xs");
+      if (pack_eff) {
+        check_cuda(cudaMemcpyAsync(packed_buf_.ptr, packed_xs.data(), xs_bytes,
+                                   cudaMemcpyHostToDevice, copy_stream_), "cudaMemcpy xs packed");
+      } else {
+        check_cuda(cudaMemcpyAsync(xs_buf_.ptr, xs_u64.data(), xs_bytes,
+                                   cudaMemcpyHostToDevice, copy_stream_), "cudaMemcpy xs");
+      }
       check_cuda(cudaEventRecord(h2d_done_, copy_stream_), "event record h2d");
       check_cuda(cudaStreamWaitEvent(stream_, h2d_done_, 0), "wait h2d");
       constexpr int kBlock = 256;
       int grid = static_cast<int>((xs_u64.size() + kBlock - 1) / kBlock);
+      const uint64_t* xs_dev = nullptr;
+      if (pack_eff) {
+        xs_buf_.ensure(xs_u64.size() * sizeof(uint64_t));
+        int grid_unpack = static_cast<int>((xs_u64.size() + kBlock - 1) / kBlock);
+        unpack_eff_bits_kernel<<<grid_unpack, kBlock, 0, stream_>>>(
+            reinterpret_cast<const uint64_t*>(packed_buf_.ptr),
+            in_bits,
+            reinterpret_cast<uint64_t*>(xs_buf_.ptr),
+            xs_u64.size());
+        xs_dev = reinterpret_cast<const uint64_t*>(xs_buf_.ptr);
+      } else {
+        xs_dev = reinterpret_cast<const uint64_t*>(xs_buf_.ptr);
+      }
       eval_dcf_many_kernel<<<grid, kBlock, 0, stream_>>>(keys_buf_.ptr, key_bytes, in_bits, out_bytes,
-                                                         reinterpret_cast<const uint64_t*>(xs_buf_.ptr),
+                                                         xs_dev,
                                                          reinterpret_cast<uint8_t*>(out_buf_.ptr),
                                                          xs_u64.size());
       check_cuda(cudaGetLastError(), "eval_dcf_many_kernel");
@@ -473,18 +571,45 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
       ensure_streams();
       size_t keys_size = key_bytes * xs_u64.size();
       keys_buf_.ensure(keys_size);
-      xs_buf_.ensure(xs_u64.size() * sizeof(uint64_t));
+      bool pack_eff = (in_bits > 0 && in_bits < 64);
+      std::vector<uint64_t> packed_xs;
+      size_t xs_bytes = xs_u64.size() * sizeof(uint64_t);
+      if (pack_eff) {
+        packed_xs = pack_eff_bits_host(xs_u64, in_bits);
+        xs_bytes = packed_xs.size() * sizeof(uint64_t);
+        packed_buf_.ensure(xs_bytes);
+      } else {
+        xs_buf_.ensure(xs_bytes);
+      }
       out_buf_.ensure(xs_u64.size() * static_cast<size_t>(out_words) * sizeof(uint64_t));
       check_cuda(cudaMemcpyAsync(keys_buf_.ptr, keys_flat, keys_size, cudaMemcpyHostToDevice, copy_stream_),
                  "cudaMemcpy packed keys");
-      check_cuda(cudaMemcpyAsync(xs_buf_.ptr, xs_u64.data(), xs_u64.size() * sizeof(uint64_t),
-                                 cudaMemcpyHostToDevice, copy_stream_), "cudaMemcpy packed xs");
+      if (pack_eff) {
+        check_cuda(cudaMemcpyAsync(packed_buf_.ptr, packed_xs.data(), xs_bytes,
+                                   cudaMemcpyHostToDevice, copy_stream_), "cudaMemcpy packed xs");
+      } else {
+        check_cuda(cudaMemcpyAsync(xs_buf_.ptr, xs_u64.data(), xs_bytes,
+                                   cudaMemcpyHostToDevice, copy_stream_), "cudaMemcpy packed xs");
+      }
       check_cuda(cudaEventRecord(h2d_done_, copy_stream_), "event record h2d packed");
       check_cuda(cudaStreamWaitEvent(stream_, h2d_done_, 0), "wait h2d packed");
       constexpr int kBlock = 256;
       int grid = static_cast<int>((xs_u64.size() + kBlock - 1) / kBlock);
+      const uint64_t* xs_dev = nullptr;
+      if (pack_eff) {
+        xs_buf_.ensure(xs_u64.size() * sizeof(uint64_t));
+        int grid_unpack = static_cast<int>((xs_u64.size() + kBlock - 1) / kBlock);
+        unpack_eff_bits_kernel<<<grid_unpack, kBlock, 0, stream_>>>(
+            reinterpret_cast<const uint64_t*>(packed_buf_.ptr),
+            in_bits,
+            reinterpret_cast<uint64_t*>(xs_buf_.ptr),
+            xs_u64.size());
+        xs_dev = reinterpret_cast<const uint64_t*>(xs_buf_.ptr);
+      } else {
+        xs_dev = reinterpret_cast<const uint64_t*>(xs_buf_.ptr);
+      }
       packed_cmp_kernel_keyed<<<grid, kBlock, 0, stream_>>>(keys_buf_.ptr, key_bytes,
-                                                            reinterpret_cast<const uint64_t*>(xs_buf_.ptr),
+                                                            xs_dev,
                                                             reinterpret_cast<uint64_t*>(out_buf_.ptr),
                                                             xs_u64.size());
       check_cuda(cudaGetLastError(), "packed_cmp_kernel_keyed");
@@ -556,19 +681,47 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
       ensure_streams();
       size_t keys_size = key_bytes * xs_u64.size();
       keys_buf_.ensure(keys_size);
-      xs_buf_.ensure(xs_u64.size() * sizeof(uint64_t));
+      bool pack_eff = (hdr0->in_bits > 0 && hdr0->in_bits < 64);
+      std::vector<uint64_t> packed_xs;
+      size_t xs_bytes = xs_u64.size() * sizeof(uint64_t);
+      if (pack_eff) {
+        packed_xs = pack_eff_bits_host(xs_u64, hdr0->in_bits);
+        xs_bytes = packed_xs.size() * sizeof(uint64_t);
+        packed_buf_.ensure(xs_bytes);
+      } else {
+        xs_buf_.ensure(xs_bytes);
+      }
       out_buf_.ensure(xs_u64.size() * static_cast<size_t>(out_words) * sizeof(uint64_t));
       check_cuda(cudaMemcpyAsync(keys_buf_.ptr, keys_flat, keys_size, cudaMemcpyHostToDevice, copy_stream_),
                  "cudaMemcpy interval keys");
-      check_cuda(cudaMemcpyAsync(xs_buf_.ptr, xs_u64.data(), xs_u64.size() * sizeof(uint64_t),
-                                 cudaMemcpyHostToDevice, copy_stream_),
-                 "cudaMemcpy interval xs");
+      if (pack_eff) {
+        check_cuda(cudaMemcpyAsync(packed_buf_.ptr, packed_xs.data(), xs_bytes,
+                                   cudaMemcpyHostToDevice, copy_stream_),
+                   "cudaMemcpy interval xs packed");
+      } else {
+        check_cuda(cudaMemcpyAsync(xs_buf_.ptr, xs_u64.data(), xs_bytes,
+                                   cudaMemcpyHostToDevice, copy_stream_),
+                   "cudaMemcpy interval xs");
+      }
       check_cuda(cudaEventRecord(h2d_done_, copy_stream_), "event record h2d interval");
       check_cuda(cudaStreamWaitEvent(stream_, h2d_done_, 0), "wait h2d interval");
       constexpr int kBlock = 256;
       int grid = static_cast<int>((xs_u64.size() + kBlock - 1) / kBlock);
+      const uint64_t* xs_dev = nullptr;
+      if (pack_eff) {
+        xs_buf_.ensure(xs_u64.size() * sizeof(uint64_t));
+        int grid_unpack = static_cast<int>((xs_u64.size() + kBlock - 1) / kBlock);
+        unpack_eff_bits_kernel<<<grid_unpack, kBlock, 0, stream_>>>(
+            reinterpret_cast<const uint64_t*>(packed_buf_.ptr),
+            hdr0->in_bits,
+            reinterpret_cast<uint64_t*>(xs_buf_.ptr),
+            xs_u64.size());
+        xs_dev = reinterpret_cast<const uint64_t*>(xs_buf_.ptr);
+      } else {
+        xs_dev = reinterpret_cast<const uint64_t*>(xs_buf_.ptr);
+      }
       vector_lut_kernel_keyed<<<grid, kBlock, 0, stream_>>>(keys_buf_.ptr, key_bytes,
-                                                            reinterpret_cast<const uint64_t*>(xs_buf_.ptr),
+                                                            xs_dev,
                                                             reinterpret_cast<uint64_t*>(out_buf_.ptr),
                                                             xs_u64.size());
       check_cuda(cudaGetLastError(), "vector_lut_kernel_keyed");
@@ -657,6 +810,7 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
   mutable DeviceBuffer keys_buf_;
   mutable DeviceBuffer xs_buf_;
   mutable DeviceBuffer out_buf_;
+  mutable DeviceBuffer packed_buf_;
   mutable std::mutex mu_;
 
   void ensure_streams() const {

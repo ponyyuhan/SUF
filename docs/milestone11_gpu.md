@@ -7,46 +7,25 @@ Goal: add a CUDA PFSS backend (Sigma-style: GPU PRG/DPF, packed pred/coeff eval,
 - Start with a GPU stub (ClearBackend) so CI stays green; incrementally drop in real kernels.
 - Preserve existing PFSS batching/planner APIs; add backend selection and device staging behind them.
 
-## Current progress
+## Current progress (updated)
 - ✅ Backend selection factory (`proto/backend_factory.hpp`) with `cpu/gpu/auto` + env `SUF_PFSS_BACKEND`; CPU default intact.
-- ✅ LayerContext supports backend override/ownership and env selection helper; PFSS batches track device-byte budgets.
+- ✅ LayerContext supports backend override/ownership/env selection; PFSS batches track device-byte budgets and can stage hatx to GPU.
 - ✅ GPU stager interface (`PfssGpuStager`) plumbed into `PfssSuperBatch`; pending device bytes counted.
-- ✅ GPU backend skeleton (`cuda/pfss_backend_gpu.cu`): derives from `PfssIntervalLutExt`, flattens/upload pred/coeff keys to device (placeholder `cuda_pfss::upload_key`), caches handles; composite eval still uses CPU after staging.
-- ✅ CUDA-gated regression `test_pfss_gpu` (built only if `HAVE_SUF_CUDA`) exercises DCF/interval LUT/composite truncation against CPU.
-- ❌ Real device-side AES-CTR/DPF + hatx pack/payload accumulation not implemented; CUDA kernels are copy/zero stubs.
-- ❌ Planner/runtime not yet choosing GPU backend automatically in main paths; no device budget enforcement beyond SuperBatch; no overlap/pipeline on GPU.
-- ❌ No GPU-vs-CPU equivalence ctests once real kernels exist; no GPU packing kernels for eff_bits.
+- ✅ GPU backend: AES-CTR PRG + packed CDPF/vector-DPF kernels (pred masks, interval LUT payloads), device key blobs with round keys; staged eval interface (`PfssGpuStagedEval`) with copy/compute streams/events; compute stream exposed for overlap.
+- ✅ Composite path uses packed predicates/cuts on GPU; CUDA-gated tests cover packed compare/LUT and composite truncation vs CPU (`test_pfss_gpu` with `RUN_GPU_COMPOSITE=1`).
+- ✅ Overlap hooks: LayerContext exposes PFSS compute stream; matmul params accept an overlap stream; a tiled CUDA matmul (mod 2^64) exists; `bench_gemm_overlap` exercises PFSS packed compare + GEMM overlap (CUDA-only).
+- ✅ eff_bits-aware CUDA pack/unpack (bitpacked H2D with device unpack) and ragged packing test (`test_cuda_pack_effbits`); backend auto-packs when `in_bits<64`.
+- ✅ Planner/runtime wiring: env-driven GPU selection in attention/MLP; PFSS batches adopt GPU stager and device-byte budgets when GPU backend selected; CUDA stager (`CudaPfssStager`) available.
+- ✅ Softmax GPU smoke added (`test_softmax_gpu_smoke`) alongside GapARS/Faithful trunc CUDA equivalence.
+- ✅ GEMM kernel tuned (BK=32, vectorized loads) and overlap benchmark now runs PFSS + GEMM on separate streams/threads (`bench_gemm_overlap`).
 
 ## Remaining tasks (detailed)
 
-### 1) Device key/packer and kernels (blocking)
-- Define device-side key structs in `pfss_cuda_api.hpp` (pred step-DCF, coeff step-DCF, interval LUT metadata).
-- Implement host packers to flatten keys into these structs and upload with `cuda_pfss::upload_key` (one device blob per pred/coeff program).
-- Implement AES-CTR PRG kernel (block counter-based) and DPF traversal for predicates (bits) and coeff (StepDCF delta accumulation / Interval LUT fetch).
-- Implement hatx pack kernel (bits from `uint64_t x̂`) to SoA layout expected by composite eval.
-- Implement payload accumulation kernels to produce `(haty_share, bool_share)` identical to CPU layout (r words arith per row, ell bools).
-- Wire `GpuPfssBackend::eval_composite` to call these kernels end-to-end (no CPU fallback) and reuse cached device keys.
+### 1) Overlap/pipeline
+- Plug PFSS compute stream into stream-aware GEMM/matmul (tile/WMMA per 32-bit halves if needed), run PFSS and GEMM on separate streams with dependency events, and extend `bench_gemm_overlap` with real timing on hardware.
 
-### 2) Planner/runtime wiring (GPU selection + budgets)
-- Add env-driven backend selection in layer entry points (attention/MLP/transformer) via `LayerContext::select_backend_from_env()`.
-- If GPU backend chosen: require a GPU stager, set `max_pending_device_bytes`, and route `pfss_batch` to the GPU backend.
-- Ensure PFSS planner/PhaseExecutor honor device budgets and avoid host-side clear that would drop device buffers.
-- Add guardrails: fail closed if GPU selected but stager/channel missing.
-
-### 3) GPU packing/unpacking (eff_bits, causal/ragged)
-- Implement CUDA pack/unpack for arbitrary `eff_bits` and causal/ragged softmax packing; integrate with planner byte budgets.
-- Add bytes-based regressions for GPU path similar to CPU causal bytes test (gated on CUDA).
-
-### 4) Equivalence tests (CUDA-gated)
-- Add ctests (guarded by `HAVE_SUF_CUDA`) for:
-  - Pred eval: small set of inputs vs. CPU.
-  - StepDCF/Interval LUT coeff eval vs. CPU.
-  - Composite truncation (GapARS/faithful) vs. CPU on tiny batches.
-- Add a small attention/softmax smoke that runs GPU backend and compares to CPU for a tiny problem size.
-
-### 5) Overlap/pipeline (after correctness)
-- Add CUDA streams for PFSS eval; allow async runner to use GPU stream + dedicated channel if safe.
-- Bench: layer-level breakdown reporting PFSS GPU time vs. GEMM, bytes, and overlap.
+### 2) Perf polish
+- Benchmark PFSS kernels and end-to-end overlap (attention/MLP), tuning block sizes/SoA layout once GEMM overlap is wired.
 
 ## Final goal
 - GPU backend provides end-to-end device-side PFSS (pred/coeff/composite) with AES-CTR/DPF and hatx/payload kernels, selected via env.

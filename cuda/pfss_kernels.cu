@@ -41,10 +41,14 @@ __device__ void mix_columns(uint8_t* s) {
 __device__ void sub_bytes_shift_rows(uint8_t* s) {
   uint8_t t[16];
   // SubBytes and ShiftRows combined.
-  t[0] = kSBox[s[0]];   t[4] = kSBox[s[5]];   t[8]  = kSBox[s[10]]; t[12] = kSBox[s[15]];
-  t[1] = kSBox[s[4]];   t[5] = kSBox[s[9]];   t[9]  = kSBox[s[14]]; t[13] = kSBox[s[3]];
-  t[2] = kSBox[s[8]];   t[6] = kSBox[s[13]];  t[10] = kSBox[s[2]];  t[14] = kSBox[s[7]];
-  t[3] = kSBox[s[12]];  t[7] = kSBox[s[1]];   t[11] = kSBox[s[6]];  t[15] = kSBox[s[11]];
+  // Row0 unchanged
+  t[0] = kSBox[s[0]];   t[4] = kSBox[s[4]];   t[8]  = kSBox[s[8]];  t[12] = kSBox[s[12]];
+  // Row1 shift left by 1
+  t[1] = kSBox[s[5]];   t[5] = kSBox[s[9]];   t[9]  = kSBox[s[13]]; t[13] = kSBox[s[1]];
+  // Row2 shift left by 2
+  t[2] = kSBox[s[10]];  t[6] = kSBox[s[14]];  t[10] = kSBox[s[2]];  t[14] = kSBox[s[6]];
+  // Row3 shift left by 3
+  t[3] = kSBox[s[15]];  t[7] = kSBox[s[3]];   t[11] = kSBox[s[7]];  t[15] = kSBox[s[11]];
   for (int i = 0; i < 16; i++) s[i] = t[i];
 }
 
@@ -189,6 +193,30 @@ extern "C" __global__ void vector_lut_kernel_keyed(const uint8_t* keys_flat,
     uint64_t share = (hdr->party == 0) ? ks : (row[w] - ks);
     out[idx * static_cast<size_t>(hdr->out_words) + static_cast<size_t>(w)] = share;
   }
+}
+
+// Unpack a dense bitstream of fixed-width (eff_bits) integers into u64 values.
+extern "C" __global__ void unpack_eff_bits_kernel(const uint64_t* packed,
+                                                  int eff_bits,
+                                                  uint64_t* out,
+                                                  size_t N) {
+  size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= N) return;
+  if (eff_bits <= 0 || eff_bits > 64) return;
+  size_t bit_idx = idx * static_cast<size_t>(eff_bits);
+  size_t word_idx = bit_idx >> 6;
+  int bit_off = static_cast<int>(bit_idx & 63);
+  uint64_t val = packed[word_idx] >> bit_off;
+  int bits_used = 64 - bit_off;
+  if (bits_used < eff_bits) {
+    uint64_t hi = packed[word_idx + 1];
+    val |= (hi << bits_used);
+  }
+  if (eff_bits < 64) {
+    uint64_t mask = (eff_bits == 64) ? ~0ull : ((1ull << eff_bits) - 1ull);
+    val &= mask;
+  }
+  out[idx] = val;
 }
 
 namespace cuda_pfss {

@@ -3,118 +3,95 @@
 ## 目录结构（精简）
 
 ```
-CMakeLists.txt                    # 可选自动拉取 myl7/fss
-include/
-  core/                           # 环运算、pack/unpack
-  mpc/                            # Beaver 三元组、通道抽象
-  suf/                            # SUF IR、谓词、BoolExpr、mask rewrite + ref_eval/validate
-  compiler/                       # PFSS 描述（pred/coeff）、编译产物、suf_to_pfss.cpp
-  pfss/                           # 抽象 PFSS 接口
-  gates/                          # 门级 API + SiLU/Recip/nExp/Softmax 组合门 + 任务 bundle
-  runtime/                        # PhaseExecutor/PhaseTask 状态机、PfssSuperBatch、OpenCollector、PfssPhasePlanner、PfssAsyncRunner、StagedExecutor
-  nn/                             # attention/MLP/transformer 层，LayerContext/hoist/rescale/trunc 记录，staged softmax 任务
-  proto/                          # bits-in/bytes-out DCF 层（clear/myl7/sigmafast 后端、Beaver、tape）
-src/compiler/suf_to_pfss.cpp      # SUF→PFSS 编译实现
-src/runtime/*                     # PfssSuperBatch/OpenCollector 实现
-src/nn/*                          # attention_block / mlp_block / transformer_layer / staged softmax 演示
-src/demo/sim_harness.cpp          # 全流程两方模拟 + 断言
-src/demo/test_*                   # SUF/mask/编译/任务 测试
-expand*.md, initial.md, milestone*.md, advice*.md, revise_m11_*.md, paper.md
+CMakeLists.txt          # 可选自动拉取 myl7/fss，CUDA 架构可配
+include/                # 所有头文件
+  suf/                  # SUF IR、谓词、BoolExpr、mask rewrite + ref_eval/validate
+  compiler/             # PFSS 描述/编译产物、range/gap、suf_to_pfss.cpp
+  gates/                # 组合门 API（SiLU/Recip/nExp/Softmax/Trunc 等）
+  runtime/              # PhaseExecutor、PfssSuperBatch、OpenCollector、planner、staged/async 执行
+  nn/                   # attention/MLP/transformer 层、LayerContext、softmax 任务
+  proto/                # 后端抽象（clear/myl7/sigmafast/GPU）、Beaver、tape
+  mpc/core/pfss/...     # 环运算、pack/unpack、通道抽象
+cuda/                   # GPU 后端（AES-CTR、DPF、packed predicates/LUT、matmul）
+src/                    # 运行时/NN 实现、bench、demo/tests
+docs/                   # milestone/设计文档
 ```
 
 ## 核心流程与逻辑
 
-- **SUF 层**：`suf/validate.hpp` 校验区间/度数，`suf/ref_eval.hpp` 作为语义金标；`suf/mask_rewrite.hpp` 将谓词迁移到 `hatx=x+r` 域并引入 wrap bit（加法 share）；`suf/suf_silu_builders.hpp` 生成 SiLU/nExp/Recip 样条 SUF（r_out=4 coeff，degree=0，零 r_in）。
-- **编译管线**：`compiler/suf_to_pfss.cpp` 收集原始谓词→掩码重写→去重→Pred/Coeff ProgramDesc（Step-DCF 或 Interval LUT，处理 wrap 分段），输出 `CompiledSUFGate`（掩码、布局、额外 gate_kind/spec）。参考测试 `test_compile_pfss.cpp` 对比 `ref_eval`。
-- **范围/GAPARS/Clamp**：`range_analysis.hpp` 传播 `TensorFacts`（range/gap_cert/frac_bits/is_signed），`clamp_range` + `LayerGraph::kClamp/record_clamp` 用于 LN/SiLU/nExp/Recip/softmax 等已知界；`GateParams::range_hint` 与 `GapCert` 贯穿图和 trunc 降级；`GateKind::AutoTrunc` 在 `truncation_lowering` 中由 `select_trunc_kind` 自动挑 GapARS/faithful。
-- **PFSS/组合运行时/Planner**：`runtime/pfss_superbatch` 聚合 coeff+trunc（trunc 也走 `enqueue_composite`），`pfss_phase_planner` 能 snapshot 某 phase 的 PFSS 任务并强制单次 flush，带默认预算（jobs/hatx words/flushes）与统计；`pfss_layer_planner` 汇总跨 phase 预算（fail-closed）；`open_collector` 管理批量 Open；`phase_executor.hpp` 按 Need(Open/PfssCoeff/PfssTrunc) 驱动 flush_eval + finalize。
-- **任务层**：`phase_tasks.hpp` 包含 `TruncTask`（faithful/GapARS/AutoTrunc）、`CubicPolyTask`（SiLU/nExp/Recip 3 mul + 2 trunc，必要时走参考路径）、`RsqrtTask`（仿射初值 + NR）、`LayerNormTask`（mean/var trunc + rsqrt + affine，ReferenceBackend 下可明文调试）；`runtime/staged_executor.hpp` 支持“两阶段”收集 PFSS/Open→单次 flush→finalize，`nn/softmax_block_task_staged.hpp` 演示跨任务共享一次 PFSS flush。
-- **图/NN 路径**：`layer_graph` 维护 Rescale/Trunc/Clamp 节点和范围事实，hoist 可跨 rescale 链、add/sub/bias/Hadamard/mul_const/axpy；`nn/attention_block.cpp`（任务化 softmax/recip/nexp + matmul trunc 计划 + KV cache），`nn/mlp_block.cpp`（两段 matmul trunc + SiLU CubicPolyTask），`nn/transformer_layer.cpp`（两次 LayerNormTask + attention + MLP + 残差，显式 rescale/trunc，无本地 shift），`nn/layer_context.hpp` 记录 hoist/rescale/trunc 计划、GapCert、PfssSuperBatch。
+- **SUF→PFSS 编译**：`compiler/suf_to_pfss.cpp` 收集谓词、掩码重写、去重，生成 `Pred/Coeff ProgramDesc`（Step-DCF 或 Interval LUT，处理 wrap 段），输出 `CompiledSUFGate`（掩码、布局、gate_kind）。`test_compile_pfss.cpp` 对标 `ref_eval`。
+- **范围/GAPARS**：`range_analysis.hpp` 传播 `TensorFacts`（range/gap/frac_bits/is_signed），`record_clamp`/`LayerGraph::kClamp` 标注 LN/SiLU/nExp/Recip/softmax 等已知界；`GateKind::AutoTrunc` 通过 `select_trunc_kind` 选 GapARS/faithful。
+- **运行时/状态机**：`PhaseExecutor` 循环任务队列，根据 Need(Open/PfssCoeff/PfssTrunc) flush `OpenCollector` 与 `PfssSuperBatch`（coeff+trunc 同批合并），再 finalize。`PfssPhasePlanner` 支持单次 flush+统计（attention/MLP/softmax 波次已接入）；`PfssLayerPlanner` 聚合多 phase 预算；`PfssAsyncRunner` 可选异步 flush。`StagedExecutor` 演示 softmax 跨任务的一次 PFSS flush。
+- **任务层**（`runtime/phase_tasks.hpp`）：`TruncTask`（faithful/GapARS/AutoTrunc），`CubicPolyTask`（SiLU/nExp/Recip 3 mul + 2 trunc），`RsqrtTask`（仿射初值 + NR），`LayerNormTask`（mean/var trunc + rsqrt + affine），均复用 PhaseExecutor/PfssSuperBatch。
+- **NN 路径**：`nn/attention_block.cpp`（任务化 softmax/recip/nexp + matmul trunc + KV cache），`nn/mlp_block.cpp`（两段 matmul trunc + SiLU），`nn/transformer_layer.cpp`（两次 LayerNorm + attention + MLP + 残差），`nn/layer_context.hpp` 记录 hoist/rescale/trunc 计划、GapCert、PfssSuperBatch/GPU stager。
 
 ## PhaseExecutor 状态机与执行路径
 
-- PhaseExecutor 维护任务队列与 Need(Open/PfssCoeff/PfssTrunc/Done) 状态：NeedOpen 时 flush `OpenCollector`；NeedPfssCoeff/NeedPfssTrunc 时驱动对应 PFSS batch flush_eval + finalize，随后回到执行队列直到 Done。
-- `PfssSuperBatch` 合并同类 job，记录 job/flush/opened_words 统计；`finalize_pfss_once`/`PfssPhasePlanner` 能在 phase 层面一次性 snapshot + flush（attention/MLP/softmax 波次已接入），默认更紧 budgets；`PfssLayerPlanner` 对多个 phase 的 PFSS 使用做聚合与限额，并提供层末尾安全 flush 钩子；`PfssAsyncRunner` 提供可选异步 flush/finalize 包装；`StagedExecutor` 演示 softmax 场景下收集多个任务后仅触发一次 PFSS flush 并再 finalize。
-- LayerContext 保存 rescale/trunc 计划、GapCert 与共享的 PfssSuperBatch/LayerPlanner，便于跨 task hoist、范围决策与复用 planner 资源。
+- Need(Open/PfssCoeff/PfssTrunc/None) 驱动：遇到 NeedOpen flush `OpenCollector`，NeedPfss* 则 flush_eval + finalize 对应 `PfssSuperBatch`，直至任务 Done。
+- `PfssSuperBatch`：按 key/布局分桶合并 job，统计 hatx/pending/jobs/flush；同一批同时支持 coeff+trunc；GPU stager 可选。
+- `finalize_pfss_once`/`PfssPhasePlanner`：phase 内单次 flush+统计；`PfssLayerPlanner` 聚合多 phase 限额并提供层尾 barrier；`PfssAsyncRunner` 在有独立通道时可并行 flush。
 
 ## 构建与运行
 
-- **纯明文/快速验证（默认）**
+- **CPU/默认**  
   ```bash
   cmake -S . -B build
   cmake --build build
-  ./build/sim_harness            # 断言式，两方模拟，ReluARS/GeLU 各 2000 轮
-  ./build/test_suf_ref_eval      # 参考语义
-  ./build/test_mask_rewrite      # 掩码重写性质
-  ./build/test_compile_pfss      # SUF→PFSS 编译一致性
-  ./build/test_sigmafast         # SigmaFast packed compare + interval LUT
-  ./build/test_composite_runtime # 组合式 new 门运行时（Clear 后端，两方线程）
+  ./build/sim_harness
+  ctest -R "test_(suf_ref_eval|mask_rewrite|compile_pfss|sigmafast|composite_runtime|softmax_task|trunc_task|layernorm_task|matmul_and_attention_executor|staged_softmax)" -V
   ```
-- **接入真实 myl7/fss（自动 FetchContent，禁用 CUDA/样例/测试）**
+- **myl7/fss 后端**（自动 FetchContent，禁用其 CUDA/样例/测试）  
   ```bash
-  cmake -S . -B build_myl7 -DSUF_FETCH_MYL7_FSS=ON -DSUF_USE_MYL7_FSS=ON
+  cmake -S . -B build_myl7 -DSUF_USE_MYL7_FSS=ON -DSUF_FETCH_MYL7_FSS=ON
   cmake --build build_myl7
   ./build_myl7/sim_harness
   ```
-  需要系统 `libsodium` + OpenMP，CMake 会下载 `myl7/fss@v0.7.1` 并仅构建 `dcf/dpf/cw_mac_bytes` 静态库；`myl7_fss_backend` 将 payload 自动填充到 `kLambda`（默认 16B）块并清空 MSB 符号位，key 中的 party 位选择正确种子，eval 会解析 header 并循环调用 `dcf_eval` 复原原始 payload 长度。
-- **CUDA 后端/打包谓词**（需要 nvcc + GPU）
+- **CUDA/Packed 路径**（需要 nvcc+GPU，默认架构 sm80/86，可通过 `CMAKE_CUDA_ARCHITECTURES` 覆盖）  
   ```bash
-  cmake -S . -B build_cuda            # CMake 自动探测 CUDA，定义 SUF_HAVE_CUDA
+  cmake -S . -B build_cuda -DSUF_ENABLE_CUDA=ON
   cmake --build build_cuda -j
-  ctest -R test_cuda_packed_pfss -V   # Packed CDPF/LUT vs CPU
-  ctest -R test_pfss_gpu -V           # GPU DCF/LUT + composite (默认跳过 GPU composite)
-  RUN_GPU_COMPOSITE=1 ctest -R test_pfss_gpu -V   # 开启 GPU packed composite；GPU_COMPOSITE_DEBUG=1 可加日志
+  ctest -R "test_cuda_(packed_pfss|pred_mask|prg|pack_effbits|softmax_gpu_smoke|pfss_gpu)" -V
+  RUN_GPU_COMPOSITE=1 ctest -R test_pfss_gpu -V   # 开启 GPU packed composite
+  ./build_cuda/bench_gemm_overlap                 # PFSS+GEMM 重叠基准
   ```
 
 ## 代码与数据对齐要点
 
-- **Tape/顺序**：`proto/tape.hpp` 统一标签+长度，ReluARS/GeLU 的 Tape 顺序固定；在线 evaluator 严格按顺序消费，避免乱序泄露。
-- **wrap bit**：所有 wrap/符号位均为加法 share（`u64`），Tape 存 share 值；在线通过 `BitRingOps::SEL(shared_wrap, nowrap_branch, wrap_branch)` 合成，不暴露公共位。
-- **PFSS key/输出格式**：`pred` 采用 `kU64PerBit`（每比较一字），`coeff` Step-DCF 输出 `out_words = r*(d+1)`；`myl7_fss_backend` key header `[in_bits][num_chunks][party][0][payload_len_le32]`，chunk=`seed||cws||cw_np1`。
-- **范围驱动 Rescale/Trunc/Clamp**：`range_analysis.hpp` 传播 `TensorFacts`，`clamp_range`/`kClamp`/`record_clamp` 标注 LN/SiLU/nExp/Recip/softmax/GeLU 的输出界，Bias add 用精确 min/max；`rescale_pass.cpp` hoist rescale over rescale chain、add/sub/bias/Hadamard/mul_const/axpy（需 frac/sign 匹配）；`MatmulRescaleSite` 携带 accum_range/prefer_gapars，GapARS 选择优先用于有 GapCert 的累加与 softmax/LN/recip 的 AutoTrunc。
-- **PFSS 合并/flush**：trunc 通过 SUF builder 走 `enqueue_composite`，与 coeff 共用 PfssSuperBatch；`finalize_pfss_once`/`PfssPhasePlanner` 能在 phase 内强制单次 flush 并统计预算，attention/MLP/softmax 波次已接入；`PfssLayerPlanner` 可在层末尾做安全 flush 汇总；`PfssAsyncRunner` 提供可选异步 flush 包装（默认同步）。
+- Tape 顺序固定（ReluARS/GeLU），在线 evaluator 严格按序消费；wrap/符号位均为加法 share（u64），不暴露公共位。
+- PFSS key/输出：pred 默认 `kU64PerBit_Xor`，coeff Step-DCF 输出 `out_words=r*(d+1)`；SigmaFast packed key 带 thresholds+AES round_keys。
+- 范围驱动 rescale/trunc/clamp：range/gap_hint 贯穿 graph 与 trunc 降级，MatmulRescaleSite/softmax/LN/recip 优先 GapARS；Bias/residual 携带 GapCert。
+- PFSS 合并/预算：coeff+trunc 共用 PfssSuperBatch，planner 统计 jobs/hatx/flush，limits fail-closed；GPU 路径可设置 device-byte 预算。
 
 ## 当前状态 / 里程碑梳理
 
-- **Milestone 1-8**：按 markdown 设计落地 SUF 语义、掩码重写、PFSS 编译、后端抽象、组合运行时，参考/自测均通过。
-- **Milestone 11 已完成**  
-  - 图/IR：linops、matmul、attention、MLP 去内联移位，统一显式 Rescale/TruncChoice/Clamp，范围信息贯穿 hoist/rescale 记录。  
-  - 新任务：`LayerNormTask`（mean/var trunc + rsqrt NR + 行广播 mul + affine）、`RsqrtTask`（PFSS 仿射初值 + NR）、`CubicPolyTask`（SiLU/nExp/Recip 两次 trunc Horner），均接入 PhaseExecutor/PfssSuperBatch，可切 ReferenceBackend 调试。  
-  - SUF/PFSS：SiLU/nExp/Recip 构造修补非单调区间，coeff payload 零 `r_in`；trunc 走 SUF 路径并复用 composite flush；AutoTrunc 依据 range_hint 选择 GapARS。  
-  - Rescale/hoist：hoist 覆盖 rescale 链、add/sub/bias/Hadamard/mul_const/axpy，MatmulRescaleSite/softmax/LN/recip 带 range_hint/GapCert 优先 GapARS；公共 bias/residual 具备 GapCert。  
-  - 执行层：attention/MLP/softmax phase 绑定 `PfssPhasePlanner`/`finalize_pfss_once` 单次 PFSS flush，默认更紧预算+统计。  
-  - Transformer：attention/MLP/LN 全部任务化，无本地 shift；残差加法使用 `proto::add_mod`；小型 transformer+LN 回归用例通过。
-  - 近期：Recip trunc 使用 clamped 证明界，attention out-proj 在拥有 qkv 证明界时也推导 proof abs→GapARS；BiasAdd 支持上移 rescale（溢出防护）以复用一次 trunc；异步 stress 覆盖 coeff+trunc 批次、planner 总计同步校验。
-- **Milestone 11 待办/保留风险**：PhaseExecutor 级别的跨 phase/layer super-plan 与更激进的 hoist 仍缺；GapCert 证明保守，packing/flush 预算可再收紧；LN/激活 clamp 可以继续缩紧；性能向（GPU/SigmaFast PRG/Beaver 缓存）尚未展开。
-- **Staged/super-plan 原型**：`StagedExecutor` + `test_staged_softmax` 展示 softmax 的 nExp/Recip/Trunc 可单次 PFSS flush，尚未推广到其他任务或跨 phase super-plan/异步合并。
+- Milestone 1-8：SUF 语义、掩码重写、PFSS 编译/后端、组合运行时、任务化 softmax/LN/MLP/attention，全套 CPU 测试通过。
+- Milestone 11（GPU PFSS 验证/overlap）  
+  - GPU 后端：AES-CTR PRG 修正，packed CDPF/vector-DPF（pred bitmask、interval LUT payload），device key 缓存，staged eval 接口曝光 compute stream。  
+  - Packed/bitmask：GPU 支持 packed predicates/cuts，eff_bits 打包 + ragged/causal 解包（`test_cuda_pack_effbits`）。  
+  - Overlap：LayerContext 暴露 PFSS compute stream，GPU matmul（BK=32, vec load）可绑 stream；`bench_gemm_overlap` 同时跑 PFSS+GEMM，当前 A10 读数 PFSS≈1.38 ms/GEMM≈22.85 ms/overlap≈1.47 ms。  
+  - 软/硬回归：`test_cuda_prg`、`test_cuda_packed_pfss`、`test_cuda_pred_mask`、`test_pfss_gpu`（可开 RUN_GPU_COMPOSITE）、`test_softmax_gpu_smoke`、GapARS/Faithful trunc CUDA 等效。
 
 ## 测试现状
 
-- `ctest`（build_ninja）：`test_softmax_task_{correctness,flush_counts}`、`test_trunc_task`、`test_layernorm_task`、`test_matmul_and_attention_executor`、`test_matmul_executor`、`test_staged_softmax` 通过。
-- 其他可手动运行的二进制在 `build_ninja/`（如 `test_compile_pfss`、`test_mask_rewrite`、`test_sigmafast`、`test_composite_runtime`、`sim_harness` 等），便于针对 PFSS/掩码/组合运行时做深入回归。
+- CPU 路径：上述 ctest 套件稳定；`sim_harness`/`test_composite_runtime`/`test_sigmafast`/`test_mask_rewrite` 等用于语义回归。
+- CUDA 路径：`test_cuda_prg`、`test_cuda_packed_pfss`、`test_cuda_pack_effbits`、`test_pfss_gpu`、`test_softmax_gpu_smoke` 通过（需 GPU）；`bench_gemm_overlap` 提供 PFSS/GEMM 重叠计时。
 
 ## 核心文件与逻辑脉络
 
-- **SUF 层**：`suf/*.hpp`（IR、BoolExpr、ref_eval、validate、mask_rewrite），`suf/suf_silu_builders.hpp` 生成 SiLU/nExp/Recip 样条 SUF（r_out=4 coeff，degree=0，零 r_in）。
-- **编译层**：`compiler/suf_to_pfss.cpp`（谓词去重 + wrap 重写 → Pred/Coeff ProgramDesc），`compiled_suf_gate.hpp` 保存掩码/布局，`pfss_program_desc.hpp`/`range_analysis.hpp` 描述 PFSS 程序与范围/GapCert 工具。
-- **后端/组合运行时**：`gates/composite_fss.hpp`（CompositeKeyPair，r_in/out/wrap share、Beaver、compiled gate），`runtime/pfss_superbatch`、`open_collector`、`phase_executor.hpp` 聚合 PFSS coeff/trunc/open 请求并按 Need(Open/PfssCoeff/PfssTrunc) 状态机 flush/finalize；`pfss_phase_planner.hpp` 记录预算/统计并可单次 flush；`runtime/staged_executor.hpp` 演示一次 flush 覆盖多任务的 prepare/finalize 流程。
-- **任务状态机（`include/runtime/phase_tasks.hpp`）**：  
-  - `TruncTask`：open masked x̂ → PFSS trunc（faithful/GapARS/AutoTrunc）。  
-  - `CubicPolyTask`：open x̂ → PFSS 取 coeff → 3×Beaver mul + 2×Trunc（SiLU/nExp/Recip）或 reference spec。  
-  - `RsqrtTask`：PFSS 仿射初值 + NR（3 mul/iter + trunc）。  
-  - `LayerNormTask`：mean/var trunc + rsqrt 迭代 + 行广播 mul + affine（ReferenceBackend 可明文调试）。  
-  - `PhaseExecutor`：多任务循环，驱动 Open/coeff/trunc flush_eval + finalize，记录 flush/job/opened_words/规划统计。
-- **NN 路径**：`nn/attention_block.cpp`（任务化 softmax/recip/nexp + matmul trunc 计划 + KV cache），`nn/mlp_block.cpp`（两段 matmul trunc + SiLU CubicPolyTask），`nn/transformer_layer.cpp`（两次 LayerNormTask + attention + MLP + 残差），`nn/layer_context.hpp` 记录 hoist/rescale/trunc 计划、GapCert 与 PfssSuperBatch。
+- 编译/IR：`compiler/suf_to_pfss.cpp`，`compiler/compiled_suf_gate.hpp`，`compiler/range_analysis.hpp`，`compiler/truncation_lowering.hpp`。
+- 运行时：`runtime/pfss_superbatch.cpp`，`runtime/phase_executor.hpp`，`runtime/pfss_phase_planner.hpp`，`runtime/open_collector.cpp`，`runtime/pfss_async_runner.hpp`，`runtime/staged_executor.hpp`。
+- 任务：`runtime/phase_tasks.hpp`（Trunc/CubicPoly/Rsqrt/LayerNorm），`nn/softmax_block_task(_staged).hpp`。
+- 后端：`gates/composite_fss.hpp`（Composite key/eval），`proto/backend_*`（clear/myl7/sigmafast/gpu）。
+- GPU：`cuda/pfss_kernels.cu`（AES-CTR、packed compare/LUT、eff_bits 解包），`cuda/pfss_backend_gpu.cu`（device key + staged eval），`src/nn/matmul_gpu.cu`（流感知 matmul），`src/bench/bench_gemm_overlap.cpp`。
 
 ## 当前难点与风险
 
-- **GapCert 证明不足**：范围/GapCert 仍靠启发式 clamp，未引入形式化 gap_cert 证明链，限制了更激进的 hoist 与 AutoTrunc 选择；刚加入了 Proof/Hint 占位（TensorFacts.abs_kind/gap）但尚未贯通全链路。
-- **Super-plan 受限**：现有 planner 仅做 phase/layer 内的单次 flush + 预算检查，未做跨 phase/layer 合并或 causal-mask 稀疏批次优化；packing 边界仅在 planner_causal 中做简单断言，PhaseExecutor 仅在 keep_batches=false 时清 batch（已支持跨 phase 保留，但还未添加“stall-driven flush”策略）。
-- **Async 覆盖有限**：异步 PFSS 仅在存在独立 PFSS 通道时启用，且只在层末集中 flush；缺少更细粒度的异步/overlap 评估。
-- **性能工作未展开**：SigmaFast PRG/packing、Beaver/三元组缓存、GPU/SoA 批处理等性能向优化尚未启动。
+- GapCert/范围仍保守，限制更激进的 hoist 与 AutoTrunc 选择。
+- Super-plan/packing 仍是 phase/layer 粒度，未做跨 phase 融合或更细的 stall/bytes 驱动 flush，causal/ragged 预算可进一步收紧。
+- GPU 性能：matmul 仍为简化 tiling，未用 WMMA/半精度拆半；PFSS/GEMM overlap 需更稳的 stream/pipeline；Beaver/三元组/GPU 缓存策略尚浅。
 
 ## 后续建议
 
-1. 推进 PFSS super-plan（跨 phase 预分组、单次 flush）与 packing/flush 预算收紧。  
-2. 加强 gap_cert 证明与范围夹紧，进一步驱动 GapARS/hoist，并覆盖更多算子。  
-3. 性能化：SigmaFast PRG/packing 实现、Beaver/三元组缓存、GPU/SoA 批处理与 overlap。
+1) 完善 super-plan 与 bytes/packing 预算（含 causal/ragged）、增加 planner 回归。  
+2) 收紧 GapCert/abs 界并贯穿更多算子，提升 GapARS 覆盖面。  
+3) GPU 性能：引入 WMMA/半精度拆半、SoA 打包、Beaver/三元组缓存；精炼 PFSS/GEMM pipeline（事件/双流）与更丰富基准。  
