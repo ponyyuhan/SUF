@@ -297,6 +297,7 @@ void attention_forward(const AttentionConfig& cfg,
   mp.w_transposed = false;
   mp.local_rescale = false;
   mp.allow_legacy_shift = false;
+  mp.overlap_stream = ctx ? ctx->pfss_compute_stream() : nullptr;
   net::Chan* pfss_nc = (ctx && ctx->pfss_net_chan) ? ctx->pfss_net_chan : &ch;
 
   if (!ctx) {

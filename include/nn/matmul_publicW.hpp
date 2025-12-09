@@ -12,6 +12,8 @@ struct MatmulParams {
   const std::vector<int64_t>* bias = nullptr;
   bool local_rescale = false;  // legacy shift; default off (explicit Rescale should be used).
   bool allow_legacy_shift = false;  // must be opt-in for legacy/debug paths.
+  // Optional: GPU overlap stream to chain with PFSS kernels when using a GPU backend.
+  void* overlap_stream = nullptr;
 };
 
 void matmul_publicW(const TensorView<uint64_t>& X_share,

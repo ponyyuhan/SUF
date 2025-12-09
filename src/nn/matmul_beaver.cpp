@@ -216,7 +216,7 @@ void matmul_beaver_finalize(PreparedMatmulBeaver& prep,
       params.pfss_batch->flush_and_finalize(party, *params.trunc_backend, pch);
     }
   } else {
-    gates::CompositeBatchInput in{hatx_public.data(), total};
+    gates::CompositeBatchInput in{hatx_public.data(), total, nullptr};
     auto out = gates::composite_eval_batch_with_postproc(
         party, *params.trunc_backend, pch, key, bundle.suf, in, *hook);
     uint64_t r_out_share = key.r_out_share.empty() ? 0ull : key.r_out_share[0];
@@ -423,7 +423,7 @@ static void matmul_beaver2d(const MatmulBeaverParams& params,
       params.pfss_batch->flush_and_finalize(party, *params.trunc_backend, pch);
     }
   } else {
-    gates::CompositeBatchInput in{hatx_public.data(), total};
+    gates::CompositeBatchInput in{hatx_public.data(), total, nullptr};
     auto out = gates::composite_eval_batch_with_postproc(
         party, *params.trunc_backend, pch, key, bundle.suf, in, *hook);
     uint64_t r_out_share = key.r_out_share.empty() ? 0ull : key.r_out_share[0];

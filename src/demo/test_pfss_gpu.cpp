@@ -137,8 +137,8 @@ int main() {
     hatx_cpu[i] = static_cast<uint64_t>(plain[i]) + trunc_cpu.k0.compiled.r_in;
     hatx_gpu[i] = static_cast<uint64_t>(plain[i]) + trunc_gpu.k0.compiled.r_in;
   }
-  gates::CompositeBatchInput in_cpu{hatx_cpu.data(), N};
-  gates::CompositeBatchInput in_gpu{hatx_gpu.data(), N};
+  gates::CompositeBatchInput in_cpu{hatx_cpu.data(), N, nullptr};
+  gates::CompositeBatchInput in_gpu{hatx_gpu.data(), N, nullptr};
 
   gates::FaithfulTruncPostProc hook_cpu0, hook_cpu1, hook_gpu0, hook_gpu1;
   hook_cpu0.f = hook_cpu1.f = hook_gpu0.f = hook_gpu1.f = frac_bits;

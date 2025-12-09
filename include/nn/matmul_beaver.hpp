@@ -49,6 +49,8 @@ struct MatmulBeaverParams {
   // Optional open collector for batched Beaver openings.
   runtime::OpenCollector* open_collector = nullptr;
   bool defer_open_flush = false;  // when true, caller flushes collector/opens per phase.
+  // Optional: GPU overlap stream to chain matmul with PFSS kernels.
+  void* overlap_stream = nullptr;
 };
 
 // Prepared matmul object for two-phase execution (open enqueue -> finalize).

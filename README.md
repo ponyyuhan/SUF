@@ -57,6 +57,14 @@ expand*.md, initial.md, milestone*.md, advice*.md, revise_m11_*.md, paper.md
   ./build_myl7/sim_harness
   ```
   需要系统 `libsodium` + OpenMP，CMake 会下载 `myl7/fss@v0.7.1` 并仅构建 `dcf/dpf/cw_mac_bytes` 静态库；`myl7_fss_backend` 将 payload 自动填充到 `kLambda`（默认 16B）块并清空 MSB 符号位，key 中的 party 位选择正确种子，eval 会解析 header 并循环调用 `dcf_eval` 复原原始 payload 长度。
+- **CUDA 后端/打包谓词**（需要 nvcc + GPU）
+  ```bash
+  cmake -S . -B build_cuda            # CMake 自动探测 CUDA，定义 SUF_HAVE_CUDA
+  cmake --build build_cuda -j
+  ctest -R test_cuda_packed_pfss -V   # Packed CDPF/LUT vs CPU
+  ctest -R test_pfss_gpu -V           # GPU DCF/LUT + composite (默认跳过 GPU composite)
+  RUN_GPU_COMPOSITE=1 ctest -R test_pfss_gpu -V   # 开启 GPU packed composite；GPU_COMPOSITE_DEBUG=1 可加日志
+  ```
 
 ## 代码与数据对齐要点
 

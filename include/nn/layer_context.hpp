@@ -76,6 +76,18 @@ struct LayerContext {
     owned_pfss_backend = proto::make_pfss_backend_from_env();
     pfss_backend_override = owned_pfss_backend.get();
   }
+
+  // Optional helper: return GPU compute stream if backend supports staged eval.
+  void* pfss_compute_stream() const {
+    const proto::PfssBackendBatch* b = pfss_backend_override ? pfss_backend_override : owned_pfss_backend.get();
+#ifdef SUF_HAVE_CUDA
+    if (auto* gpu = dynamic_cast<const proto::PfssGpuStagedEval*>(b)) {
+      return gpu->device_stream();
+    }
+#endif
+    (void)b;
+    return nullptr;
+  }
 };
 
 inline compiler::Scale make_scale(int frac_bits, bool is_signed = true) {

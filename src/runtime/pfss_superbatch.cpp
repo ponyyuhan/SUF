@@ -196,11 +196,13 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
     for (auto& b : buckets) {
       stats_.max_bucket_hatx = std::max(stats_.max_bucket_hatx, b.hatx.size());
       stats_.max_bucket_jobs = std::max(stats_.max_bucket_jobs, b.jobs.size());
+      bool dev_capable = gpu_stager_ && (dynamic_cast<runtime::CpuPassthroughStager*>(gpu_stager_) == nullptr);
       if (gpu_stager_) {
         HostBufferRef host{b.hatx.data(), b.hatx.size() * sizeof(uint64_t)};
         b.dev_hatx = gpu_stager_->stage_to_device(host);
       }
-      gates::CompositeBatchInput in{b.hatx.data(), b.hatx.size()};
+      gates::CompositeBatchInput in{b.hatx.data(), b.hatx.size(),
+                                    dev_capable ? reinterpret_cast<const uint64_t*>(b.dev_hatx.ptr) : nullptr};
       auto out = gates::composite_eval_batch_backend(party, backend, ch, *b.key, *b.suf, in);
       size_t gr_idx = group_results_.size();
       GroupResult gr;
@@ -471,7 +473,7 @@ void run_truncation_now(int party,
   for (size_t i = 0; i < N; ++i) {
     hatx_public[i] = proto::add_mod(hatx_share[i], other[i]);
   }
-  gates::CompositeBatchInput in{hatx_public.data(), N};
+  gates::CompositeBatchInput in{hatx_public.data(), N, nullptr};
   auto out = gates::composite_eval_batch_with_postproc(
       party, backend, ch, key, bundle.suf, in, *hook);
   uint64_t r_out_share = key.r_out_share.empty() ? 0ull : key.r_out_share[0];

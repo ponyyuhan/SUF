@@ -38,6 +38,7 @@ void mlp_forward(const MLPConfig& cfg,
   mp.frac_bits = cfg.frac_bits;
   mp.local_rescale = false;  // explicit rescale via truncation only
   mp.allow_legacy_shift = false;
+  mp.overlap_stream = ctx ? ctx->pfss_compute_stream() : nullptr;
   if (!ctx) {
     throw std::runtime_error("mlp_forward: LayerContext required (no local rescale fallback)");
   }

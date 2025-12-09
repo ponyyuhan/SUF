@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <iostream>
 #include "proto/reference_backend.hpp"
+#include "proto/backend_gpu.hpp"
 #if !defined(SUF_SPAN_FALLBACK_DEFINED)
   #define SUF_SPAN_FALLBACK_DEFINED
   namespace std {
@@ -127,6 +128,7 @@ inline uint64_t r_in_at(const CompositePartyKey& k, size_t idx) {
 struct CompositeBatchInput {
   const uint64_t* hatx; // [N]
   size_t N;
+  const uint64_t* hatx_device = nullptr; // optional device pointer for GPU backends
 };
 
 struct CompositeBatchOutput {
@@ -929,12 +931,16 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     throw std::runtime_error("composite_eval_batch_backend: coeff semantics must be additive");
   }
 
+  const bool dbg = (std::getenv("GPU_COMPOSITE_DEBUG") != nullptr);
+
   // Evaluate predicate bits in batch (packed mask if available)
   std::vector<uint64_t> pred_bits_xor;
   std::vector<uint64_t> pred_masks;
   std::vector<uint64_t> cut_masks;
   auto* packed = dynamic_cast<proto::PackedLtBackend*>(&backend);
+  auto* staged = dynamic_cast<const proto::PfssGpuStagedEval*>(&backend);
   std::vector<uint64_t> xs_vec(in.hatx, in.hatx + N);
+  if (dbg) std::cerr << "[party " << party << "] pred eval start packed=" << (packed && k.use_packed_pred) << " N=" << N << "\n";
   if (packed && k.use_packed_pred && !k.packed_pred_groups.empty()) {
     pred_masks.assign(N * static_cast<size_t>(k.packed_pred_words), 0);
     for (const auto& grp : k.packed_pred_groups) {
@@ -944,8 +950,14 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
         std::memcpy(keys_flat.data() + i * key_bytes, grp.key.bytes.data(), key_bytes);
       }
       std::vector<uint64_t> masks(N * static_cast<size_t>(grp.out_words), 0);
-      packed->eval_packed_lt_many(key_bytes, keys_flat.data(), xs_vec,
-                                  grp.in_bits, grp.out_words, masks.data());
+      if (staged && in.hatx_device) {
+        staged->eval_packed_lt_many_device(key_bytes, keys_flat.data(),
+                                           reinterpret_cast<const uint64_t*>(in.hatx_device),
+                                           N, grp.in_bits, grp.out_words, masks.data());
+      } else {
+        packed->eval_packed_lt_many(key_bytes, keys_flat.data(), xs_vec,
+                                    grp.in_bits, grp.out_words, masks.data());
+      }
       for (size_t i = 0; i < N; i++) {
         uint64_t* dst = pred_masks.data() + i * static_cast<size_t>(k.packed_pred_words);
         const uint64_t* src = masks.data() + i * static_cast<size_t>(grp.out_words);
@@ -974,7 +986,13 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       size_t out_bytes = static_cast<size_t>(k.pred_meta.out_bytes);
       if (out_bytes == 0) throw std::runtime_error("pred_meta.out_bytes must be >0");
       std::vector<uint8_t> outs_flat(N * out_bytes);
-      backend.eval_dcf_many_u64(bits_in, key_bytes, keys_flat.data(), xs_vec, k.pred_meta.out_bytes, outs_flat.data());
+      if (staged && in.hatx_device) {
+        staged->eval_dcf_many_u64_device(bits_in, key_bytes, keys_flat.data(),
+                                         reinterpret_cast<const uint64_t*>(in.hatx_device),
+                                         N, k.pred_meta.out_bytes, outs_flat.data());
+      } else {
+        backend.eval_dcf_many_u64(bits_in, key_bytes, keys_flat.data(), xs_vec, k.pred_meta.out_bytes, outs_flat.data());
+      }
       for (size_t i = 0; i < N; i++) {
         if (k.pred_meta.sem == proto::ShareSemantics::XorBytes) {
           pred_bits_xor[qi * N + i] = static_cast<uint64_t>(outs_flat[i * out_bytes] & 1u);
@@ -986,9 +1004,11 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       }
     }
   }
+  if (dbg) std::cerr << "[party " << party << "] pred eval done\n";
 
   // Cut predicate bits (XOR)
   std::vector<uint64_t> cut_bits_xor(k.cut_pred_keys.size() * N, 0);
+  if (dbg) std::cerr << "[party " << party << "] cut eval start packed=" << (packed && k.use_packed_cut) << "\n";
   if (packed && k.use_packed_cut && !k.packed_cut_groups.empty()) {
     cut_masks.assign(N * static_cast<size_t>(k.packed_cut_words), 0);
     for (const auto& grp : k.packed_cut_groups) {
@@ -998,8 +1018,14 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
         std::memcpy(keys_flat.data() + i * key_bytes, grp.key.bytes.data(), key_bytes);
       }
       std::vector<uint64_t> masks(N * static_cast<size_t>(grp.out_words), 0);
-      packed->eval_packed_lt_many(key_bytes, keys_flat.data(), xs_vec,
-                                  grp.in_bits, grp.out_words, masks.data());
+      if (staged && in.hatx_device) {
+        staged->eval_packed_lt_many_device(key_bytes, keys_flat.data(),
+                                           reinterpret_cast<const uint64_t*>(in.hatx_device),
+                                           N, grp.in_bits, grp.out_words, masks.data());
+      } else {
+        packed->eval_packed_lt_many(key_bytes, keys_flat.data(), xs_vec,
+                                    grp.in_bits, grp.out_words, masks.data());
+      }
       for (size_t i = 0; i < N; i++) {
         uint64_t* dst = cut_masks.data() + i * static_cast<size_t>(k.packed_cut_words);
         const uint64_t* src = masks.data() + i * static_cast<size_t>(grp.out_words);
@@ -1032,8 +1058,14 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       size_t out_bytes = static_cast<size_t>(k.cut_pred_meta.out_bytes);
       if (out_bytes == 0) throw std::runtime_error("cut_pred_meta.out_bytes must be >0");
       std::vector<uint8_t> outs_flat(N * out_bytes);
-      backend.eval_dcf_many_u64(compiled.coeff.n, key_bytes, keys_flat.data(), xs_vec,
-                                k.cut_pred_meta.out_bytes, outs_flat.data());
+      if (staged && in.hatx_device) {
+        staged->eval_dcf_many_u64_device(compiled.coeff.n, key_bytes, keys_flat.data(),
+                                         reinterpret_cast<const uint64_t*>(in.hatx_device),
+                                         N, k.cut_pred_meta.out_bytes, outs_flat.data());
+      } else {
+        backend.eval_dcf_many_u64(compiled.coeff.n, key_bytes, keys_flat.data(), xs_vec,
+                                  k.cut_pred_meta.out_bytes, outs_flat.data());
+      }
       for (size_t i = 0; i < N; i++) {
         if (k.cut_pred_meta.sem == proto::ShareSemantics::XorBytes) {
           cut_bits_xor[ci * N + i] = static_cast<uint64_t>(outs_flat[i * out_bytes] & 1u);
@@ -1045,8 +1077,10 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       }
     }
   }
+  if (dbg) std::cerr << "[party " << party << "] cut eval done\n";
 
   auto coeff_table = build_coeff_table(compiled, k, /*add_deltas=*/(party == 0));
+  if (dbg) std::cerr << "[party " << party << "] coeff table built\n";
 
   // Always use a synthetic triple pool to avoid exhaustion in selectors/hook paths.
   std::vector<proto::BeaverTriple64Share> synth_triples;
@@ -1079,6 +1113,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     bit_triples.push_back((party == 0) ? share0 : share1);
   }
   const proto::BeaverTripleBitShare* bit_ptr = bit_triples.data();
+  if (dbg) std::cerr << "[party " << party << "] enter packed composite path\n";
   if (k.use_packed_pred && !pred_masks.empty() && k.packed_pred_words > 0) {
     const size_t block_sz = 64;
     size_t pieces = coeff_table.size();
@@ -1090,6 +1125,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     for (size_t blk = 0; blk < N; blk += block_sz) {
       size_t bsize = std::min(block_sz, N - blk);
       std::fill(selectors_block.begin(), selectors_block.end(), 0ull);
+      if (dbg) std::cerr << "[party " << party << "] block " << blk << " size " << bsize << " selectors\n";
       for (size_t off = 0; off < bsize; off++) {
         size_t idx = blk + off;
         for (size_t ci = 0; ci < k.cut_pred_keys.size(); ci++) {
@@ -1100,9 +1136,11 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
           selectors_block[p * block_sz + off] = sels[p];
         }
       }
+      if (dbg) std::cerr << "[party " << party << "] block " << blk << " selectors done mul_idx=" << mul_single.idx << "\n";
       for (size_t p = 0; p < pieces && p < compiled.bool_per_piece.size(); p++) {
         const auto& exprs = compiled.bool_per_piece[p];
         if (exprs.empty()) continue;
+        if (dbg) std::cerr << "[party " << party << "] block " << blk << " piece " << p << " bool eval\n";
         gates::eval_bool_xor_packed_block_soa(exprs,
                                               pred_masks.data() + blk * static_cast<size_t>(k.packed_pred_words),
                                               static_cast<size_t>(k.packed_pred_words),
@@ -1117,11 +1155,12 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
           }
         }
       }
+      if (dbg) std::cerr << "[party " << party << "] block " << blk << " bools done mul_idx=" << mul_single.idx << "\n";
       for (size_t off = 0; off < bsize; off++) {
         std::fill(coeff_sel.begin(), coeff_sel.end(), 0ull);
         for (size_t p = 0; p < pieces; p++) {
           uint64_t sel = selectors_block[p * block_sz + off];
-          if (sel == 0) continue;
+          if (dbg) std::cerr << "[party " << party << "] block " << blk << " off " << off << " piece " << p << " coeff blend\n";
           for (int j = 0; j < compiled.coeff.out_words; j++) {
             uint64_t term = mul_single.mul(sel, coeff_table[p][static_cast<size_t>(j)]);
             coeff_sel[static_cast<size_t>(j)] = proto::add_mod(coeff_sel[static_cast<size_t>(j)], term);
@@ -1141,6 +1180,8 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
         }
       }
     }
+    if (dbg) std::cerr << "[party " << party << "] exit packed composite path\n";
+    if (dbg) std::cerr << "[party " << party << "] mul_used=" << mul_single.idx << "\n";
     return out;
   }
 

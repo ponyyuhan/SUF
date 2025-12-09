@@ -259,7 +259,7 @@ int main() {
       for (size_t i = 0; i < N; i++) {
         hatx[i] = static_cast<uint64_t>(plain[i]) + compiled.r_in;
       }
-      gates::CompositeBatchInput in{hatx.data(), N};
+      gates::CompositeBatchInput in{hatx.data(), N, nullptr};
 
       gates::CompositeBatchOutput out0, out1;
       gates::FaithfulTruncPostProc tr_hook0, tr_hook1;
