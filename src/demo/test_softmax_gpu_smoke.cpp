@@ -15,6 +15,7 @@
 #include "nn/softmax_block_task.hpp"
 #include "proto/backend_gpu.hpp"
 #include "proto/reference_backend.hpp"
+#include "proto/channel.hpp"
 #include "runtime/pfss_phase_planner.hpp"
 #include "runtime/pfss_superbatch.hpp"
 #include "runtime/phase_executor.hpp"
@@ -43,6 +44,36 @@ struct LocalChan : net::Chan {
     uint64_t v = q.front();
     q.pop();
     return v;
+  }
+};
+
+struct ProtoLocalChan : proto::IChannel {
+  struct Shared {
+    std::mutex m;
+    std::condition_variable cv;
+    std::queue<std::vector<uint8_t>> q0to1, q1to0;
+  };
+  Shared* s = nullptr;
+  bool is0 = false;
+  ProtoLocalChan() = default;
+  ProtoLocalChan(Shared* sh, bool p) : s(sh), is0(p) {}
+  void send_bytes(const void* data, size_t n) override {
+    std::vector<uint8_t> buf(static_cast<const uint8_t*>(data),
+                             static_cast<const uint8_t*>(data) + n);
+    std::unique_lock<std::mutex> lk(s->m);
+    auto& q = is0 ? s->q0to1 : s->q1to0;
+    q.push(std::move(buf));
+    s->cv.notify_all();
+  }
+  void recv_bytes(void* data, size_t n) override {
+    std::unique_lock<std::mutex> lk(s->m);
+    auto& q = is0 ? s->q1to0 : s->q0to1;
+    s->cv.wait(lk, [&]{ return !q.empty(); });
+    auto buf = std::move(q.front());
+    q.pop();
+    lk.unlock();
+    if (buf.size() != n) throw std::runtime_error("ProtoLocalChan: size mismatch");
+    std::memcpy(data, buf.data(), n);
   }
 };
 
@@ -276,6 +307,115 @@ int main() {
   prob_choice.shift_bits = fb;
   prob_choice.signed_value = false;
 
+  if (std::getenv("SOFTMAX_DISABLE_PACKED")) {
+  auto disable_packed = [](gates::CompositeKeyPair& ks) {
+      ks.k0.use_packed_pred = ks.k1.use_packed_pred = false;
+      ks.k0.use_packed_cut = ks.k1.use_packed_cut = false;
+      ks.k0.packed_pred_groups.clear();
+      ks.k1.packed_pred_groups.clear();
+      ks.k0.packed_cut_groups.clear();
+      ks.k1.packed_cut_groups.clear();
+      ks.k0.packed_pred_words = ks.k1.packed_pred_words = 0;
+      ks.k0.packed_cut_words = ks.k1.packed_cut_words = 0;
+    };
+    disable_packed(nexp_mat.keys);
+    disable_packed(recip_mat.keys);
+  }
+
+  proto::ReferenceBackend ref_backend;
+  // Isolated GapARS truncation check: GPU bundle vs reference bundle on a small vector.
+  auto prob_trunc_ref = compiler::lower_truncation_gate(ref_backend, rng, prob_p, t0.size());
+  auto eval_trunc = [&](proto::PfssBackendBatch& backend0,
+                        proto::PfssBackendBatch& backend1,
+                        const compiler::TruncationLoweringResult& tr,
+                        const std::vector<uint64_t>& plain) {
+    std::vector<uint64_t> hatx(plain.size());
+    for (size_t i = 0; i < plain.size(); i++) {
+      hatx[i] = proto::add_mod(plain[i], tr.keys.k0.compiled.r_in);
+    }
+    gates::CompositeBatchInput in{hatx.data(), static_cast<size_t>(hatx.size()), nullptr};
+    ProtoLocalChan::Shared shc;
+    ProtoLocalChan pc0(&shc, true), pc1(&shc, false);
+    gates::CompositeBatchOutput out0, out1;
+    std::exception_ptr exc;
+    std::thread t1([&] {
+      try {
+        out1 = gates::composite_eval_batch_with_postproc(
+            1, backend1, pc1, tr.keys.k1, tr.suf, in, *tr.hook1);
+      } catch (...) { exc = std::current_exception(); }
+    });
+    try {
+      out0 = gates::composite_eval_batch_with_postproc(
+          0, backend0, pc0, tr.keys.k0, tr.suf, in, *tr.hook0);
+    } catch (...) { exc = std::current_exception(); }
+    t1.join();
+    if (exc) std::rethrow_exception(exc);
+    std::vector<uint64_t> recon(out0.haty_share.size(), 0);
+    uint64_t rmask = proto::add_mod(tr.keys.k0.r_out_share[0], tr.keys.k1.r_out_share[0]);
+    for (size_t i = 0; i < recon.size(); i++) {
+      recon[i] = proto::sub_mod(out0.haty_share[i] + out1.haty_share[i], rmask);
+    }
+    return recon;
+  };
+  std::cerr << "[dbg] Checking GapARS trunc bundle GPU vs ref...\n";
+  std::vector<uint64_t> trunc_plain = {0, 1, 5, 17};
+  auto trunc_gpu = eval_trunc(*gpu0, *gpu1, prob_trunc, trunc_plain);
+  auto trunc_ref = eval_trunc(ref_backend, ref_backend, prob_trunc_ref, trunc_plain);
+  for (size_t i = 0; i < trunc_gpu.size(); i++) {
+    if (trunc_gpu[i] != trunc_ref[i]) {
+      std::cerr << "GapARS trunc mismatch idx=" << i
+                << " gpu=" << trunc_gpu[i]
+                << " ref=" << trunc_ref[i] << "\n";
+      return 1;
+    }
+  }
+  std::cerr << "[dbg] GapARS trunc check passed\n";
+
+  std::vector<uint64_t> hatx_plain(t_plain.size());
+  for (size_t i = 0; i < hatx_plain.size(); i++) {
+    hatx_plain[i] = static_cast<uint64_t>(t_plain[i]) + nexp_mat.keys.k0.compiled.r_in;
+  }
+  std::cerr << "[dbg] Checking nExp composite GPU vs ref...\n";
+  auto recon_composite = [&](proto::PfssBackendBatch& backend,
+                              const gates::CompositeKeyPair& ks,
+                              const suf::SUF<uint64_t>& suf) {
+    gates::CompositeBatchInput in{hatx_plain.data(), static_cast<size_t>(hatx_plain.size()), nullptr};
+    ProtoLocalChan::Shared shc;
+    ProtoLocalChan pc0(&shc, true), pc1(&shc, false);
+    std::exception_ptr exc;
+    gates::CompositeBatchOutput o0, o1;
+    std::thread t1([&] {
+      try {
+        o1 = gates::composite_eval_batch_backend(1, backend, pc1, ks.k1, suf, in);
+      } catch (...) {
+        exc = std::current_exception();
+      }
+    });
+    try {
+      o0 = gates::composite_eval_batch_backend(0, backend, pc0, ks.k0, suf, in);
+    } catch (...) {
+      exc = std::current_exception();
+    }
+    t1.join();
+    if (exc) std::rethrow_exception(exc);
+    std::vector<uint64_t> recon(o0.haty_share.size(), 0);
+    for (size_t i = 0; i < recon.size(); i++) {
+      recon[i] = proto::add_mod(o0.haty_share[i], o1.haty_share[i]);
+    }
+    return recon;
+  };
+  auto recon_exp_gpu = recon_composite(*gpu0, nexp_mat.keys, nexp_mat.suf);
+  auto recon_exp_ref = recon_composite(ref_backend, nexp_mat.keys, nexp_mat.suf);
+  for (size_t i = 0; i < recon_exp_gpu.size(); i++) {
+    if (recon_exp_gpu[i] != recon_exp_ref[i]) {
+      std::cerr << "Direct nExp composite mismatch idx=" << i
+                << " gpu=" << recon_exp_gpu[i]
+                << " ref=" << recon_exp_ref[i] << "\n";
+      return 1;
+    }
+  }
+  std::cerr << "[dbg] nExp composite check passed\n";
+
   RowBroadcastTripleMaterial rb_mat = make_row_broadcast_triples(rows, cols, rng);
   RowBroadcastTripleProviderImpl rb0(rb_mat, 0);
   RowBroadcastTripleProviderImpl rb1(rb_mat, 1);
@@ -307,7 +447,6 @@ int main() {
   }
 
   // CPU reference backend for stage comparison.
-  proto::ReferenceBackend ref_backend;
   LocalChan::Shared sh_ref;
   LocalChan rc0(&sh_ref, true), rc1(&sh_ref, false);
   std::thread t_b([&] {

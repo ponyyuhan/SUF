@@ -57,10 +57,11 @@ int main() {
   std::vector<int64_t> plain = {16, -8, 3, -1};
 
   suf::SUF<uint64_t> suf_gap, suf_faith;
-  auto kp_gap = gates::composite_gen_trunc_gate(*gpu0, std::mt19937_64(1), frac_bits, compiler::GateKind::GapARS, N, &suf_gap);
-  auto kp_gap_cpu = gates::composite_gen_trunc_gate(cpu, std::mt19937_64(1), frac_bits, compiler::GateKind::GapARS, N, nullptr);
-  auto kp_faith = gates::composite_gen_trunc_gate(*gpu0, std::mt19937_64(2), frac_bits, compiler::GateKind::FaithfulTR, N, &suf_faith);
-  auto kp_faith_cpu = gates::composite_gen_trunc_gate(cpu, std::mt19937_64(2), frac_bits, compiler::GateKind::FaithfulTR, N, nullptr);
+  std::mt19937_64 rng_gap(1), rng_gap_cpu(1), rng_faith(2), rng_faith_cpu(2);
+  auto kp_gap = gates::composite_gen_trunc_gate(*gpu0, rng_gap, frac_bits, compiler::GateKind::GapARS, N, &suf_gap);
+  auto kp_gap_cpu = gates::composite_gen_trunc_gate(cpu, rng_gap_cpu, frac_bits, compiler::GateKind::GapARS, N, nullptr);
+  auto kp_faith = gates::composite_gen_trunc_gate(*gpu0, rng_faith, frac_bits, compiler::GateKind::FaithfulTR, N, &suf_faith);
+  auto kp_faith_cpu = gates::composite_gen_trunc_gate(cpu, rng_faith_cpu, frac_bits, compiler::GateKind::FaithfulTR, N, nullptr);
 
   std::vector<uint64_t> hatx_gap(N), hatx_faith(N);
   for (size_t i = 0; i < N; i++) {
@@ -123,4 +124,3 @@ int main() {
   return 0;
 #endif
 }
-
