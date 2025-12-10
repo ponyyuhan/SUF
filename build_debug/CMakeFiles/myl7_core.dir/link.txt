@@ -1,0 +1,2 @@
+/usr/bin/ar qc libmyl7_core.a CMakeFiles/myl7_core.dir/third_party/myl7_fss/src/group/bytes.c.o CMakeFiles/myl7_core.dir/third_party/myl7_fss/src/group/u128_le.c.o CMakeFiles/myl7_core.dir/third_party/myl7_fss/src/prg/aes128_mmo.c.o
+/usr/bin/ranlib libmyl7_core.a

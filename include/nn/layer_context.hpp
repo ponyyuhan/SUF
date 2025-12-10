@@ -39,6 +39,7 @@ struct LayerContext {
   bool enable_hoist = false;  // enable conservative rescale hoisting when finalizing
   bool allow_async_pfss = false;  // if true, caller may detach PFSS flushes (requires safe channel)
   std::unique_ptr<runtime::PfssAsyncRunner> pfss_async_runner;  // retained across layers when async
+  bool force_eager_pfss = false;  // optional: disable lazy PFSS scheduling for tests/regressions
   std::optional<compiler::TruncationPassResult> last_trunc;
   std::unordered_map<int, TensorView<uint64_t>> bindings;
 
@@ -73,7 +74,11 @@ struct LayerContext {
   // Optional helper: select backend from env (SUF_PFSS_BACKEND) if no override present.
   void select_backend_from_env() {
     if (pfss_backend_override || owned_pfss_backend) return;
-    owned_pfss_backend = proto::make_pfss_backend_from_env();
+    const char* env = std::getenv("SUF_PFSS_BACKEND");
+    if (!env) return;  // leave trunc_ctx backend intact when no env override is set
+    owned_pfss_backend = proto::make_pfss_backend(proto::PfssBackendOptions{
+        .kind = proto::parse_backend_kind(env),
+        .allow_gpu_stub = true});
     pfss_backend_override = owned_pfss_backend.get();
   }
 
@@ -242,9 +247,9 @@ inline SecretTensor record_rescale(LayerContext* ctx,
   compiler::GateKind kind = compiler::GateKind::FaithfulARS;
   if (static_cast<size_t>(input.tid) < ctx->graph.tensors().size()) {
     const auto& tf = ctx->graph.tensors()[static_cast<size_t>(input.tid)];
-    kind = compiler::select_trunc_kind(tf.abs, attrs_copy.to_frac, tf.gap);
+    kind = compiler::select_trunc_kind(tf.abs, attrs_copy.to_frac, tf.gap, tf.mask_abs);
   } else {
-    kind = compiler::select_trunc_kind(input.range, attrs_copy.to_frac);
+    kind = compiler::select_trunc_kind(input.range, attrs_copy.to_frac, compiler::RangeKind::Hint, std::nullopt, input.scale.is_signed ? compiler::default_mask_bound(attrs_copy.to_frac) : 0);
   }
   attrs_copy.prefer_gapars = attrs_copy.prefer_gapars || (kind == compiler::GateKind::GapARS);
   t.tid = ctx->graph.add_rescale(input.tid, attrs_copy, out_scale, out_range);

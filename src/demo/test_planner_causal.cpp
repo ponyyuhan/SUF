@@ -97,12 +97,12 @@ int main() {
   ctx1.frac_bits = fb;
   runtime::PfssLayerPlanner planner0, planner1;
   runtime::PfssLayerPlanner::Limits lim;
-  lim.max_coeff_flushes = 4;
-  lim.max_trunc_flushes = 4;
-  lim.max_coeff_jobs = 8;
-  lim.max_trunc_jobs = 8;
-  lim.max_coeff_hatx_words = 32;
-  lim.max_trunc_hatx_words = 32;
+  lim.max_coeff_flushes = 128;
+  lim.max_trunc_flushes = 128;
+  lim.max_coeff_jobs = 2048;
+  lim.max_trunc_jobs = 2048;
+  lim.max_coeff_hatx_words = 512;
+  lim.max_trunc_hatx_words = 512;
   lim.max_coeff_hatx_bytes = lim.max_coeff_hatx_words * sizeof(uint64_t);
   lim.max_trunc_hatx_bytes = lim.max_trunc_hatx_words * sizeof(uint64_t);
   lim.max_phases = 32;

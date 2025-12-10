@@ -1,0 +1,15 @@
+Performing C++ SOURCE FILE Test HAS_GNU_20 failed with the following output:
+Change Dir: /home/yuhan/new/SUF/build_debug/CMakeFiles/CMakeTmp
+
+Run Build Command(s):/usr/bin/gmake -f Makefile cmTC_9514a/fast && /usr/bin/gmake  -f CMakeFiles/cmTC_9514a.dir/build.make CMakeFiles/cmTC_9514a.dir/build
+gmake[1]: Entering directory '/home/yuhan/new/SUF/build_debug/CMakeFiles/CMakeTmp'
+Building CXX object CMakeFiles/cmTC_9514a.dir/src.cxx.o
+/usr/bin/c++ -DHAS_GNU_20  -std=gnu++20 -o CMakeFiles/cmTC_9514a.dir/src.cxx.o -c /home/yuhan/new/SUF/build_debug/CMakeFiles/CMakeTmp/src.cxx
+c++: error: unrecognized command line option '-std=gnu++20'; did you mean '-std=gnu++2a'?
+gmake[1]: *** [CMakeFiles/cmTC_9514a.dir/build.make:78: CMakeFiles/cmTC_9514a.dir/src.cxx.o] Error 1
+gmake[1]: Leaving directory '/home/yuhan/new/SUF/build_debug/CMakeFiles/CMakeTmp'
+gmake: *** [Makefile:127: cmTC_9514a/fast] Error 2
+
+
+Source file was:
+int main() { return 0; }

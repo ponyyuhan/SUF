@@ -68,7 +68,7 @@ docs/                   # milestone/设计文档
 - Milestone 11（GPU PFSS 验证/overlap）  
   - GPU 后端：AES-CTR PRG 修正，packed CDPF/vector-DPF（pred bitmask、interval LUT payload），device key 缓存，staged eval 接口曝光 compute stream。  
   - Packed/bitmask：GPU 支持 packed predicates/cuts，eff_bits 打包 + ragged/causal 解包（`test_cuda_pack_effbits`）。  
-  - Overlap：LayerContext 暴露 PFSS compute stream，GPU matmul（BK=32, vec load）可绑 stream；`bench_gemm_overlap` 同时跑 PFSS+GEMM，当前 A10 读数 PFSS≈1.38 ms/GEMM≈22.85 ms/overlap≈1.47 ms。  
+- Overlap：LayerContext 暴露 PFSS compute stream，GPU matmul（BK=32/64 自适应，vec load，可用 `SUF_MATMUL_GPU_TILE=wide|narrow` 强制）走独立非阻塞流，PFSS kernel block 可调 `SUF_PFSS_GPU_BLOCK`，避免与 PFSS 流串行；`bench_gemm_overlap` 同时跑 PFSS+GEMM 并输出 PFSS/GEMM/overlap 三组计时（本机参考：PFSS≈9.99 ms、GEMM≈5.14 ms、overlap≈10.02 ms）。  
   - 软/硬回归：`test_cuda_prg`、`test_cuda_packed_pfss`、`test_cuda_pred_mask`、`test_pfss_gpu`（可开 RUN_GPU_COMPOSITE）、`test_softmax_gpu_smoke`、GapARS/Faithful trunc CUDA 等效。
 
 ## 测试现状

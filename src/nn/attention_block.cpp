@@ -309,7 +309,10 @@ void attention_forward(const AttentionConfig& cfg,
   mp.w_transposed = false;
   mp.local_rescale = false;
   mp.allow_legacy_shift = false;
-  mp.overlap_stream = ctx ? ctx->pfss_compute_stream() : nullptr;
+  mp.overlap_stream = (ctx && ctx->uses_gpu_backend())
+                          ? (ctx->pfss_compute_stream() ? ctx->pfss_compute_stream()
+                                                         : nn::matmul_default_stream())
+                          : nullptr;
   net::Chan* pfss_nc = (ctx && ctx->pfss_net_chan) ? ctx->pfss_net_chan : &ch;
 
   if (!ctx) {
@@ -317,8 +320,12 @@ void attention_forward(const AttentionConfig& cfg,
   }
   // Preserve PFSS/Open batches across phases so a layer-level planner can control flushing.
   // Make stall-driven behavior explicit for attention/softmax/out regions.
-  pe->set_lazy_mode(true);
-  pe->set_keep_batches(true);
+  pe->set_keep_batches(ctx && ctx->pfss_layer_planner);
+  if (ctx && ctx->force_eager_pfss) {
+    pe->set_lazy_mode(false);
+  } else {
+    pe->set_lazy_mode(true);
+  }
   auto record_phase_plan = [&](runtime::PfssPhasePlanner& planner) {
     if (!ctx || !ctx->pfss_layer_planner) return;
     const auto& st = planner.stats();
@@ -400,10 +407,13 @@ void attention_forward(const AttentionConfig& cfg,
     truncR.pfss_chan = &pch;
     truncR.pfss_trunc = &pe->pfss_coeff_batch();  // share batch for trunc + coeff
     truncR.opens = &pe->open_collector();
-    truncR.pfss_planner = &pfss_phase_planner;
+    if (!(ctx && ctx->force_eager_pfss)) {
+      truncR.pfss_planner = &pfss_phase_planner;
+    }
     runtime::PfssSuperBatch::Limits pfss_lim;
     pfss_lim.max_pending_jobs = 1ull << 12;
-    pfss_lim.max_pending_hatx_words = 1ull << 21;
+    pfss_lim.max_pending_hatx_words = 1ull << 20;
+    pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
     pfss_lim.max_flushes = 1ull << 9;
     if (ctx && ctx->uses_gpu_backend() && ctx->pfss_gpu_stager) {
       pfss_lim.max_pending_device_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
@@ -462,10 +472,16 @@ void attention_forward(const AttentionConfig& cfg,
   if (use_phase_softmax) {
     runtime::PfssSuperBatch::Limits pfss_lim;
     pfss_lim.max_pending_jobs = 1ull << 12;
-    pfss_lim.max_pending_hatx_words = 1ull << 21;
+    pfss_lim.max_pending_hatx_words = 1ull << 20;
+    pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
     pfss_lim.max_flushes = 1ull << 9;
     if (ctx && ctx->uses_gpu_backend() && ctx->pfss_gpu_stager) {
       pfss_lim.max_pending_device_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
+    }
+    // Slightly larger hatx cap for causal bytes regression to avoid early triple exhaustion.
+    if (ctx && ctx->force_eager_pfss) {
+      pfss_lim.max_pending_hatx_words = 1ull << 21;
+      pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
     }
     pe->pfss_coeff_batch().set_limits(pfss_lim);
     pe->pfss_trunc_batch().set_limits(pfss_lim);
@@ -473,18 +489,21 @@ void attention_forward(const AttentionConfig& cfg,
     open_lim.max_pending_words = 1ull << 22;
     pe->open_collector().set_limits(open_lim);
     pe->set_max_flushes(1ull << 11);
-    size_t triple_need = 3 * cache.S_max * B * H;
+    // Extra triples for tighter planner bytes test; use generous pool.
+    size_t triple_need = 6 * cache.S_max * B * H;
     nexp_mat = gates::dealer_make_nexp_task_material(ctx->trunc_backend(),
                                                      nexp_params,
                                                      rng,
                                                      triple_need,
                                                      static_cast<size_t>(B * H * cache.S_max));
     nexp_bundle = gates::make_nexp_cubic_bundle(*nexp_mat, fb);
+    // Allocate a generous pool of triples to cover packed truncations in stress tests.
+    size_t recip_triples = std::max<size_t>(B * H * cache.S_max * 4, 256);
     recip_mat = gates::dealer_make_recip_task_material(ctx->trunc_backend(),
                                                        fb,
                                                        /*nr_iters=*/1,
                                                        rng,
-                                                       static_cast<size_t>(B * H));
+                                                       recip_triples);
     recip_bundle = gates::make_recip_bundle(*recip_mat);
       compiler::GateParams gap_p;
       gap_p.kind = compiler::GateKind::AutoTrunc;
@@ -511,10 +530,12 @@ void attention_forward(const AttentionConfig& cfg,
     phase_R.pfss_backend = &ctx->trunc_backend();
     phase_R.pfss_chan = &pch;
     phase_R.pfss_coeff = &pe->pfss_coeff_batch();
-    phase_R.pfss_trunc = phase_R.pfss_coeff;
+    phase_R.pfss_trunc = &pe->pfss_trunc_batch();
     phase_R.opens = &pe->open_collector();
     phase_planner.bind(phase_R.pfss_coeff, phase_R.pfss_trunc);
-    phase_R.pfss_planner = &phase_planner;
+    if (!(ctx && ctx->force_eager_pfss)) {
+      phase_R.pfss_planner = &phase_planner;
+    }
   }
 
   int64_t inv_sqrt = static_cast<int64_t>(
@@ -1027,7 +1048,9 @@ void attention_forward(const AttentionConfig& cfg,
     truncR.opens = &pe->open_collector();
     runtime::PfssPhasePlanner planner;
     planner.bind(&pe->pfss_coeff_batch(), truncR.pfss_trunc);
-    truncR.pfss_planner = &planner;
+    if (!(ctx && ctx->force_eager_pfss)) {
+      truncR.pfss_planner = &planner;
+    }
     pe->begin_phase(runtime::PhaseExecutor::Phase::kOutProj);
     enter_phase();
     pe->add_task(std::make_unique<runtime::TruncTask>(

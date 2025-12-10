@@ -267,8 +267,16 @@ void LayerGraph::propagate_ranges() {
         int shift = (op.rescale.from_frac - op.rescale.to_frac);
         RangeInterval ra = shift_down(r, shift);
         AbsBound ab = shift_down_abs(get_tensor(op.inputs[0]).abs, shift);
-        uint64_t mask_abs = default_mask_bound(tensors_[static_cast<size_t>(op.outputs[0])].scale.frac_bits);
-        set_tensor(op.outputs[0], ra, ab, gap_from_abs(ab, tensors_[static_cast<size_t>(op.outputs[0])].scale.frac_bits, mask_abs), mask_abs);
+        const auto& in_t = get_tensor(op.inputs[0]);
+        // Mask scales down with the same shift.
+        uint64_t mask_abs = shift > 0 ? ceil_div_pow2(in_t.mask_abs, shift)
+                                      : sat_mul_u64(in_t.mask_abs, uint64_t(1) << (-shift));
+        mask_abs = std::max<uint64_t>(mask_abs, default_mask_bound(tensors_[static_cast<size_t>(op.outputs[0])].scale.frac_bits));
+        set_tensor(op.outputs[0],
+                   ra,
+                   ab,
+                   gap_from_abs(ab, tensors_[static_cast<size_t>(op.outputs[0])].scale.frac_bits, mask_abs),
+                   mask_abs);
         break;
       }
       case OpKind::kMean: {

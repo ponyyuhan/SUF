@@ -59,6 +59,15 @@ inline uint64_t ceil_div_pow2(uint64_t v, int shift) {
   return (v + mask) >> shift;
 }
 
+inline uint64_t shift_mask(uint64_t mask_abs, int shift) {
+  if (shift == 0) return mask_abs;
+  if (shift > 0) return ceil_div_pow2(mask_abs, shift);
+  int s = -shift;
+  if (s >= 63) return std::numeric_limits<uint64_t>::max();
+  uint64_t mul = uint64_t(1) << s;
+  return sat_mul_u64(mask_abs, mul);
+}
+
 inline RangeInterval intersect(const RangeInterval& a, const RangeInterval& b) {
   RangeInterval out;
   out.is_signed = a.is_signed || b.is_signed;
@@ -284,18 +293,19 @@ inline RangeInterval mul_const_range(const RangeInterval& x_range,
 // Decide GateKind for a rescale based on proof-carrying bounds.
 inline GateKind select_trunc_kind(const AbsBound& abs,
                                   int frac_bits,
-                                  const std::optional<GapCert>& cert = std::nullopt) {
+                                  const std::optional<GapCert>& cert = std::nullopt,
+                                  uint64_t mask_abs_hint = 0) {
   if (!abs.is_signed) return GateKind::FaithfulTR;
   GapCert g;
   g.is_signed = abs.is_signed;
   g.frac_bits = frac_bits;
   g.max_abs = abs.max_abs;
-  g.mask_abs = default_mask_bound(frac_bits);
+  g.mask_abs = (mask_abs_hint == 0) ? default_mask_bound(frac_bits) : mask_abs_hint;
   g.kind = abs.kind;
   if (cert) {
     g.is_signed = cert->is_signed;
     g.max_abs = cert->max_abs;
-    g.mask_abs = cert->mask_abs;
+    g.mask_abs = (mask_abs_hint != 0) ? mask_abs_hint : cert->mask_abs;
     g.kind = cert->kind;
   }
   if (g.kind == RangeKind::Proof && can_gapars(g)) return GateKind::GapARS;
@@ -305,10 +315,11 @@ inline GateKind select_trunc_kind(const AbsBound& abs,
 inline GateKind select_trunc_kind(const RangeInterval& r,
                                   int frac_bits,
                                   RangeKind kind = RangeKind::Hint,
-                                  const std::optional<GapCert>& cert = std::nullopt) {
+                                  const std::optional<GapCert>& cert = std::nullopt,
+                                  uint64_t mask_abs_hint = 0) {
   AbsBound abs = abs_from_range(r, r.is_signed);
   abs.kind = kind;
-  return select_trunc_kind(abs, frac_bits, cert);
+  return select_trunc_kind(abs, frac_bits, cert, mask_abs_hint);
 }
 
 }  // namespace compiler

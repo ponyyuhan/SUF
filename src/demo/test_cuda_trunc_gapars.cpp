@@ -45,6 +45,8 @@ int main() {
   std::cout << "SUF_HAVE_CUDA not defined; skipping CUDA trunc tests.\n";
   return 0;
 #else
+  std::cout << std::unitbuf;
+  std::cout << "[trunc-gpu] starting\n";
   proto::ClearBackend cpu;
   auto gpu0 = proto::make_real_gpu_backend();
   auto gpu1 = proto::make_real_gpu_backend();
@@ -84,20 +86,40 @@ int main() {
   std::exception_ptr thr_exc;
   std::thread t_gap([&]() {
     try {
+      std::cout << "[trunc-gpu] p1 eval GapARS start\n";
       out_gap1 = gates::composite_eval_batch_with_postproc(1, *gpu1, c1_gap, kp_gap.k1, suf_gap, in_gap, hook_gap1);
+      std::cout << "[trunc-gpu] p1 eval GapARS done\n";
+      std::cout << "[trunc-gpu] p1 eval FaithfulTR start\n";
       out_f1 = gates::composite_eval_batch_with_postproc(1, *gpu1, c1_faith, kp_faith.k1, suf_faith, in_faith, hook_f1);
+      std::cout << "[trunc-gpu] p1 eval FaithfulTR done\n";
     } catch (...) { thr_exc = std::current_exception(); }
   });
+  std::cout << "[trunc-gpu] p0 eval GapARS start\n";
   out_gap0 = gates::composite_eval_batch_with_postproc(0, *gpu0, c0_gap, kp_gap.k0, suf_gap, in_gap, hook_gap0);
+  std::cout << "[trunc-gpu] p0 eval GapARS done\n";
+  std::cout << "[trunc-gpu] p0 eval FaithfulTR start\n";
   out_f0 = gates::composite_eval_batch_with_postproc(0, *gpu0, c0_faith, kp_faith.k0, suf_faith, in_faith, hook_f0);
+  std::cout << "[trunc-gpu] p0 eval FaithfulTR done\n";
   t_gap.join();
   if (thr_exc) std::rethrow_exception(thr_exc);
 
-  // CPU baselines
-  out_gap_cpu0 = gates::composite_eval_batch_with_postproc(0, cpu, c0_gap, kp_gap_cpu.k0, suf_gap, in_gap, hook_gap0);
-  out_gap_cpu1 = gates::composite_eval_batch_with_postproc(1, cpu, c1_gap, kp_gap_cpu.k1, suf_gap, in_gap, hook_gap1);
-  out_f_cpu0 = gates::composite_eval_batch_with_postproc(0, cpu, c0_faith, kp_faith_cpu.k0, suf_faith, in_faith, hook_f0);
-  out_f_cpu1 = gates::composite_eval_batch_with_postproc(1, cpu, c1_faith, kp_faith_cpu.k1, suf_faith, in_faith, hook_f1);
+  // CPU baselines (fresh channels so we don't reuse GPU queues).
+  ProtoLocalChan::Shared sh_gap_cpu, sh_faith_cpu;
+  ProtoLocalChan c0_gap_cpu(&sh_gap_cpu, true), c1_gap_cpu(&sh_gap_cpu, false);
+  ProtoLocalChan c0_faith_cpu(&sh_faith_cpu, true), c1_faith_cpu(&sh_faith_cpu, false);
+  std::cout << "[trunc-gpu] CPU eval start\n";
+  std::exception_ptr thr_cpu_exc;
+  std::thread t_cpu([&]() {
+    try {
+      out_gap_cpu1 = gates::composite_eval_batch_with_postproc(1, cpu, c1_gap_cpu, kp_gap_cpu.k1, suf_gap, in_gap, hook_gap1);
+      out_f_cpu1 = gates::composite_eval_batch_with_postproc(1, cpu, c1_faith_cpu, kp_faith_cpu.k1, suf_faith, in_faith, hook_f1);
+    } catch (...) { thr_cpu_exc = std::current_exception(); }
+  });
+  out_gap_cpu0 = gates::composite_eval_batch_with_postproc(0, cpu, c0_gap_cpu, kp_gap_cpu.k0, suf_gap, in_gap, hook_gap0);
+  out_f_cpu0 = gates::composite_eval_batch_with_postproc(0, cpu, c0_faith_cpu, kp_faith_cpu.k0, suf_faith, in_faith, hook_f0);
+  t_cpu.join();
+  if (thr_cpu_exc) std::rethrow_exception(thr_cpu_exc);
+  std::cout << "[trunc-gpu] CPU eval done\n";
 
   auto check = [&](const gates::CompositeBatchOutput& a0,
                    const gates::CompositeBatchOutput& a1,

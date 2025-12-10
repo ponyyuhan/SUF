@@ -62,6 +62,8 @@ inline RecipTaskMaterial dealer_make_recip_task_material(proto::PfssBackendBatch
       suf_gate, backend, rng, /*r_in=*/0ull, r_out, batch_N, compiler::GateKind::Reciprocal);
   kp.k0.compiled.gate_kind = compiler::GateKind::Reciprocal;
   kp.k1.compiled.gate_kind = compiler::GateKind::Reciprocal;
+  std::fill(kp.k0.r_out_share.begin(), kp.k0.r_out_share.end(), 0ull);
+  std::fill(kp.k1.r_out_share.begin(), kp.k1.r_out_share.end(), 0ull);
 
   compiler::GateParams p;
   p.kind = compiler::GateKind::AutoTrunc;  // recip input is positive and bounded
@@ -74,6 +76,8 @@ inline RecipTaskMaterial dealer_make_recip_task_material(proto::PfssBackendBatch
   p.abs_hint.kind = compiler::RangeKind::Proof;
   p.gap_hint = compiler::gap_from_abs(p.abs_hint, p.frac_bits);
   auto trunc_fb = compiler::lower_truncation_gate(backend, rng, p, batch_N);
+  std::fill(trunc_fb.keys.k0.r_out_share.begin(), trunc_fb.keys.k0.r_out_share.end(), 0ull);
+  std::fill(trunc_fb.keys.k1.r_out_share.begin(), trunc_fb.keys.k1.r_out_share.end(), 0ull);
 
   // Two muls per NR iter: y*x and y*(2 - xy). Each mul needs a trunc back to Qf.
   ensure_recips_triples(kp, /*per_iter_need=*/2, nr_iters, rng);

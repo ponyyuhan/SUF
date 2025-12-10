@@ -36,6 +36,9 @@ class PfssGpuStager {
 
   virtual DeviceBufferRef stage_to_device(const HostBufferRef& host) = 0;
   virtual void stage_to_host(const ConstDeviceBufferRef& dev, void* host_out, size_t bytes) = 0;
+
+  // Optional: expose underlying stream handle (e.g., for overlap). Default is null.
+  virtual void* stream() const { return nullptr; }
 };
 
 // CPU fallback: no-op staging, returns host pointers directly.
@@ -67,7 +70,7 @@ class CpuPassthroughStager final : public PfssGpuStager {
 
 #ifdef SUF_HAVE_CUDA
 // Simple CUDA stager: allocates device buffers and copies on a dedicated stream.
-class CudaPfssStager final : public PfssGpuStager {
+ class CudaPfssStager final : public PfssGpuStager {
  public:
   // If an existing CUDA stream is supplied (opaque pointer), it will be reused
   // without taking ownership; otherwise a new non-blocking stream is created.
@@ -79,7 +82,7 @@ class CudaPfssStager final : public PfssGpuStager {
   DeviceBufferRef stage_to_device(const HostBufferRef& host) override;
   void stage_to_host(const ConstDeviceBufferRef& dev, void* host_out, size_t bytes) override;
 
-  void* stream() const { return stream_; }
+  void* stream() const override { return stream_; }
 
  private:
   void* stream_ = nullptr;

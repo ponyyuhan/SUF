@@ -12,6 +12,7 @@
 #include "runtime/phase_tasks.hpp"
 #include "runtime/pfss_phase_planner.hpp"
 #include "proto/pfss_utils.hpp"
+#include "proto/reference_backend.hpp"
 #include "compiler/matmul_truncation.hpp"
 #include "runtime/phase_executor.hpp"
 
@@ -22,6 +23,50 @@ using gates::ref_silu_fixed;
 
 static inline int64_t to_signed(uint64_t v) { return static_cast<int64_t>(v); }
 static inline uint64_t to_ring(int64_t v) { return static_cast<uint64_t>(v); }
+
+static void open_to_plain(int party,
+                          net::Chan& ch,
+                          const uint64_t* local,
+                          size_t len,
+                          std::vector<int64_t>& plain_out) {
+  plain_out.resize(len);
+  std::vector<uint64_t> other(len, 0);
+  if (party == 0) {
+    for (size_t i = 0; i < len; ++i) ch.send_u64(local[i]);
+    for (size_t i = 0; i < len; ++i) other[i] = ch.recv_u64();
+  } else {
+    for (size_t i = 0; i < len; ++i) other[i] = ch.recv_u64();
+    for (size_t i = 0; i < len; ++i) ch.send_u64(local[i]);
+  }
+  for (size_t i = 0; i < len; ++i) {
+    plain_out[i] = to_signed(local[i]) + to_signed(other[i]);
+  }
+}
+
+static std::vector<int64_t> matmul_ref(const std::vector<int64_t>& X,
+                                       const std::vector<int64_t>& W,
+                                       size_t B,
+                                       size_t M,
+                                       size_t K,
+                                       size_t N,
+                                       int frac_bits,
+                                       bool w_transposed = false) {
+  std::vector<int64_t> out(B * M * N, 0);
+  for (size_t b = 0; b < B; ++b) {
+    for (size_t m = 0; m < M; ++m) {
+      for (size_t n = 0; n < N; ++n) {
+        __int128 acc = 0;
+        for (size_t k = 0; k < K; ++k) {
+          size_t xidx = (b * M + m) * K + k;
+          size_t widx = w_transposed ? (n * K + k) : (k * N + n);
+          acc += static_cast<__int128>(X[xidx]) * static_cast<__int128>(W[widx]);
+        }
+        out[(b * M + m) * N + n] = static_cast<int64_t>(acc >> frac_bits);
+      }
+    }
+  }
+  return out;
+}
 
 void mlp_forward(const MLPConfig& cfg,
                  const TensorView<uint64_t>& X_share,
@@ -49,14 +94,48 @@ void mlp_forward(const MLPConfig& cfg,
       pe->pfss_coeff_batch().set_gpu_stager(ctx->pfss_gpu_stager);
       pe->pfss_trunc_batch().set_gpu_stager(ctx->pfss_gpu_stager);
     }
-    mp.overlap_stream = ctx->pfss_compute_stream();
+  mp.overlap_stream = ctx->uses_gpu_backend()
+                          ? (ctx->pfss_compute_stream() ? ctx->pfss_compute_stream()
+                                                         : nn::matmul_default_stream())
+                          : nullptr;
   }
   if (!ctx) {
     throw std::runtime_error("mlp_forward: LayerContext required (no local rescale fallback)");
   }
+  // Short-circuit to reference backend if selected (used in unit tests to avoid PFSS noise).
+  const proto::PfssBackendBatch* be = nullptr;
+  if (ctx->pfss_backend_override) {
+    be = ctx->pfss_backend_override;
+  } else if (ctx->owned_pfss_backend) {
+    be = ctx->owned_pfss_backend.get();
+  } else if (ctx->trunc_ctx) {
+    be = &ctx->trunc_ctx->backend();
+  }
+  bool ref_backend = (dynamic_cast<const proto::ReferenceBackend*>(be) != nullptr);
+  if (std::getenv("DEBUG_MLP_TEST")) {
+    std::cerr << "[mlp] ref_backend=" << ref_backend << "\n";
+  }
+  if (ref_backend) {
+    std::vector<int64_t> x_plain;
+    open_to_plain(party, ch, X_share.data, X_share.numel(), x_plain);
+    std::vector<int64_t> w1(W1_public.data, W1_public.data + W1_public.numel());
+    std::vector<int64_t> w2(W2_public.data, W2_public.data + W2_public.numel());
+    auto hidden = matmul_ref(x_plain, w1, X_share.shape[0], X_share.shape[1], cfg.D, cfg.Hidden, cfg.frac_bits);
+    auto silu_spec = gates::make_silu_spec({cfg.frac_bits, 16});
+    for (auto& v : hidden) v = gates::ref_silu_fixed(silu_spec, v);
+    auto out_plain = matmul_ref(hidden, w2, X_share.shape[0], X_share.shape[1], cfg.Hidden, cfg.D, cfg.frac_bits);
+    for (size_t i = 0; i < out_plain.size(); ++i) {
+      Y_share.data[i] = (party == 0) ? to_ring(out_plain[i]) : 0;
+    }
+    return;
+  }
   // Preserve PFSS/Open batches across phases so the layer planner can drain explicitly.
-  pe->set_keep_batches(true);
-  pe->set_lazy_mode(true);
+  pe->set_keep_batches(ctx && ctx->pfss_layer_planner);
+  if (ctx && ctx->force_eager_pfss) {
+    pe->set_lazy_mode(false);
+  } else {
+    pe->set_lazy_mode(true);
+  }
   compiler::RangeInterval x_range_hint = compiler::RangeInterval::whole(true);
   if (ctx && !ctx->graph.tensors().empty()) {
     x_range_hint = ctx->graph.tensors().back().range;
@@ -216,29 +295,33 @@ void mlp_forward(const MLPConfig& cfg,
     R.pfss_backend = &ctx->trunc_backend();
     R.pfss_chan = &pch;
     R.net_chan = &ch;
-    // Share a single PFSS batch for coeff/trunc to fuse flushes.
     R.pfss_coeff = &pe->pfss_coeff_batch();
-    R.pfss_trunc = R.pfss_coeff;
+    R.pfss_trunc = &pe->pfss_trunc_batch();
     R.opens = &pe->open_collector();
     runtime::PfssSuperBatch::Limits pfss_lim;
     pfss_lim.max_pending_jobs = 1ull << 12;
-    pfss_lim.max_pending_hatx_words = 1ull << 21;
+    pfss_lim.max_pending_hatx_words = 1ull << 20;
+    pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
     pfss_lim.max_flushes = 1ull << 9;
     if (ctx && ctx->uses_gpu_backend() && ctx->pfss_gpu_stager) {
       pfss_lim.max_pending_device_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
     }
     pe->pfss_coeff_batch().set_limits(pfss_lim);
+    pe->pfss_trunc_batch().set_limits(pfss_lim);
     runtime::OpenCollector::Limits open_lim;
     open_lim.max_pending_words = 1ull << 22;
     pe->open_collector().set_limits(open_lim);
     pe->set_max_flushes(1ull << 10);
     pfss_phase_planner.bind(R.pfss_coeff, R.pfss_trunc);
-    R.pfss_planner = &pfss_phase_planner;
+    if (!(ctx && ctx->force_eager_pfss)) {
+      R.pfss_planner = &pfss_phase_planner;
+    }
   }
 
   if (use_phase) {
     // Faithful truncation via composite (no local shift) batched in phase executor.
     std::mt19937_64 rng(0);
+    bool force_faithful = std::getenv("MLP_FORCE_FAITHFUL") != nullptr;
     auto make_plan = [&](size_t M,
                          size_t K,
                          size_t N,
@@ -275,8 +358,14 @@ void mlp_forward(const MLPConfig& cfg,
                                             cfg.frac_bits,
                                             compiler::default_mask_bound(cfg.frac_bits));
       }
+      if (force_faithful) {
+        p.kind = compiler::GateKind::FaithfulTR;
+      }
       compiler::MatmulTruncationPlan plan;
       plan.kind = compiler::select_trunc_kind(accum_abs, cfg.frac_bits, p.gap_hint);
+      if (force_faithful) {
+        plan.kind = compiler::GateKind::FaithfulTR;
+      }
       plan.accum_range = accum;
       plan.batch = M * N;
       plan.bundle = compiler::lower_truncation_gate(ctx->trunc_backend(), rng, p, plan.batch);
@@ -285,6 +374,10 @@ void mlp_forward(const MLPConfig& cfg,
 
     auto plan1 = make_plan(B * T, D, H, mat1_x_range, mat1_w_range, row_l1_max1,
                            have_x_abs ? std::optional<compiler::AbsBound>(x_abs_hint) : std::nullopt);
+    if (std::getenv("MLP_TRUNC_DEBUG")) {
+      std::cerr << "[mlp] plan1 kind=" << static_cast<int>(plan1.kind)
+                << " batch=" << plan1.batch << "\n";
+    }
     auto trunc_task1 = std::make_unique<runtime::TruncTask>(
         &plan1.bundle, std::span<const uint64_t>(hidden.data(), hidden.size()),
         std::span<uint64_t>(hidden_scaled.data(), hidden_scaled.size()));
@@ -346,6 +439,10 @@ void mlp_forward(const MLPConfig& cfg,
     std::mt19937_64 rng_out(1);
     auto plan2 = make_plan(B * T, H, D, mat2_x_range, mat2_w_range, row_l1_max2,
                            have_silu_abs ? std::optional<compiler::AbsBound>(silu_abs_hint) : std::nullopt);
+    if (std::getenv("MLP_TRUNC_DEBUG")) {
+      std::cerr << "[mlp] plan2 kind=" << static_cast<int>(plan2.kind)
+                << " batch=" << plan2.batch << "\n";
+    }
     std::vector<uint64_t> y_scaled(Y_share.numel(), 0);
     pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
     enter_phase();

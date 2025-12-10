@@ -34,7 +34,8 @@ class PhaseExecutor {
   PhaseExecutor() {
     PfssSuperBatch::Limits pfss_lim;
     pfss_lim.max_pending_jobs = 1ull << 12;
-    pfss_lim.max_pending_hatx_words = 1ull << 21;
+    pfss_lim.max_pending_hatx_words = 1ull << 20;
+    pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
     pfss_lim.max_flushes = 1ull << 9;
     pfss_coeff_.set_limits(pfss_lim);
     pfss_trunc_.set_limits(pfss_lim);
@@ -231,7 +232,23 @@ class PhaseExecutor {
         planner_flushed = true;
         continue;
       }
-      throw std::runtime_error("PhaseExecutor deadlock: tasks waiting but no pending flush");
+      // Last chance: try flushing any pending batches even if tasks did not request it.
+      if (do_flush_open()) continue;
+      if (do_flush_pfss(&pfss_coeff_)) continue;
+      if (do_flush_pfss(&pfss_trunc_)) continue;
+      const auto pcs = pfss_coeff_.stats();
+      const auto pts = pfss_trunc_.stats();
+      std::string msg = "PhaseExecutor deadlock: tasks waiting but no pending flush";
+      msg += " want_open=" + std::to_string(want_open);
+      msg += " want_coeff=" + std::to_string(want_pfss_coeff);
+      msg += " want_trunc=" + std::to_string(want_pfss_trunc);
+      msg += " coeff_pending_jobs=" + std::to_string(pcs.pending_jobs);
+      msg += " trunc_pending_jobs=" + std::to_string(pts.pending_jobs);
+      msg += " coeff_pending_hatx=" + std::to_string(pcs.pending_hatx);
+      msg += " trunc_pending_hatx=" + std::to_string(pts.pending_hatx);
+      msg += " coeff_flushes=" + std::to_string(pcs.flushes);
+      msg += " trunc_flushes=" + std::to_string(pts.flushes);
+      throw std::runtime_error(msg);
     }
     const auto& os = opens_.stats();
     stats_.open_flushes = os.flushes;
@@ -336,7 +353,22 @@ class PhaseExecutor {
       if (want_open && do_flush_open()) continue;
       if (want_pfss_coeff && do_flush_pfss(&pfss_coeff_)) continue;
       if (want_pfss_trunc && do_flush_pfss(&pfss_trunc_)) continue;
-      throw std::runtime_error("PhaseExecutor deadlock (lazy): tasks waiting but no pending flush");
+      if (do_flush_open()) continue;
+      if (do_flush_pfss(&pfss_coeff_)) continue;
+      if (do_flush_pfss(&pfss_trunc_)) continue;
+      const auto pcs = pfss_coeff_.stats();
+      const auto pts = pfss_trunc_.stats();
+      std::string msg = "PhaseExecutor deadlock (lazy): tasks waiting but no pending flush";
+      msg += " want_open=" + std::to_string(want_open);
+      msg += " want_coeff=" + std::to_string(want_pfss_coeff);
+      msg += " want_trunc=" + std::to_string(want_pfss_trunc);
+      msg += " coeff_pending_jobs=" + std::to_string(pcs.pending_jobs);
+      msg += " trunc_pending_jobs=" + std::to_string(pts.pending_jobs);
+      msg += " coeff_pending_hatx=" + std::to_string(pcs.pending_hatx);
+      msg += " trunc_pending_hatx=" + std::to_string(pts.pending_hatx);
+      msg += " coeff_flushes=" + std::to_string(pcs.flushes);
+      msg += " trunc_flushes=" + std::to_string(pts.flushes);
+      throw std::runtime_error(msg);
     }
 
     const auto& os = opens_.stats();

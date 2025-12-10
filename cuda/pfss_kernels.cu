@@ -176,10 +176,13 @@ extern "C" __global__ void vector_lut_kernel_keyed(const uint8_t* keys_flat,
   auto* hdr = reinterpret_cast<const IntervalKeyDev*>(keys_flat + idx * key_bytes);
   const uint64_t* cuts = reinterpret_cast<const uint64_t*>(keys_flat + idx * key_bytes + sizeof(IntervalKeyDev));
   const uint64_t* payload = cuts + (static_cast<size_t>(hdr->intervals) + 1);
-  uint64_t x = xs[idx] & mask_bits_dev(hdr->in_bits);
+  uint64_t mask = mask_bits_dev(hdr->in_bits);
+  uint64_t x = xs[idx] & mask;
   int iv = static_cast<int>(hdr->intervals) - 1;
   for (uint32_t j = 0; j < hdr->intervals; j++) {
-    if (x >= cuts[j] && x < cuts[j + 1]) { iv = static_cast<int>(j); break; }
+    uint64_t c0 = cuts[j] & mask;
+    uint64_t c1 = cuts[j + 1] & mask;
+    if (x >= c0 && x < c1) { iv = static_cast<int>(j); break; }
   }
   const uint64_t* row = payload + static_cast<size_t>(iv) * hdr->out_words;
   for (int w = 0; w < hdr->out_words; w++) {

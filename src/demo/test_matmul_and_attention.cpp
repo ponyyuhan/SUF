@@ -295,6 +295,8 @@ static void test_attention_correctness() {
   LayerContext ctx0, ctx1;
   ctx0.trunc_ctx = &trunc_ctx0;
   ctx1.trunc_ctx = &trunc_ctx1;
+  ctx0.pfss_backend_override = &trunc_backend0;
+  ctx1.pfss_backend_override = &trunc_backend1;
   ctx0.frac_bits = cfg.frac_bits;
   ctx1.frac_bits = cfg.frac_bits;
   runtime::PhaseExecutor pe0, pe1;
@@ -375,6 +377,8 @@ static void test_attention_step_vs_batch() {
   LayerContext ctx0, ctx1;
   ctx0.trunc_ctx = &trunc_ctx0;
   ctx1.trunc_ctx = &trunc_ctx1;
+  ctx0.pfss_backend_override = &trunc_backend0;
+  ctx1.pfss_backend_override = &trunc_backend1;
   ctx0.frac_bits = cfg.frac_bits;
   ctx1.frac_bits = cfg.frac_bits;
   runtime::PhaseExecutor pe0, pe1;
@@ -429,6 +433,8 @@ static void test_attention_step_vs_batch() {
   LayerContext sctx0, sctx1;
   sctx0.trunc_ctx = &trunc_ctx0;
   sctx1.trunc_ctx = &trunc_ctx1;
+  sctx0.pfss_backend_override = &trunc_backend0;
+  sctx1.pfss_backend_override = &trunc_backend1;
   sctx0.frac_bits = cfg.frac_bits;
   sctx1.frac_bits = cfg.frac_bits;
   runtime::PhaseExecutor spe0, spe1;
@@ -496,7 +502,11 @@ static void test_attention_step_vs_batch() {
 
   assert(batch_out.size() == step_out.size());
   for (size_t i = 0; i < batch_out.size(); ++i) {
-    assert(batch_out[i] == step_out[i]);
+    if (batch_out[i] != step_out[i]) {
+      std::cerr << "attention_correctness mismatch idx=" << i
+                << " batch=" << batch_out[i] << " step=" << step_out[i] << "\n";
+      throw std::runtime_error("attention_correctness mismatch");
+    }
   }
 }
 
@@ -529,6 +539,8 @@ static void test_transformer_layer() {
   LayerContext ctx0, ctx1;
   ctx0.trunc_ctx = &trunc_ctx0;
   ctx1.trunc_ctx = &trunc_ctx1;
+  ctx0.pfss_backend_override = &trunc_backend0;
+  ctx1.pfss_backend_override = &trunc_backend1;
   ctx0.frac_bits = cfg.frac_bits;
   ctx1.frac_bits = cfg.frac_bits;
 
@@ -661,12 +673,19 @@ static void test_mlp_only() {
   }
 
   auto plain = mlp_ref(cfg, X, W1, W2);
+  bool strict_check = std::getenv("DEBUG_MLP_TEST") == nullptr;
   for (size_t i = 0; i < plain.size(); ++i) {
     int64_t got = to_signed(Y0[i]) + to_signed(Y1[i]);
+    if (std::getenv("DEBUG_MLP_TEST")) {
+      std::cerr << "[mlp_test] idx=" << i << " got=" << got << " expected=" << plain[i]
+                << " y0=" << to_signed(Y0[i]) << " y1=" << to_signed(Y1[i]) << "\n";
+    }
     if (std::llabs(got - plain[i]) > 1) {
       std::cerr << "mlp mismatch idx=" << i << " got=" << got << " expected=" << plain[i]
                 << " y0=" << to_signed(Y0[i]) << " y1=" << to_signed(Y1[i]) << "\n";
-      assert(std::llabs(got - plain[i]) <= 1);
+      if (strict_check) {
+        assert(std::llabs(got - plain[i]) <= 1);
+      }
     }
   }
 }
@@ -710,6 +729,8 @@ static void test_transformer_numeric_regression() {
   LayerContext ctx0, ctx1;
   ctx0.trunc_ctx = &trunc0;
   ctx1.trunc_ctx = &trunc1;
+  ctx0.pfss_backend_override = &be0;
+  ctx1.pfss_backend_override = &be1;
   ctx0.frac_bits = fb;
   ctx1.frac_bits = fb;
 

@@ -142,7 +142,8 @@ class PfssSuperBatch {
  public:
   struct Limits {
     size_t max_pending_jobs = 1ull << 18;         // generous default
-    size_t max_pending_hatx_words = 1ull << 26;   // cap total packed hatx per flush
+    size_t max_pending_hatx_words = 1ull << 24;   // cap total packed hatx per flush
+    size_t max_pending_hatx_bytes = (1ull << 24) * sizeof(uint64_t);
     size_t max_flushes = 1ull << 16;              // safety guard against runaway flushing
     size_t max_pending_device_bytes = 0;          // optional GPU staging budget
   };

@@ -16,6 +16,10 @@ struct MatmulParams {
   void* overlap_stream = nullptr;
 };
 
+// Optional: obtain the default CUDA stream used by the GPU matmul
+// implementation (non-blocking). Returns nullptr when CUDA is not enabled.
+void* matmul_default_stream();
+
 void matmul_publicW(const TensorView<uint64_t>& X_share,
                     const TensorView<int64_t>& W_public,
                     TensorView<uint64_t> Y_share,

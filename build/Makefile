@@ -582,6 +582,19 @@ test_planner_causal/fast:
 .PHONY : test_planner_causal/fast
 
 #=============================================================================
+# Target rules for targets named test_planner_causal_bytes
+
+# Build rule for target.
+test_planner_causal_bytes: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_planner_causal_bytes
+.PHONY : test_planner_causal_bytes
+
+# fast build rule for target.
+test_planner_causal_bytes/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_planner_causal_bytes.dir/build.make CMakeFiles/test_planner_causal_bytes.dir/build
+.PHONY : test_planner_causal_bytes/fast
+
+#=============================================================================
 # Target rules for targets named test_pfss_gpu
 
 # Build rule for target.
@@ -697,6 +710,19 @@ bench_gemm_overlap: cmake_check_build_system
 bench_gemm_overlap/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_gemm_overlap.dir/build.make CMakeFiles/bench_gemm_overlap.dir/build
 .PHONY : bench_gemm_overlap/fast
+
+#=============================================================================
+# Target rules for targets named bench_pfss_cpu_gpu
+
+# Build rule for target.
+bench_pfss_cpu_gpu: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 bench_pfss_cpu_gpu
+.PHONY : bench_pfss_cpu_gpu
+
+# fast build rule for target.
+bench_pfss_cpu_gpu/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_pfss_cpu_gpu.dir/build.make CMakeFiles/bench_pfss_cpu_gpu.dir/build
+.PHONY : bench_pfss_cpu_gpu/fast
 
 #=============================================================================
 # Target rules for targets named bench_truncation
@@ -891,6 +917,30 @@ src/bench/bench_llm_gates.s: src/bench/bench_llm_gates.cpp.s
 src/bench/bench_llm_gates.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_llm_gates.dir/build.make CMakeFiles/bench_llm_gates.dir/src/bench/bench_llm_gates.cpp.s
 .PHONY : src/bench/bench_llm_gates.cpp.s
+
+src/bench/bench_pfss_cpu_gpu.o: src/bench/bench_pfss_cpu_gpu.cpp.o
+.PHONY : src/bench/bench_pfss_cpu_gpu.o
+
+# target to build an object file
+src/bench/bench_pfss_cpu_gpu.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_pfss_cpu_gpu.dir/build.make CMakeFiles/bench_pfss_cpu_gpu.dir/src/bench/bench_pfss_cpu_gpu.cpp.o
+.PHONY : src/bench/bench_pfss_cpu_gpu.cpp.o
+
+src/bench/bench_pfss_cpu_gpu.i: src/bench/bench_pfss_cpu_gpu.cpp.i
+.PHONY : src/bench/bench_pfss_cpu_gpu.i
+
+# target to preprocess a source file
+src/bench/bench_pfss_cpu_gpu.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_pfss_cpu_gpu.dir/build.make CMakeFiles/bench_pfss_cpu_gpu.dir/src/bench/bench_pfss_cpu_gpu.cpp.i
+.PHONY : src/bench/bench_pfss_cpu_gpu.cpp.i
+
+src/bench/bench_pfss_cpu_gpu.s: src/bench/bench_pfss_cpu_gpu.cpp.s
+.PHONY : src/bench/bench_pfss_cpu_gpu.s
+
+# target to generate assembly for a file
+src/bench/bench_pfss_cpu_gpu.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_pfss_cpu_gpu.dir/build.make CMakeFiles/bench_pfss_cpu_gpu.dir/src/bench/bench_pfss_cpu_gpu.cpp.s
+.PHONY : src/bench/bench_pfss_cpu_gpu.cpp.s
 
 src/bench/bench_sigmafast_coeff.o: src/bench/bench_sigmafast_coeff.cpp.o
 .PHONY : src/bench/bench_sigmafast_coeff.o
@@ -1636,6 +1686,30 @@ src/demo/test_planner_causal.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_planner_causal.dir/build.make CMakeFiles/test_planner_causal.dir/src/demo/test_planner_causal.cpp.s
 .PHONY : src/demo/test_planner_causal.cpp.s
 
+src/demo/test_planner_causal_bytes.o: src/demo/test_planner_causal_bytes.cpp.o
+.PHONY : src/demo/test_planner_causal_bytes.o
+
+# target to build an object file
+src/demo/test_planner_causal_bytes.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_planner_causal_bytes.dir/build.make CMakeFiles/test_planner_causal_bytes.dir/src/demo/test_planner_causal_bytes.cpp.o
+.PHONY : src/demo/test_planner_causal_bytes.cpp.o
+
+src/demo/test_planner_causal_bytes.i: src/demo/test_planner_causal_bytes.cpp.i
+.PHONY : src/demo/test_planner_causal_bytes.i
+
+# target to preprocess a source file
+src/demo/test_planner_causal_bytes.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_planner_causal_bytes.dir/build.make CMakeFiles/test_planner_causal_bytes.dir/src/demo/test_planner_causal_bytes.cpp.i
+.PHONY : src/demo/test_planner_causal_bytes.cpp.i
+
+src/demo/test_planner_causal_bytes.s: src/demo/test_planner_causal_bytes.cpp.s
+.PHONY : src/demo/test_planner_causal_bytes.s
+
+# target to generate assembly for a file
+src/demo/test_planner_causal_bytes.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_planner_causal_bytes.dir/build.make CMakeFiles/test_planner_causal_bytes.dir/src/demo/test_planner_causal_bytes.cpp.s
+.PHONY : src/demo/test_planner_causal_bytes.cpp.s
+
 src/demo/test_postproc_hooks.o: src/demo/test_postproc_hooks.cpp.o
 .PHONY : src/demo/test_postproc_hooks.o
 
@@ -2273,6 +2347,7 @@ help:
 	@echo "... bench_gemm"
 	@echo "... bench_gemm_overlap"
 	@echo "... bench_llm_gates"
+	@echo "... bench_pfss_cpu_gpu"
 	@echo "... bench_sigmafast_coeff"
 	@echo "... bench_sigmafast_gates"
 	@echo "... bench_sigmafast_pred"
@@ -2304,6 +2379,7 @@ help:
 	@echo "... test_pfss_gpu"
 	@echo "... test_pfss_planner"
 	@echo "... test_planner_causal"
+	@echo "... test_planner_causal_bytes"
 	@echo "... test_postproc_hooks"
 	@echo "... test_pred_semantics"
 	@echo "... test_sigmafast"
@@ -2336,6 +2412,9 @@ help:
 	@echo "... src/bench/bench_llm_gates.o"
 	@echo "... src/bench/bench_llm_gates.i"
 	@echo "... src/bench/bench_llm_gates.s"
+	@echo "... src/bench/bench_pfss_cpu_gpu.o"
+	@echo "... src/bench/bench_pfss_cpu_gpu.i"
+	@echo "... src/bench/bench_pfss_cpu_gpu.s"
 	@echo "... src/bench/bench_sigmafast_coeff.o"
 	@echo "... src/bench/bench_sigmafast_coeff.i"
 	@echo "... src/bench/bench_sigmafast_coeff.s"
@@ -2429,6 +2508,9 @@ help:
 	@echo "... src/demo/test_planner_causal.o"
 	@echo "... src/demo/test_planner_causal.i"
 	@echo "... src/demo/test_planner_causal.s"
+	@echo "... src/demo/test_planner_causal_bytes.o"
+	@echo "... src/demo/test_planner_causal_bytes.i"
+	@echo "... src/demo/test_planner_causal_bytes.s"
 	@echo "... src/demo/test_postproc_hooks.o"
 	@echo "... src/demo/test_postproc_hooks.i"
 	@echo "... src/demo/test_postproc_hooks.s"

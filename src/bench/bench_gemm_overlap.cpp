@@ -5,6 +5,7 @@
 #include <random>
 #include <vector>
 #include <thread>
+#include <cstring>
 
 #include "nn/matmul_publicW.hpp"
 #include "nn/matmul_gpu.hpp"
@@ -17,6 +18,12 @@
 #endif
 
 using namespace nn;
+
+struct BenchTimings {
+  float total_ms = 0.0f;
+  float pfss_ms = 0.0f;
+  float gemm_ms = 0.0f;
+};
 
 int main() {
 #ifndef SUF_HAVE_CUDA
@@ -42,6 +49,8 @@ int main() {
     std::cout << "GPU backend missing packed/staged eval; skipping.\n";
     return 0;
   }
+  // Hint the backend to cache keys across calls.
+  setenv("SUF_PFSS_CACHE_KEYS", "1", 1);
 
   // Matmul dims
   size_t batch = 1, M = 256, K = 256, N = 256;
@@ -70,10 +79,15 @@ int main() {
   for (size_t i = 0; i < Npfss; ++i) {
     std::memcpy(keys_flat.data() + i * key_bytes, kp.k0.bytes.data(), key_bytes);
   }
-  std::vector<uint64_t> xs(Npfss);
-  for (auto& x : xs) x = rng();
+  std::vector<uint64_t> xs_host(Npfss);
+  for (auto& x : xs_host) x = rng();
   int out_words = static_cast<int>((num_thr + 63) / 64);
-  std::vector<uint64_t> masks(Npfss * static_cast<size_t>(out_words), 0);
+  // Device buffers for PFSS to avoid host copies per iter.
+  uint64_t* xs_dev = nullptr;
+  uint64_t* masks_dev = nullptr;
+  cudaMalloc(&xs_dev, Npfss * sizeof(uint64_t));
+  cudaMalloc(&masks_dev, Npfss * static_cast<size_t>(out_words) * sizeof(uint64_t));
+  cudaMemcpy(xs_dev, xs_host.data(), Npfss * sizeof(uint64_t), cudaMemcpyHostToDevice);
 
   // Create separate stream for GEMM to allow overlap.
   cudaStream_t gemm_stream;
@@ -82,62 +96,128 @@ int main() {
 
   const int iters = 5;
 
-  auto bench_once = [&](bool run_pfss, bool run_gemm) -> float {
+  auto bench_once = [&](bool run_pfss, bool run_gemm) -> BenchTimings {
+    BenchTimings t{};
     std::exception_ptr thr_exc;
-    cudaEvent_t start, stop;
+    cudaStream_t pfss_stream = nullptr;
+    if (auto s = staged->device_stream()) {
+      pfss_stream = reinterpret_cast<cudaStream_t>(s);
+    }
+    if (run_pfss && !pfss_stream) {
+      // Ensure the backend has created its streams before we start timing.
+      staged->eval_packed_lt_many_device(key_bytes,
+                                         keys_flat.data(),
+                                         xs_dev,
+                                         Npfss,
+                                         64,
+                                         out_words,
+                                         nullptr);
+      if (auto s = staged->device_stream()) {
+        pfss_stream = reinterpret_cast<cudaStream_t>(s);
+      }
+    }
+    cudaEvent_t start, stop, pfss_start, pfss_stop, gemm_start, gemm_stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
+    cudaEventCreate(&pfss_start);
+    cudaEventCreate(&pfss_stop);
+    cudaEventCreate(&gemm_start);
+    cudaEventCreate(&gemm_stop);
     cudaEventRecord(start, 0);
     std::thread pfss_thr;
     if (run_pfss) {
       pfss_thr = std::thread([&] {
         try {
           cudaSetDevice(0);
+          if (pfss_stream) cudaEventRecord(pfss_start, pfss_stream);
           for (int i = 0; i < iters; ++i) {
-            packed->eval_packed_lt_many(key_bytes, keys_flat.data(), xs, 32, out_words, masks.data());
+            staged->eval_packed_lt_many_device(key_bytes,
+                                               keys_flat.data(),
+                                               xs_dev,
+                                               Npfss,
+                                               64,
+                                               out_words,
+                                               nullptr /*device-only*/);
           }
+          if (pfss_stream) cudaEventRecord(pfss_stop, pfss_stream);
         } catch (...) {
           thr_exc = std::current_exception();
         }
       });
     }
     if (run_gemm) {
+      cudaEventRecord(gemm_start, gemm_stream);
       for (int i = 0; i < iters; ++i) {
         matmul_publicW_gpu(view2(X.data(), batch * M, K),
                            view2(W.data(), K, N),
                            view2(Y.data(), batch * M, N),
                            mp);
       }
+      cudaEventRecord(gemm_stop, gemm_stream);
     }
     if (pfss_thr.joinable()) pfss_thr.join();
     if (thr_exc) std::rethrow_exception(thr_exc);
     cudaDeviceSynchronize();
     cudaEventRecord(stop, 0);
     cudaEventSynchronize(stop);
-    float ms = 0;
-    cudaEventElapsedTime(&ms, start, stop);
+    float total = 0.0f;
+    cudaEventElapsedTime(&total, start, stop);
+    if (run_pfss && pfss_stream) {
+      cudaEventSynchronize(pfss_stop);
+      cudaEventElapsedTime(&t.pfss_ms, pfss_start, pfss_stop);
+      t.pfss_ms /= static_cast<float>(iters);
+    }
+    if (run_gemm) {
+      cudaEventSynchronize(gemm_stop);
+      cudaEventElapsedTime(&t.gemm_ms, gemm_start, gemm_stop);
+      t.gemm_ms /= static_cast<float>(iters);
+    }
     cudaEventDestroy(start);
     cudaEventDestroy(stop);
-    return ms / static_cast<float>(iters);
+    cudaEventDestroy(pfss_start);
+    cudaEventDestroy(pfss_stop);
+    cudaEventDestroy(gemm_start);
+    cudaEventDestroy(gemm_stop);
+    t.total_ms = total / static_cast<float>(iters);
+    return t;
   };
 
   try {
     // Warm-up
     std::cerr << "Warmup...\n";
     bench_once(true, true);
-    std::cerr << "Timing PFSS only...\n";
-    float t_pfss = bench_once(true, false);
-    std::cerr << "Timing GEMM only...\n";
-    float t_gemm = bench_once(false, true);
-    std::cerr << "Timing overlap...\n";
-    float t_overlap = bench_once(true, true);
+    auto run_suite = [&](const char* label) {
+      std::cerr << "Timing PFSS only (" << label << ")...\n";
+      BenchTimings t_pfss = bench_once(true, false);
+      std::cerr << "Timing GEMM only (" << label << ")...\n";
+      BenchTimings t_gemm = bench_once(false, true);
+      std::cerr << "Timing overlap (" << label << ")...\n";
+      BenchTimings t_overlap = bench_once(true, true);
+      std::cout << "[" << label << "] PFSS_only_ms=" << t_pfss.total_ms
+                << " (pfss=" << t_pfss.pfss_ms << ")"
+                << " GEMM_only_ms=" << t_gemm.total_ms
+                << " (gemm=" << t_gemm.gemm_ms << ")"
+                << " overlap_ms=" << t_overlap.total_ms
+                << " (pfss=" << t_overlap.pfss_ms
+                << ", gemm=" << t_overlap.gemm_ms << ")\n";
+    };
+    const char* sweep_env = std::getenv("SUF_BENCH_TILE_SWEEP");
+    if (sweep_env && std::atoi(sweep_env) != 0) {
+      // Sweep both narrow/wide tiles for quick tuning.
+      setenv("SUF_MATMUL_GPU_TILE", "narrow", 1);
+      run_suite("narrow");
+      setenv("SUF_MATMUL_GPU_TILE", "wide", 1);
+      run_suite("wide");
+    } else {
+      run_suite("auto");
+    }
     cudaStreamDestroy(gemm_stream);
-
-    std::cout << "PFSS_only_ms=" << t_pfss
-              << " GEMM_only_ms=" << t_gemm
-              << " overlap_ms=" << t_overlap << "\n";
+    cudaFree(xs_dev);
+    cudaFree(masks_dev);
   } catch (const std::exception& e) {
     cudaStreamDestroy(gemm_stream);
+    cudaFree(xs_dev);
+    cudaFree(masks_dev);
     std::cerr << "bench_gemm_overlap failed: " << e.what() << "\n";
     return 1;
   }

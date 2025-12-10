@@ -1,0 +1,2 @@
+/usr/bin/ar qc libcompiler_passes.a CMakeFiles/compiler_passes.dir/src/compiler/truncation_pass.cpp.o CMakeFiles/compiler_passes.dir/src/compiler/rescale_pass.cpp.o CMakeFiles/compiler_passes.dir/src/compiler/layer_graph.cpp.o CMakeFiles/compiler_passes.dir/src/compiler/suf_to_pfss.cpp.o
+/usr/bin/ranlib libcompiler_passes.a

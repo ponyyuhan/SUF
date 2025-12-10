@@ -283,19 +283,29 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   // Enable async PFSS only when a dedicated PFSS channel is present and the caller supplied a long-lived executor.
   bool can_async_pfss = (ctx->pfss_net_chan != nullptr) && !created_local_pe;
   ctx->allow_async_pfss = can_async_pfss ? true : false;
-  pe->set_lazy_mode(true);
   pe->set_keep_batches(true);
+  if (ctx->force_eager_pfss) {
+    pe->set_lazy_mode(false);
+  } else {
+    pe->set_lazy_mode(true);
+  }
   runtime::PfssLayerPlanner::Limits layer_lim;
   layer_lim.max_coeff_jobs = 1ull << 15;
   layer_lim.max_trunc_jobs = 1ull << 15;
-  layer_lim.max_coeff_hatx_words = 1ull << 22;
-  layer_lim.max_trunc_hatx_words = 1ull << 22;
+  layer_lim.max_coeff_hatx_words = 1ull << 21;
+  layer_lim.max_trunc_hatx_words = 1ull << 21;
+  layer_lim.max_coeff_hatx_bytes = layer_lim.max_coeff_hatx_words * sizeof(uint64_t);
+  layer_lim.max_trunc_hatx_bytes = layer_lim.max_trunc_hatx_words * sizeof(uint64_t);
   layer_lim.max_coeff_flushes = 1ull << 9;
   layer_lim.max_trunc_flushes = 1ull << 9;
   runtime::PfssLayerPlanner layer_planner;
-  layer_planner.set_limits(layer_lim);
+  runtime::PfssLayerPlanner* layer_planner_ptr = ctx->pfss_layer_planner;
+  if (layer_planner_ptr == nullptr) {
+    layer_planner.set_limits(layer_lim);
+    layer_planner_ptr = &layer_planner;
+  }
   runtime::PfssLayerPlanner* prev_layer_planner = ctx->pfss_layer_planner;
-  ctx->pfss_layer_planner = &layer_planner;
+  ctx->pfss_layer_planner = layer_planner_ptr;
   // Share a single PFSS batch for coeff+trunc to maximize fusion.
   if (ctx->pfss_batch == nullptr) ctx->pfss_batch = &pe->pfss_coeff_batch();
   ctx->enable_hoist = true;
@@ -305,7 +315,8 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   // Apply conservative limits to PFSS batches and opens to avoid runaway buffering.
   runtime::PfssSuperBatch::Limits pfss_lim;
   pfss_lim.max_pending_jobs = 1ull << 12;
-  pfss_lim.max_pending_hatx_words = 1ull << 21;
+  pfss_lim.max_pending_hatx_words = 1ull << 20;
+  pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
   pfss_lim.max_flushes = 1ull << 10;
   pe->pfss_coeff_batch().set_limits(pfss_lim);
   pe->pfss_trunc_batch().set_limits(pfss_lim);
@@ -336,15 +347,22 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   R.pfss_trunc = &pe->pfss_coeff_batch();  // share batch for trunc + coeff
   R.opens = &pe->open_collector();
   runtime::PfssPhasePlanner phase_planner;
-  auto* layer_planner_ptr = ctx ? ctx->pfss_layer_planner : nullptr;
+  if (!(ctx && ctx->force_eager_pfss)) {
+    R.pfss_planner = &phase_planner;
+  }
   if (layer_planner_ptr) {
     layer_planner_ptr->begin_layer();
   }
   bool restore_disable = false;
+  runtime::PfssLayerPlanner::BarrierPolicy attn_barrier{.drain_all = true};
+  runtime::PfssLayerPlanner::BarrierPolicy ln_barrier{.drain_all = true};
   if (ctx && !ctx->disable_inner_barriers) {
     restore_disable = true;
-    ctx->disable_inner_barriers = true;  // enable full layer super-plan (drain only at end)
+    // Enable a finer super-plan: keep batches alive, but insert explicit
+    // barriers after LN1/QKV-Softmax/Out and after LN2/MLP instead of only at layer end.
+    ctx->disable_inner_barriers = true;
   }
+  bool allow_barriers = (!ctx) || (!ctx->disable_inner_barriers) || restore_disable;
   auto record_phase_plan = [&](runtime::PfssPhasePlanner& planner) {
     if (layer_planner_ptr) {
       const auto& st = planner.stats();
@@ -486,8 +504,9 @@ void transformer_layer_forward(const TransformerConfig& cfg,
       rows,
       cols));
   pe->run(R);
-  if (!ctx || !ctx->disable_inner_barriers) {
-    drain_barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
+  // Barrier after LN1 to keep qkv/softmax PFSS batched with subsequent phases but allow planner limits.
+  if (allow_barriers) {
+    drain_barrier(ln_barrier);
     record_phase_plan(phase_planner);
   }
 
@@ -519,8 +538,8 @@ void transformer_layer_forward(const TransformerConfig& cfg,
     attn_out[i] = proto::add_mod(attn_out[i], X_share.data[i]);
   }
   // Barrier after attention region to drain PFSS/Open if planner is present.
-  if (!ctx || !ctx->disable_inner_barriers) {
-    drain_barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
+  if (allow_barriers) {
+    drain_barrier(attn_barrier);
     record_phase_plan(phase_planner);
   }
 
@@ -538,8 +557,8 @@ void transformer_layer_forward(const TransformerConfig& cfg,
       rows,
       cols));
   pe->run(R);
-  if (!ctx || !ctx->disable_inner_barriers) {
-    drain_barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
+  if (allow_barriers) {
+    drain_barrier(ln_barrier);
     record_phase_plan(phase_planner);
   }
 
@@ -562,8 +581,8 @@ void transformer_layer_forward(const TransformerConfig& cfg,
               ctx,
               pe);
   // Barrier after MLP region before final residual/flush.
-  if (!ctx || !ctx->disable_inner_barriers) {
-    drain_barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_all = true});
+  if (allow_barriers) {
+    drain_barrier(attn_barrier);
     record_phase_plan(phase_planner);
   }
 

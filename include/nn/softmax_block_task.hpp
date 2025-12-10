@@ -42,6 +42,7 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
   const std::vector<uint64_t>& inv_qf_debug() const { return inv_qf_; }
   const std::vector<uint64_t>& prod_q2f_debug() const { return prod_q2f_; }
   const std::vector<uint64_t>& prob_qf_debug() const { return prob_qf_; }
+  const runtime::RecipTask* recip_task_debug() const { return recip_task_.get(); }
 
   runtime::detail::Need step(runtime::PhaseResources& R) override {
     switch (st_) {

@@ -78,10 +78,10 @@ class PfssLayerPlanner {
   struct Limits {
     size_t max_coeff_jobs = 1ull << 16;
     size_t max_trunc_jobs = 1ull << 16;
-    size_t max_coeff_hatx_words = 1ull << 23;
-    size_t max_trunc_hatx_words = 1ull << 23;
-    size_t max_coeff_hatx_bytes = std::numeric_limits<size_t>::max();
-    size_t max_trunc_hatx_bytes = std::numeric_limits<size_t>::max();
+    size_t max_coeff_hatx_words = 1ull << 22;
+    size_t max_trunc_hatx_words = 1ull << 22;
+    size_t max_coeff_hatx_bytes = (1ull << 22) * sizeof(uint64_t);
+    size_t max_trunc_hatx_bytes = (1ull << 22) * sizeof(uint64_t);
     size_t max_coeff_flushes = 1ull << 10;
     size_t max_trunc_flushes = 1ull << 10;
     size_t max_phases = 1ull << 12;

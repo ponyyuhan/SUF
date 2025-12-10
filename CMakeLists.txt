@@ -307,6 +307,10 @@ add_executable(test_planner_causal src/demo/test_planner_causal.cpp)
 target_include_directories(test_planner_causal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_planner_causal PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
 
+add_executable(test_planner_causal_bytes src/demo/test_planner_causal_bytes.cpp)
+target_include_directories(test_planner_causal_bytes PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_planner_causal_bytes PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
+
 if(HAVE_SUF_CUDA)
 add_executable(test_pfss_gpu src/demo/test_pfss_gpu.cpp)
 target_include_directories(test_pfss_gpu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -348,6 +352,10 @@ add_executable(bench_gemm_overlap src/bench/bench_gemm_overlap.cpp)
 target_include_directories(bench_gemm_overlap PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(bench_gemm_overlap PRIVATE nn_ops suf_fss cuda_pfss OpenSSL::Crypto)
 add_test(NAME bench_gemm_overlap COMMAND bench_gemm_overlap)
+
+add_executable(bench_pfss_cpu_gpu src/bench/bench_pfss_cpu_gpu.cpp)
+target_include_directories(bench_pfss_cpu_gpu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(bench_pfss_cpu_gpu PRIVATE nn_ops compiler_passes suf_fss cuda_pfss OpenSSL::Crypto ${MYL7_LINK_LIBS})
 endif()
 
 add_executable(bench_truncation src/bench/bench_truncation.cpp)

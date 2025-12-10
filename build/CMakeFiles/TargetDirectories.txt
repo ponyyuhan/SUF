@@ -33,6 +33,7 @@
 /home/yuhan/new/SUF/build/CMakeFiles/test_pfss_async_stress.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_transformer_async.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_planner_causal.dir
+/home/yuhan/new/SUF/build/CMakeFiles/test_planner_causal_bytes.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_pfss_gpu.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_cuda_trunc_gapars.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_cuda_prg.dir
@@ -42,6 +43,7 @@
 /home/yuhan/new/SUF/build/CMakeFiles/test_softmax_gpu_smoke.dir
 /home/yuhan/new/SUF/build/CMakeFiles/bench_gemm.dir
 /home/yuhan/new/SUF/build/CMakeFiles/bench_gemm_overlap.dir
+/home/yuhan/new/SUF/build/CMakeFiles/bench_pfss_cpu_gpu.dir
 /home/yuhan/new/SUF/build/CMakeFiles/bench_truncation.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_myl7_bit_order.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test.dir

@@ -1,0 +1,2 @@
+/usr/bin/ar qc libcuda_pfss.a CMakeFiles/cuda_pfss.dir/cuda/pfss_kernels.cu.o CMakeFiles/cuda_pfss.dir/cuda/poly_kernels.cu.o CMakeFiles/cuda_pfss.dir/cuda/pfss_backend_gpu.cu.o
+/usr/bin/ranlib libcuda_pfss.a

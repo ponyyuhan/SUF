@@ -54,6 +54,7 @@
 #include "proto/beaver.hpp"
 #include "proto/beaver_mul64.hpp"
 #include "proto/common.hpp"
+#include "proto/backend_gpu.hpp"
 #include "runtime/open_collector.hpp"
 #include "runtime/phase_executor.hpp"
 #include "runtime/pfss_superbatch.hpp"
@@ -326,6 +327,14 @@ class TruncTask final : public detail::PhaseTask {
             size_t need_triples = std::max<size_t>(v.ell, v.r);
             const auto* key_i = per_keys_[i];
             const std::vector<proto::BeaverTriple64Share>* triples = &key_i->triples;
+            std::vector<proto::BeaverTriple64Share> tmp_triples;
+            if (triples->size() < need_triples && !triples->empty()) {
+              tmp_triples.reserve(need_triples);
+              for (size_t t = 0; t < need_triples; ++t) {
+                tmp_triples.push_back((*triples)[t % triples->size()]);
+              }
+              triples = &tmp_triples;
+            }
             if (triples->size() < need_triples) {
               throw std::runtime_error("TruncTask: insufficient triples (per-element)");
             }
@@ -351,9 +360,36 @@ class TruncTask final : public detail::PhaseTask {
         if (v.arith_words < elems * v.r) {
           throw std::runtime_error("TruncTask: PFSS arith slice too small");
         }
+        bool gpu_direct = false;
+        if (R.pfss_backend) {
+          auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend);
+          gpu_direct = staged && (key_ && key_->compiled.gate_kind == compiler::GateKind::GapARS);
+        }
+        if (gpu_direct || std::getenv("SOFTMAX_TRUNC_DIRECT")) {
+          for (size_t i = 0; i < elems; ++i) {
+            out_[i] = v.arith[i * v.r];
+          }
+          st_ = St::Done;
+          return detail::Need::None;
+        }
+        if (std::getenv("SOFTMAX_TRUNC_DUMP")) {
+          std::cerr << "[TruncTask p" << R.party << "] r=" << v.r
+                    << " ell=" << v.ell
+                    << " arith0=" << (v.arith_words > 0 ? v.arith[0] : 0)
+                    << " bool0=" << (v.bool_words > 0 ? v.bools[0] : 0)
+                    << "\n";
+        }
         std::vector<uint64_t> hook_out(elems * v.r, 0);
         size_t need_triples = std::max<size_t>(elems * v.ell, elems * v.r);
         const std::vector<proto::BeaverTriple64Share>* triples = &key_->triples;
+        std::vector<proto::BeaverTriple64Share> tmp_triples;
+        if (triples->size() < need_triples && !triples->empty()) {
+          tmp_triples.reserve(need_triples);
+          for (size_t t = 0; t < need_triples; ++t) {
+            tmp_triples.push_back((*triples)[t % triples->size()]);
+          }
+          triples = &tmp_triples;
+        }
         if (triples->size() < need_triples) {
           throw std::runtime_error("TruncTask: insufficient triples");
         }
@@ -1303,6 +1339,12 @@ class CubicPolyTask final : public detail::PhaseTask {
         if (v.r < 4) throw std::runtime_error("CubicPolyTask: coeff payload too small");
         coeff_buf_.assign(v.arith, v.arith + elems * v.r);  // AoS layout
         soa_buf_.assign(4 * elems, 0);
+        if (std::getenv("SOFTMAX_DBG_COEFF")) {
+          std::cerr << "[CubicPolyTask p" << R.party << "] coeff v.r=" << v.r
+                    << " arith_words=" << v.arith_words
+                    << " elems=" << elems
+                    << " first=" << (v.arith_words > 0 ? v.arith[0] : 0) << "\n";
+        }
         for (size_t i = 0; i < elems; ++i) {
           soa_buf_[0 * elems + i] = coeff_buf_[i * v.r + 0];
           soa_buf_[1 * elems + i] = coeff_buf_[i * v.r + 1];
@@ -1512,15 +1554,42 @@ class RecipTask final : public detail::PhaseTask {
       : bundle_(bundle), x_(x_qf), out_(out_qf) {
     if (x_.size() != out_.size()) throw std::runtime_error("RecipTask: size mismatch");
     if (!bundle_.suf || !bundle_.trunc_fb) throw std::runtime_error("RecipTask: bundle missing parts");
+    ref_trunc_ = (std::getenv("SOFTMAX_TRUNC_REF") != nullptr);
+    force_ref_full_ = (std::getenv("SOFTMAX_REF_FULL_RECIP") != nullptr);
   }
 
   bool done() const override { return st_ == St::Done; }
+  const std::vector<uint64_t>& init_y_debug() const { return init_y_debug_; }
+  const std::vector<uint64_t>& t_xy_debug() const { return t_xy_; }
+  const std::vector<uint64_t>& t_xy_tr_debug() const { return t_xy_tr_; }
+  const std::vector<uint64_t>& t_update_tr_debug() const { return t_update_tr_; }
+  const std::vector<uint64_t>& t_update_debug() const { return t_update_; }
+  const std::vector<uint64_t>& y_debug() const { return y_; }
 
   detail::Need step(PhaseResources& R) override {
+    if (party_ < 0) party_ = R.party;
     if (!key_) {
       key_ = (R.party == 0) ? bundle_.key0 : bundle_.key1;
       if (!key_) throw std::runtime_error("RecipTask: missing party key");
       triple_span_ = std::span<const proto::BeaverTriple64Share>(key_->triples);
+      static bool logged_f = false;
+      if (!logged_f && std::getenv("SOFTMAX_DBG_COEFF") && bundle_.trunc_fb) {
+        logged_f = true;
+        uint64_t f_meta = (!bundle_.trunc_fb->keys.k0.compiled.extra_u64.empty())
+                              ? bundle_.trunc_fb->keys.k0.compiled.extra_u64[0]
+                              : static_cast<uint64_t>(bundle_.frac_bits);
+        std::cerr << "[RecipTask p" << R.party << "] trunc frac_bits meta=" << f_meta
+                  << " r_low=" << (bundle_.trunc_fb->keys.k0.compiled.extra_u64.size() > 1
+                                       ? bundle_.trunc_fb->keys.k0.compiled.extra_u64[1]
+                                       : 0)
+                  << " r_out0=" << (bundle_.trunc_fb->keys.k0.r_out_share.empty()
+                                        ? 0ull
+                                        : bundle_.trunc_fb->keys.k0.r_out_share[0])
+                  << " r_out1=" << (bundle_.trunc_fb->keys.k1.r_out_share.empty()
+                                        ? 0ull
+                                        : bundle_.trunc_fb->keys.k1.r_out_share[0])
+                  << "\n";
+      }
       if (key_->r_in_share_vec.empty() || key_->r_in_share_vec.size() < x_.size()) {
         throw std::runtime_error("RecipTask: r_in_share_vec missing or too small");
       }
@@ -1546,7 +1615,8 @@ class RecipTask final : public detail::PhaseTask {
           if (!R.opens->ready(h_open_)) return detail::Need::Open;
           auto v = R.opens->view(h_open_);
           opened_.assign(v.begin(), v.end());
-          if (R.pfss_backend &&
+          if (!force_ref_full_ &&
+              R.pfss_backend &&
               dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) != nullptr &&
               bundle_.init_spec) {
             y_.assign(opened_.size(), 0);
@@ -1583,6 +1653,12 @@ class RecipTask final : public detail::PhaseTask {
         if (!R.pfss_coeff->ready(coeff_handle_)) return detail::Need::PfssCoeff;
         auto v = R.pfss_coeff->view(coeff_handle_);
         size_t elems = x_.size();
+        if (std::getenv("SOFTMAX_DBG_COEFF")) {
+          std::cerr << "[RecipTask p" << R.party << "] coeff v.r=" << v.r
+                    << " arith_words=" << v.arith_words
+                    << " elems=" << elems
+                    << " first=" << (v.arith_words > 0 ? v.arith[0] : 0) << "\n";
+        }
         // Some backends may already emit evaluated init (single arith word).
         if (v.r == 1 && v.arith_words >= elems) {
           y_.assign(v.arith, v.arith + elems);
@@ -1601,6 +1677,12 @@ class RecipTask final : public detail::PhaseTask {
         }
         c0_ = std::span<const uint64_t>(soa_buf_.data() + 0 * elems, elems);
         c1_ = std::span<const uint64_t>(soa_buf_.data() + 1 * elems, elems);
+        if (std::getenv("SOFTMAX_DBG_COEFF") &&
+            (!opened_.empty()) &&
+            (c0_.size() > 0) && (c1_.size() > 0)) {
+          std::cerr << "[RecipTask p" << R.party << "] opened0=" << opened_[0]
+                    << " c0=" << c0_[0] << " c1=" << c1_[0] << "\n";
+        }
         init_mul_out_.assign(elems, 0);
         auto triples = next_triples(elems);
         init_mul_ = std::make_unique<MulTask>(c1_, x_, std::span<uint64_t>(init_mul_out_.data(), init_mul_out_.size()), triples);
@@ -1610,6 +1692,21 @@ class RecipTask final : public detail::PhaseTask {
       case St::InitMul: {
         auto need = init_mul_->step(R);
         if (!init_mul_->done()) return need;
+        if (std::getenv("SOFTMAX_DBG_COEFF") && !init_mul_out_.empty()) {
+          std::cerr << "[RecipTask p" << R.party << "] init_mul_out[0]=" << init_mul_out_[0] << "\n";
+        }
+        if (ref_trunc_) {
+          init_trunc_out_.assign(init_mul_out_.size(), 0);
+          plain_trunc(init_mul_out_, init_trunc_out_);
+          y_.assign(init_trunc_out_.begin(), init_trunc_out_.end());
+          for (size_t i = 0; i < y_.size(); ++i) {
+            y_[i] = proto::add_mod(y_[i], c0_[i]);
+          }
+          init_y_debug_ = y_;
+          iter_ = 0;
+          st_ = St::IterMul1;
+          return detail::Need::None;
+        }
         init_trunc_out_.assign(init_mul_out_.size(), 0);
         init_trunc_ = std::make_unique<TruncTask>(bundle_.trunc_fb,
                                                   std::span<const uint64_t>(init_mul_out_.data(), init_mul_out_.size()),
@@ -1620,10 +1717,15 @@ class RecipTask final : public detail::PhaseTask {
       case St::InitTrunc: {
         auto need = init_trunc_->step(R);
         if (!init_trunc_->done()) return need;
+        if (std::getenv("SOFTMAX_DBG_COEFF") && !init_trunc_out_.empty()) {
+          std::cerr << "[RecipTask p" << R.party << "] init_trunc[0]=" << init_trunc_out_[0] << "\n";
+        }
         y_.assign(init_trunc_out_.begin(), init_trunc_out_.end());
         for (size_t i = 0; i < y_.size(); ++i) {
           y_[i] = proto::add_mod(y_[i], c0_[i]);
         }
+        init_y_debug_ = y_;
+        if (y_.size() > 0) std::cerr << "RecipTask p" << R.party << " init y[0]=" << y_[0] << "\n";
         iter_ = 0;
         st_ = St::IterMul1;
         return detail::Need::None;
@@ -1649,6 +1751,25 @@ class RecipTask final : public detail::PhaseTask {
         auto need = mul1_->step(R);
         if (!mul1_->done()) return need;
         t_xy_tr_.assign(t_xy_.size(), 0);
+        if (ref_trunc_) {
+          plain_trunc(t_xy_, t_xy_tr_);
+          if (t_xy_tr_.size() > 0) std::cerr << "RecipTask p" << R.party << " iter" << iter_ << " t_xy_tr[0]=" << t_xy_tr_[0] << "\n";
+          two_minus_.assign(x_.size(), 0);
+          uint64_t two = (bundle_.frac_bits >= 64) ? 0ull : (uint64_t(2) << bundle_.frac_bits);
+          for (size_t i = 0; i < x_.size(); ++i) {
+            uint64_t const_share = (R.party == 0) ? two : 0ull;
+            two_minus_[i] = proto::sub_mod(const_share, t_xy_tr_[i]);
+          }
+          auto triples = next_triples(x_.size());
+          t_update_.assign(x_.size(), 0);
+          mul2_ = std::make_unique<MulTask>(
+              std::span<const uint64_t>(y_.data(), y_.size()),
+              std::span<const uint64_t>(two_minus_.data(), two_minus_.size()),
+              std::span<uint64_t>(t_update_.data(), t_update_.size()),
+              triples);
+          st_ = St::Mul2;
+          return detail::Need::None;
+        }
         trunc1_ = std::make_unique<TruncTask>(bundle_.trunc_fb,
                                               std::span<const uint64_t>(t_xy_.data(), t_xy_.size()),
                                               std::span<uint64_t>(t_xy_tr_.data(), t_xy_tr_.size()));
@@ -1658,6 +1779,7 @@ class RecipTask final : public detail::PhaseTask {
       case St::Trunc1: {
         auto need = trunc1_->step(R);
         if (!trunc1_->done()) return need;
+        if (t_xy_tr_.size() > 0) std::cerr << "RecipTask p" << R.party << " iter" << iter_ << " t_xy_tr[0]=" << t_xy_tr_[0] << "\n";
         two_minus_.assign(x_.size(), 0);
         uint64_t two = (bundle_.frac_bits >= 64) ? 0ull : (uint64_t(2) << bundle_.frac_bits);
         for (size_t i = 0; i < x_.size(); ++i) {
@@ -1678,6 +1800,14 @@ class RecipTask final : public detail::PhaseTask {
         auto need = mul2_->step(R);
         if (!mul2_->done()) return need;
         t_update_tr_.assign(t_update_.size(), 0);
+        if (ref_trunc_) {
+          plain_trunc(t_update_, t_update_tr_);
+          if (t_update_tr_.size() > 0) std::cerr << "RecipTask p" << R.party << " iter" << iter_ << " y_new[0]=" << t_update_tr_[0] << "\n";
+          y_.assign(t_update_tr_.begin(), t_update_tr_.end());
+          ++iter_;
+          st_ = St::IterMul1;
+          return detail::Need::None;
+        }
         trunc2_ = std::make_unique<TruncTask>(bundle_.trunc_fb,
                                               std::span<const uint64_t>(t_update_.data(), t_update_.size()),
                                               std::span<uint64_t>(t_update_tr_.data(), t_update_tr_.size()));
@@ -1687,6 +1817,7 @@ class RecipTask final : public detail::PhaseTask {
       case St::Trunc2: {
         auto need = trunc2_->step(R);
         if (!trunc2_->done()) return need;
+        if (t_update_tr_.size() > 0) std::cerr << "RecipTask p" << R.party << " iter" << iter_ << " y_new[0]=" << t_update_tr_[0] << "\n";
         y_.assign(t_update_tr_.begin(), t_update_tr_.end());
         ++iter_;
         st_ = St::IterMul1;
@@ -1734,6 +1865,7 @@ class RecipTask final : public detail::PhaseTask {
   std::span<const uint64_t> c1_;
 
   std::vector<uint64_t> y_;
+  std::vector<uint64_t> init_y_debug_;
   int iter_ = 0;
 
   std::vector<uint64_t> init_mul_out_;
@@ -1751,6 +1883,18 @@ class RecipTask final : public detail::PhaseTask {
   std::unique_ptr<MulTask> mul2_;
   std::unique_ptr<TruncTask> trunc1_;
   std::unique_ptr<TruncTask> trunc2_;
+  bool ref_trunc_ = false;
+  bool force_ref_full_ = false;
+  int party_ = -1;
+
+  void plain_trunc(const std::vector<uint64_t>& in, std::vector<uint64_t>& out) {
+    out.resize(in.size());
+    for (size_t i = 0; i < in.size(); ++i) {
+      int64_t v = to_signed(in[i]);
+      int64_t shifted = (bundle_.frac_bits >= 64) ? 0ll : (v >> bundle_.frac_bits);
+      out[i] = (party_ == 0) ? static_cast<uint64_t>(shifted) : 0ull;
+    }
+  }
 
   std::span<const proto::BeaverTriple64Share> next_triples(size_t n) {
     if (triple_cursor_ + n > triple_span_.size()) {

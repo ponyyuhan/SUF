@@ -2,6 +2,7 @@
 
 #ifdef SUF_HAVE_CUDA
 #include <cuda_runtime.h>
+#include <cstring>
 #include <mutex>
 #include <stdexcept>
 
@@ -158,10 +159,51 @@ cudaStream_t get_default_stream() {
 
 inline bool check(cudaError_t st) { return st == cudaSuccess; }
 
+template<int BM, int BN, int BK, int COLS_PER_THREAD>
+bool launch_matmul_kernel(const uint64_t* dX,
+                          const int64_t* dW,
+                          const int64_t* dB,
+                          uint64_t* dY,
+                          size_t batch,
+                          size_t M,
+                          size_t K,
+                          size_t N,
+                          bool w_transposed,
+                          cudaStream_t stream) {
+  static_assert(BN % COLS_PER_THREAD == 0, "BN must be divisible by COLS_PER_THREAD");
+  dim3 threads(BN / COLS_PER_THREAD, BM);
+  dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
+  size_t smem = sizeof(uint64_t) * BM * BK + sizeof(int64_t) * BK * BN;
+  matmul_publicW_tiled<BM, BN, BK, COLS_PER_THREAD><<<grid, threads, smem, stream>>>(
+      dX, dW, dB, dY, batch, M, K, N, w_transposed);
+  return check(cudaGetLastError());
+}
+
+enum class TileMode { Auto, Narrow, Wide };
+
+TileMode tile_mode_from_env() {
+  static TileMode mode = [] {
+    const char* env = std::getenv("SUF_MATMUL_GPU_TILE");
+    if (!env) return TileMode::Auto;
+    if (std::strcmp(env, "wide") == 0 || std::strcmp(env, "WIDE") == 0) return TileMode::Wide;
+    if (std::strcmp(env, "narrow") == 0 || std::strcmp(env, "NARROW") == 0) return TileMode::Narrow;
+    return TileMode::Auto;
+  }();
+  return mode;
+}
+
 }  // namespace
 #endif  // SUF_HAVE_CUDA
 
 namespace nn {
+
+void* matmul_default_stream() {
+#ifndef SUF_HAVE_CUDA
+  return nullptr;
+#else
+  return reinterpret_cast<void*>(get_default_stream());
+#endif
+}
 
 bool matmul_publicW_gpu(const TensorView<uint64_t>& X_share,
                         const TensorView<int64_t>& W_public,
@@ -214,18 +256,19 @@ bool matmul_publicW_gpu(const TensorView<uint64_t>& X_share,
     sc.release();
     return false;
   }
-  // Use a wider tile along N with two columns per thread to reduce global loads.
-  constexpr int BM = 16;
-  constexpr int BN = 32;
-  constexpr int BK = 32;
-  constexpr int COLS = 2;
-  dim3 threads(BN / COLS, BM);
-  dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM);
-  size_t smem = sizeof(uint64_t) * BM * BK + sizeof(int64_t) * BK * BN;
   int64_t* bias_ptr = params.bias ? sc.dB : nullptr;
-  matmul_publicW_tiled<BM, BN, BK, COLS><<<grid, threads, smem, stream>>>(
-      sc.dX, sc.dW, bias_ptr, sc.dY, batch, M, K, N, params.w_transposed);
-  if (!check(cudaGetLastError())) {
+  bool launched = false;
+  TileMode mode = tile_mode_from_env();
+  // Heuristic: prefer the wider tile when N/K are moderately large or when env forces it.
+  if ((mode == TileMode::Wide) || (mode == TileMode::Auto && N >= 128 && K >= 128)) {
+    launched = launch_matmul_kernel<16, 64, 64, 4>(
+        sc.dX, sc.dW, bias_ptr, sc.dY, batch, M, K, N, params.w_transposed, stream);
+  }
+  if (!launched) {
+    launched = launch_matmul_kernel<16, 32, 32, 2>(
+        sc.dX, sc.dW, bias_ptr, sc.dY, batch, M, K, N, params.w_transposed, stream);
+  }
+  if (!launched) {
     sc.release();
     return false;
   }
