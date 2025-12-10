@@ -94,10 +94,8 @@ void mlp_forward(const MLPConfig& cfg,
       pe->pfss_coeff_batch().set_gpu_stager(ctx->pfss_gpu_stager);
       pe->pfss_trunc_batch().set_gpu_stager(ctx->pfss_gpu_stager);
     }
-  mp.overlap_stream = ctx->uses_gpu_backend()
-                          ? (ctx->pfss_compute_stream() ? ctx->pfss_compute_stream()
-                                                         : nn::matmul_default_stream())
-                          : nullptr;
+    // Run GEMM on its own stream; PFSS (if GPU) will use its backend stream for overlap.
+    mp.overlap_stream = ctx->uses_gpu_backend() ? nn::matmul_default_stream() : nullptr;
   }
   if (!ctx) {
     throw std::runtime_error("mlp_forward: LayerContext required (no local rescale fallback)");

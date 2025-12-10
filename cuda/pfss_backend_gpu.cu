@@ -477,8 +477,7 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
         check_cuda(cudaMemcpyAsync(packed_buf_.ptr, packed_xs.data(), xs_bytes,
                                    cudaMemcpyHostToDevice, copy_stream_), "cudaMemcpy xs packed");
       } else {
-        check_cuda(cudaMemcpyAsync(xs_buf_.ptr, xs_u64.data(), xs_bytes,
-                                   cudaMemcpyHostToDevice, copy_stream_), "cudaMemcpy xs");
+        copy_plain_xs_if_needed(xs_u64, /*eff_bits=*/64);
       }
       check_cuda(cudaEventRecord(h2d_done_, copy_stream_), "event record h2d");
       check_cuda(cudaStreamWaitEvent(stream_, h2d_done_, 0), "wait h2d");
@@ -536,8 +535,7 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
     size_t keys_size = key_bytes * N;
     keys_buf_.ensure(keys_size);
     out_buf_.ensure(N * static_cast<size_t>(out_bytes));
-    check_cuda(cudaMemcpyAsync(keys_buf_.ptr, keys_flat, keys_size, cudaMemcpyHostToDevice, copy_stream_),
-               "cudaMemcpy keys");
+    copy_keys_if_needed(keys_flat, keys_size);
     check_cuda(cudaEventRecord(h2d_done_, copy_stream_), "event record h2d");
     check_cuda(cudaStreamWaitEvent(stream_, h2d_done_, 0), "wait h2d");
     constexpr int kBlock = 256;
@@ -549,11 +547,15 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
     check_cuda(cudaGetLastError(), "eval_dcf_many_kernel");
     check_cuda(cudaEventRecord(compute_done_, stream_), "event record compute");
     check_cuda(cudaStreamWaitEvent(copy_stream_, compute_done_, 0), "wait compute");
-    check_cuda(cudaMemcpyAsync(outs_flat, out_buf_.ptr,
-                               N * static_cast<size_t>(out_bytes),
-                               cudaMemcpyDeviceToHost, copy_stream_),
-               "cudaMemcpy outs");
-    check_cuda(cudaStreamSynchronize(copy_stream_), "stream sync");
+    if (outs_flat) {
+      check_cuda(cudaMemcpyAsync(outs_flat, out_buf_.ptr,
+                                 N * static_cast<size_t>(out_bytes),
+                                 cudaMemcpyDeviceToHost, copy_stream_),
+                 "cudaMemcpy outs");
+      check_cuda(cudaStreamSynchronize(copy_stream_), "stream sync");
+    } else {
+      check_cuda(cudaStreamSynchronize(stream_), "stream sync device-only");
+    }
   }
 
   void eval_packed_lt_many(size_t key_bytes,
@@ -584,14 +586,12 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
         xs_buf_.ensure(xs_bytes);
       }
       out_buf_.ensure(xs_u64.size() * static_cast<size_t>(out_words) * sizeof(uint64_t));
-      check_cuda(cudaMemcpyAsync(keys_buf_.ptr, keys_flat, keys_size, cudaMemcpyHostToDevice, copy_stream_),
-                 "cudaMemcpy packed keys");
+      copy_keys_if_needed(keys_flat, keys_size);
       if (pack_eff) {
         check_cuda(cudaMemcpyAsync(packed_buf_.ptr, packed_xs.data(), xs_bytes,
                                    cudaMemcpyHostToDevice, copy_stream_), "cudaMemcpy packed xs");
       } else {
-        check_cuda(cudaMemcpyAsync(xs_buf_.ptr, xs_u64.data(), xs_bytes,
-                                   cudaMemcpyHostToDevice, copy_stream_), "cudaMemcpy packed xs");
+        copy_plain_xs_if_needed(xs_u64, in_bits);
       }
       check_cuda(cudaEventRecord(h2d_done_, copy_stream_), "event record h2d packed");
       check_cuda(cudaStreamWaitEvent(stream_, h2d_done_, 0), "wait h2d packed");
@@ -701,9 +701,7 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
                                    cudaMemcpyHostToDevice, copy_stream_),
                    "cudaMemcpy interval xs packed");
       } else {
-        check_cuda(cudaMemcpyAsync(xs_buf_.ptr, xs_u64.data(), xs_bytes,
-                                   cudaMemcpyHostToDevice, copy_stream_),
-                   "cudaMemcpy interval xs");
+        copy_plain_xs_if_needed(xs_u64, hdr0->in_bits);
       }
       check_cuda(cudaEventRecord(h2d_done_, copy_stream_), "event record h2d interval");
       check_cuda(cudaStreamWaitEvent(stream_, h2d_done_, 0), "wait h2d interval");
@@ -764,8 +762,7 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
     size_t keys_size = key_bytes * N;
     keys_buf_.ensure(keys_size);
     out_buf_.ensure(N * static_cast<size_t>(out_words) * sizeof(uint64_t));
-    check_cuda(cudaMemcpyAsync(keys_buf_.ptr, keys_flat, keys_size, cudaMemcpyHostToDevice, copy_stream_),
-               "cudaMemcpy interval keys");
+    copy_keys_if_needed(keys_flat, keys_size);
     check_cuda(cudaEventRecord(h2d_done_, copy_stream_), "event record h2d interval");
     check_cuda(cudaStreamWaitEvent(stream_, h2d_done_, 0), "wait h2d interval");
     const int kBlock = kernel_block_size();
@@ -784,6 +781,8 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
                                  cudaMemcpyDeviceToHost, copy_stream_),
                  "cudaMemcpy interval outs");
       check_cuda(cudaStreamSynchronize(copy_stream_), "stream sync interval");
+    } else {
+      check_cuda(cudaStreamSynchronize(stream_), "stream sync interval device-only");
     }
   }
 
@@ -816,9 +815,13 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
   mutable DeviceBuffer out_buf_;
   mutable DeviceBuffer packed_buf_;
   mutable std::mutex mu_;
-  const bool cache_keys_ = (std::getenv("SUF_PFSS_CACHE_KEYS") != nullptr);
+  const bool cache_keys_ = (std::getenv("SUF_NO_CACHE_KEYS") == nullptr);
+  const bool cache_xs_ = (std::getenv("SUF_NO_CACHE_HATX") == nullptr);
   mutable uint64_t last_keys_hash_ = 0;
   mutable size_t last_keys_size_ = 0;
+  mutable uint64_t last_xs_hash_ = 0;
+  mutable size_t last_xs_size_ = 0;
+  mutable int last_xs_eff_bits_ = -1;
   static int kernel_block_size() {
     static int blk = [] {
       const char* env = std::getenv("SUF_PFSS_GPU_BLOCK");
@@ -868,6 +871,28 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
       return true;
     }
     return false;  // reused keys
+  }
+
+  bool copy_plain_xs_if_needed(const std::vector<uint64_t>& xs, int eff_bits) const {
+    size_t bytes = xs.size() * sizeof(uint64_t);
+    if (!cache_xs_) {
+      check_cuda(cudaMemcpyAsync(xs_buf_.ptr, xs.data(), bytes,
+                                 cudaMemcpyHostToDevice, copy_stream_), "cudaMemcpy xs");
+      last_xs_size_ = xs.size();
+      last_xs_eff_bits_ = eff_bits;
+      return true;
+    }
+    uint64_t h = hash_bytes(reinterpret_cast<const uint8_t*>(xs.data()), bytes);
+    bool changed = (xs.size() != last_xs_size_) || (h != last_xs_hash_) || (eff_bits != last_xs_eff_bits_);
+    if (changed) {
+      check_cuda(cudaMemcpyAsync(xs_buf_.ptr, xs.data(), bytes,
+                                 cudaMemcpyHostToDevice, copy_stream_), "cudaMemcpy xs");
+      last_xs_size_ = xs.size();
+      last_xs_hash_ = h;
+      last_xs_eff_bits_ = eff_bits;
+      return true;
+    }
+    return false;
   }
 };
 

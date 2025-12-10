@@ -44,6 +44,7 @@
 /home/yuhan/new/SUF/build/CMakeFiles/bench_gemm.dir
 /home/yuhan/new/SUF/build/CMakeFiles/bench_gemm_overlap.dir
 /home/yuhan/new/SUF/build/CMakeFiles/bench_pfss_cpu_gpu.dir
+/home/yuhan/new/SUF/build/CMakeFiles/bench_softmax_norm.dir
 /home/yuhan/new/SUF/build/CMakeFiles/bench_truncation.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_myl7_bit_order.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test.dir

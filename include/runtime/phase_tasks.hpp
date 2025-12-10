@@ -1572,6 +1572,7 @@ class RecipTask final : public detail::PhaseTask {
       key_ = (R.party == 0) ? bundle_.key0 : bundle_.key1;
       if (!key_) throw std::runtime_error("RecipTask: missing party key");
       triple_span_ = std::span<const proto::BeaverTriple64Share>(key_->triples);
+      dbg_rec_ = (std::getenv("SOFTMAX_DBG_RECIP") != nullptr);
       static bool logged_f = false;
       if (!logged_f && std::getenv("SOFTMAX_DBG_COEFF") && bundle_.trunc_fb) {
         logged_f = true;
@@ -1725,7 +1726,9 @@ class RecipTask final : public detail::PhaseTask {
           y_[i] = proto::add_mod(y_[i], c0_[i]);
         }
         init_y_debug_ = y_;
-        if (y_.size() > 0) std::cerr << "RecipTask p" << R.party << " init y[0]=" << y_[0] << "\n";
+        if (dbg_rec_ && !y_.empty()) {
+          std::cerr << "[RecipTask p" << R.party << "] init y[0]=" << y_[0] << "\n";
+        }
         iter_ = 0;
         st_ = St::IterMul1;
         return detail::Need::None;
@@ -1753,7 +1756,9 @@ class RecipTask final : public detail::PhaseTask {
         t_xy_tr_.assign(t_xy_.size(), 0);
         if (ref_trunc_) {
           plain_trunc(t_xy_, t_xy_tr_);
-          if (t_xy_tr_.size() > 0) std::cerr << "RecipTask p" << R.party << " iter" << iter_ << " t_xy_tr[0]=" << t_xy_tr_[0] << "\n";
+          if (dbg_rec_ && !t_xy_tr_.empty()) {
+            std::cerr << "[RecipTask p" << R.party << "] iter" << iter_ << " t_xy_tr[0]=" << t_xy_tr_[0] << "\n";
+          }
           two_minus_.assign(x_.size(), 0);
           uint64_t two = (bundle_.frac_bits >= 64) ? 0ull : (uint64_t(2) << bundle_.frac_bits);
           for (size_t i = 0; i < x_.size(); ++i) {
@@ -1779,7 +1784,9 @@ class RecipTask final : public detail::PhaseTask {
       case St::Trunc1: {
         auto need = trunc1_->step(R);
         if (!trunc1_->done()) return need;
-        if (t_xy_tr_.size() > 0) std::cerr << "RecipTask p" << R.party << " iter" << iter_ << " t_xy_tr[0]=" << t_xy_tr_[0] << "\n";
+        if (dbg_rec_ && !t_xy_tr_.empty()) {
+          std::cerr << "[RecipTask p" << R.party << "] iter" << iter_ << " t_xy_tr[0]=" << t_xy_tr_[0] << "\n";
+        }
         two_minus_.assign(x_.size(), 0);
         uint64_t two = (bundle_.frac_bits >= 64) ? 0ull : (uint64_t(2) << bundle_.frac_bits);
         for (size_t i = 0; i < x_.size(); ++i) {
@@ -1802,7 +1809,9 @@ class RecipTask final : public detail::PhaseTask {
         t_update_tr_.assign(t_update_.size(), 0);
         if (ref_trunc_) {
           plain_trunc(t_update_, t_update_tr_);
-          if (t_update_tr_.size() > 0) std::cerr << "RecipTask p" << R.party << " iter" << iter_ << " y_new[0]=" << t_update_tr_[0] << "\n";
+          if (dbg_rec_ && !t_update_tr_.empty()) {
+            std::cerr << "[RecipTask p" << R.party << "] iter" << iter_ << " y_new[0]=" << t_update_tr_[0] << "\n";
+          }
           y_.assign(t_update_tr_.begin(), t_update_tr_.end());
           ++iter_;
           st_ = St::IterMul1;
@@ -1817,7 +1826,9 @@ class RecipTask final : public detail::PhaseTask {
       case St::Trunc2: {
         auto need = trunc2_->step(R);
         if (!trunc2_->done()) return need;
-        if (t_update_tr_.size() > 0) std::cerr << "RecipTask p" << R.party << " iter" << iter_ << " y_new[0]=" << t_update_tr_[0] << "\n";
+        if (dbg_rec_ && !t_update_tr_.empty()) {
+          std::cerr << "[RecipTask p" << R.party << "] iter" << iter_ << " y_new[0]=" << t_update_tr_[0] << "\n";
+        }
         y_.assign(t_update_tr_.begin(), t_update_tr_.end());
         ++iter_;
         st_ = St::IterMul1;
@@ -1857,6 +1868,7 @@ class RecipTask final : public detail::PhaseTask {
 
   std::span<const proto::BeaverTriple64Share> triple_span_;
   size_t triple_cursor_ = 0;
+  bool dbg_rec_ = false;
 
   // coeff storage
   std::vector<uint64_t> coeff_buf_;

@@ -725,6 +725,19 @@ bench_pfss_cpu_gpu/fast:
 .PHONY : bench_pfss_cpu_gpu/fast
 
 #=============================================================================
+# Target rules for targets named bench_softmax_norm
+
+# Build rule for target.
+bench_softmax_norm: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 bench_softmax_norm
+.PHONY : bench_softmax_norm
+
+# fast build rule for target.
+bench_softmax_norm/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_softmax_norm.dir/build.make CMakeFiles/bench_softmax_norm.dir/build
+.PHONY : bench_softmax_norm/fast
+
+#=============================================================================
 # Target rules for targets named bench_truncation
 
 # Build rule for target.
@@ -1013,6 +1026,30 @@ src/bench/bench_sigmafast_pred.s: src/bench/bench_sigmafast_pred.cpp.s
 src/bench/bench_sigmafast_pred.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_sigmafast_pred.dir/build.make CMakeFiles/bench_sigmafast_pred.dir/src/bench/bench_sigmafast_pred.cpp.s
 .PHONY : src/bench/bench_sigmafast_pred.cpp.s
+
+src/bench/bench_softmax_norm.o: src/bench/bench_softmax_norm.cpp.o
+.PHONY : src/bench/bench_softmax_norm.o
+
+# target to build an object file
+src/bench/bench_softmax_norm.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_softmax_norm.dir/build.make CMakeFiles/bench_softmax_norm.dir/src/bench/bench_softmax_norm.cpp.o
+.PHONY : src/bench/bench_softmax_norm.cpp.o
+
+src/bench/bench_softmax_norm.i: src/bench/bench_softmax_norm.cpp.i
+.PHONY : src/bench/bench_softmax_norm.i
+
+# target to preprocess a source file
+src/bench/bench_softmax_norm.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_softmax_norm.dir/build.make CMakeFiles/bench_softmax_norm.dir/src/bench/bench_softmax_norm.cpp.i
+.PHONY : src/bench/bench_softmax_norm.cpp.i
+
+src/bench/bench_softmax_norm.s: src/bench/bench_softmax_norm.cpp.s
+.PHONY : src/bench/bench_softmax_norm.s
+
+# target to generate assembly for a file
+src/bench/bench_softmax_norm.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/bench_softmax_norm.dir/build.make CMakeFiles/bench_softmax_norm.dir/src/bench/bench_softmax_norm.cpp.s
+.PHONY : src/bench/bench_softmax_norm.cpp.s
 
 src/bench/bench_truncation.o: src/bench/bench_truncation.cpp.o
 .PHONY : src/bench/bench_truncation.o
@@ -2351,6 +2388,7 @@ help:
 	@echo "... bench_sigmafast_coeff"
 	@echo "... bench_sigmafast_gates"
 	@echo "... bench_sigmafast_pred"
+	@echo "... bench_softmax_norm"
 	@echo "... bench_truncation"
 	@echo "... compiler_passes"
 	@echo "... cuda_pfss"
@@ -2424,6 +2462,9 @@ help:
 	@echo "... src/bench/bench_sigmafast_pred.o"
 	@echo "... src/bench/bench_sigmafast_pred.i"
 	@echo "... src/bench/bench_sigmafast_pred.s"
+	@echo "... src/bench/bench_softmax_norm.o"
+	@echo "... src/bench/bench_softmax_norm.i"
+	@echo "... src/bench/bench_softmax_norm.s"
 	@echo "... src/bench/bench_truncation.o"
 	@echo "... src/bench/bench_truncation.i"
 	@echo "... src/bench/bench_truncation.s"

@@ -108,6 +108,7 @@ set(CMAKE_DEPEND_INFO_FILES
   "CMakeFiles/bench_gemm.dir/DependInfo.cmake"
   "CMakeFiles/bench_gemm_overlap.dir/DependInfo.cmake"
   "CMakeFiles/bench_pfss_cpu_gpu.dir/DependInfo.cmake"
+  "CMakeFiles/bench_softmax_norm.dir/DependInfo.cmake"
   "CMakeFiles/bench_truncation.dir/DependInfo.cmake"
   "CMakeFiles/test_myl7_bit_order.dir/DependInfo.cmake"
   )

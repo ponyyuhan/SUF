@@ -21,6 +21,16 @@ PfssHandle PfssSuperBatch::enqueue_composite(PreparedCompositeJob job) {
   }
   size_t hatx_words = job.hatx_public.size();
   size_t hatx_bytes = hatx_words * sizeof(uint64_t);
+  bool ragged = !job.row_offsets.empty() && !job.row_lengths.empty();
+  if (ragged) {
+    if (job.row_offsets.size() != job.row_lengths.size() + 1) {
+      throw std::runtime_error("PfssSuperBatch: ragged offsets must be len+1");
+    }
+    size_t total = job.row_offsets.back();
+    if (total != hatx_words) {
+      throw std::runtime_error("PfssSuperBatch: ragged offsets mismatch hatx size");
+    }
+  }
   size_t new_pending_jobs = pending_jobs_ + 1;
   size_t new_pending_hatx = pending_hatx_words_ + hatx_words;
   if (limits_.max_pending_jobs > 0 && new_pending_jobs > limits_.max_pending_jobs) {
@@ -80,8 +90,10 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
     int ell = 0;
     int degree = 0;
     int pred_n = 0;
+    int pred_eff_bits = 64;
     int pred_out_mode = 0;
     int coeff_n = 0;
+    int coeff_eff_bits = 64;
     int coeff_mode = 0;
     int coeff_words = 0;
     bool use_packed_pred = false;
@@ -90,8 +102,9 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
     int packed_cut_words = 0;
     bool operator==(const GroupKey& o) const {
       return r == o.r && ell == o.ell && degree == o.degree &&
-             pred_n == o.pred_n && pred_out_mode == o.pred_out_mode &&
-             coeff_n == o.coeff_n && coeff_mode == o.coeff_mode && coeff_words == o.coeff_words &&
+             pred_n == o.pred_n && pred_eff_bits == o.pred_eff_bits && pred_out_mode == o.pred_out_mode &&
+             coeff_n == o.coeff_n && coeff_eff_bits == o.coeff_eff_bits &&
+             coeff_mode == o.coeff_mode && coeff_words == o.coeff_words &&
              use_packed_pred == o.use_packed_pred && use_packed_cut == o.use_packed_cut &&
              packed_pred_words == o.packed_pred_words && packed_cut_words == o.packed_cut_words;
     }
@@ -99,9 +112,9 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
   struct GroupKeyHash {
     size_t operator()(const GroupKey& k) const {
       size_t h = std::hash<int>{}(k.r + (k.ell << 4) + (k.degree << 8));
-      h ^= std::hash<int>{}(k.pred_n << 12) ^ std::hash<int>{}(k.pred_out_mode << 16);
-      h ^= std::hash<int>{}(k.coeff_n << 20) ^ std::hash<int>{}(k.coeff_mode << 24);
-      h ^= std::hash<int>{}(k.coeff_words << 28);
+      h ^= std::hash<int>{}(k.pred_n << 12) ^ std::hash<int>{}(k.pred_eff_bits << 16) ^ std::hash<int>{}(k.pred_out_mode << 20);
+      h ^= std::hash<int>{}(k.coeff_n << 24) ^ std::hash<int>{}(k.coeff_eff_bits << 28) ^ std::hash<int>{}(k.coeff_mode << 12);
+      h ^= std::hash<int>{}(k.coeff_words << 4);
       h ^= std::hash<int>{}(k.packed_pred_words) ^ (std::hash<int>{}(k.packed_cut_words) << 1);
       h ^= std::hash<bool>{}(k.use_packed_pred) ^ (std::hash<bool>{}(k.use_packed_cut) << 2);
       return h;
@@ -120,6 +133,8 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
     const suf::SUF<uint64_t>* suf = nullptr;
     std::vector<BucketJob> jobs;
     std::vector<uint64_t> hatx;
+    std::vector<int> row_offsets;
+    std::vector<int> row_lengths;
     DeviceBufferRef dev_hatx;
     size_t r = 0;
     size_t ell = 0;
@@ -144,8 +159,10 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
     gk.ell = comp.ell;
     gk.degree = comp.degree;
     gk.pred_n = comp.pred.n;
+    gk.pred_eff_bits = comp.pred.eff_bits;
     gk.pred_out_mode = static_cast<int>(comp.pred.out_mode);
     gk.coeff_n = comp.coeff.n;
+    gk.coeff_eff_bits = comp.coeff.eff_bits;
     gk.coeff_mode = static_cast<int>(comp.coeff.mode);
     gk.coeff_words = comp.coeff.out_words;
     gk.use_packed_pred = job.key->use_packed_pred;
@@ -191,6 +208,15 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
       b.hatx.insert(b.hatx.end(), job.hatx_public.begin(), job.hatx_public.end());
       total_hatx_words += job.hatx_public.size();
       b.jobs.push_back(bj);
+      if (!job.row_offsets.empty()) {
+        int base = b.row_offsets.empty() ? 0 : b.row_offsets.back();
+        for (size_t k = 0; k + 1 < job.row_offsets.size(); ++k) {
+          b.row_offsets.push_back(base + job.row_offsets[k]);
+        }
+        b.row_lengths.insert(b.row_lengths.end(), job.row_lengths.begin(), job.row_lengths.end());
+        if (b.row_offsets.empty()) b.row_offsets.push_back(0);
+        b.row_offsets.push_back(base + static_cast<int>(job.hatx_public.size()));
+      }
     }
 
     for (auto& b : buckets) {

@@ -24,6 +24,7 @@ docs/                   # milestone/设计文档
 - **运行时/状态机**：`PhaseExecutor` 循环任务队列，根据 Need(Open/PfssCoeff/PfssTrunc) flush `OpenCollector` 与 `PfssSuperBatch`（coeff+trunc 同批合并），再 finalize。`PfssPhasePlanner` 支持单次 flush+统计（attention/MLP/softmax 波次已接入）；`PfssLayerPlanner` 聚合多 phase 预算；`PfssAsyncRunner` 可选异步 flush。`StagedExecutor` 演示 softmax 跨任务的一次 PFSS flush。
 - **任务层**（`runtime/phase_tasks.hpp`）：`TruncTask`（faithful/GapARS/AutoTrunc），`CubicPolyTask`（SiLU/nExp/Recip 3 mul + 2 trunc），`RsqrtTask`（仿射初值 + NR），`LayerNormTask`（mean/var trunc + rsqrt + affine），均复用 PhaseExecutor/PfssSuperBatch。
 - **NN 路径**：`nn/attention_block.cpp`（任务化 softmax/recip/nexp + matmul trunc + KV cache），`nn/mlp_block.cpp`（两段 matmul trunc + SiLU），`nn/transformer_layer.cpp`（两次 LayerNorm + attention + MLP + 残差），`nn/layer_context.hpp` 记录 hoist/rescale/trunc 计划、GapCert、PfssSuperBatch/GPU stager。
+- **Packing hints**：`Pred/CoeffProgramDesc` 支持 `eff_bits`（默认 64）和占位 `ragged` 标记，SigmaFast packed keygen 会使用 `eff_bits`；ragged 仍未全链路实现（仅留元数据）。
 
 ## PhaseExecutor 状态机与执行路径
 
@@ -54,6 +55,8 @@ docs/                   # milestone/设计文档
   RUN_GPU_COMPOSITE=1 ctest -R test_pfss_gpu -V   # 开启 GPU packed composite
   ./build_cuda/bench_gemm_overlap                 # PFSS+GEMM 重叠基准
   ```
+- **流/重叠**：PFSS GPU backend 暴露 compute stream，GEMM 走独立非阻塞流（matmul_default_stream）；PFSS block size 可用 `SUF_PFSS_GPU_BLOCK` 调节；matmul tiling 可用 `SUF_MATMUL_GPU_TILE=wide|narrow` 控制。
+- **缓存/基准**：GPU PFSS 默认缓存 keys/hatx（`SUF_NO_CACHE_KEYS`/`SUF_NO_CACHE_HATX` 关闭）；`bench_gemm_overlap`、`bench_pfss_cpu_gpu`、`bench_softmax_norm`（`--preset=safe`，`SUF_BENCH_DEVICE_TIME=1` 记录设备时间）可用于对比 CPU/GPU 与重叠收益。
 
 ## 代码与数据对齐要点
 
@@ -89,9 +92,10 @@ docs/                   # milestone/设计文档
 - GapCert/范围仍保守，限制更激进的 hoist 与 AutoTrunc 选择。
 - Super-plan/packing 仍是 phase/layer 粒度，未做跨 phase 融合或更细的 stall/bytes 驱动 flush，causal/ragged 预算可进一步收紧。
 - GPU 性能：matmul 仍为简化 tiling，未用 WMMA/半精度拆半；PFSS/GEMM overlap 需更稳的 stream/pipeline；Beaver/三元组/GPU 缓存策略尚浅。
+- Ragged packing 尚未全链路打通（仅元数据占位），eff_bits 需要 planner 输入才能生效。
 
 ## 后续建议
 
 1) 完善 super-plan 与 bytes/packing 预算（含 causal/ragged）、增加 planner 回归。  
 2) 收紧 GapCert/abs 界并贯穿更多算子，提升 GapARS 覆盖面。  
-3) GPU 性能：引入 WMMA/半精度拆半、SoA 打包、Beaver/三元组缓存；精炼 PFSS/GEMM pipeline（事件/双流）与更丰富基准。  
+3) GPU 性能：引入 WMMA/半精度拆半、SoA 打包、Beaver/三元组缓存；精炼 PFSS/GEMM pipeline（事件/双流）与更丰富基准；驱动 eff_bits/ragged packing 到 planner 与 PFSS pack/unpack。  

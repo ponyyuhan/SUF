@@ -3,6 +3,7 @@
 #include <iostream>
 #include <mutex>
 #include <queue>
+#include <string>
 #include <random>
 #include <thread>
 
@@ -109,15 +110,37 @@ bool check_outputs(const gates::CompositeBatchOutput& o0,
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
 #ifndef SUF_HAVE_CUDA
   std::cout << "SUF_HAVE_CUDA not defined; skipping GPU/CPU PFSS bench.\n";
   return 0;
 #else
   std::cout << std::unitbuf;
-  const int frac_bits = 8;
-  const int reps = 10;
+  int frac_bits = 8;
+  int reps = 10;
   std::vector<size_t> sizes = {256, 1024, 4096, 8192};
+  std::vector<std::string> gate_names = {"gapars"};
+  for (int i = 1; i < argc; ++i) {
+    std::string arg(argv[i]);
+    if (arg.rfind("--N=", 0) == 0) {
+      sizes.clear();
+      sizes.push_back(static_cast<size_t>(std::stoul(arg.substr(4))));
+    } else if (arg.rfind("--reps=", 0) == 0) {
+      reps = std::stoi(arg.substr(7));
+    } else if (arg.rfind("--frac_bits=", 0) == 0) {
+      frac_bits = std::stoi(arg.substr(12));
+    } else if (arg.rfind("--gate=", 0) == 0) {
+      gate_names.clear();
+      std::string list = arg.substr(7);
+      size_t pos = 0;
+      while (pos < list.size()) {
+        size_t comma = list.find(',', pos);
+        if (comma == std::string::npos) comma = list.size();
+        gate_names.push_back(list.substr(pos, comma - pos));
+        pos = comma + 1;
+      }
+    }
+  }
 
   proto::ClearBackend cpu;
   auto gpu0 = proto::make_real_gpu_backend();
@@ -126,118 +149,129 @@ int main() {
     std::cout << "GPU backend unavailable; CPU only.\n";
   }
 
+  auto parse_gate = [](const std::string& g) -> compiler::GateKind {
+    if (g == "gapars" || g == "gap" || g == "ars") return compiler::GateKind::GapARS;
+    if (g == "faithful" || g == "tr" || g == "faithful_tr") return compiler::GateKind::FaithfulTR;
+    if (g == "faithful_ars") return compiler::GateKind::FaithfulARS;
+    return compiler::GateKind::GapARS;
+  };
+
   for (size_t N : sizes) {
-    std::cout << "\n[PFSS bench] N=" << N << " reps=" << reps << " frac_bits=" << frac_bits << "\n";
-    std::vector<uint64_t> plain(N);
-    std::mt19937_64 rng(42 + static_cast<uint64_t>(N));
-    for (size_t i = 0; i < N; i++) {
-      // Positive inputs to simplify expected truncation.
-      uint64_t v = static_cast<uint64_t>(rng() % 65536);
-      plain[i] = v;
-    }
-
-    std::cout << "[PFSS bench] keygen...\n";
-    suf::SUF<uint64_t> suf_cpu, suf_gpu;
-    std::mt19937_64 rng_k0(123 + static_cast<uint64_t>(N));
-    auto kp_cpu = gates::composite_gen_trunc_gate(cpu, rng_k0, frac_bits,
-                                                  compiler::GateKind::GapARS, static_cast<int>(N),
-                                                  &suf_cpu);
-    std::vector<uint64_t> hatx_cpu(N);
-    for (size_t i = 0; i < N; i++) {
-      hatx_cpu[i] = proto::add_mod(plain[i], kp_cpu.k0.compiled.r_in);
-    }
-    std::unique_ptr<gates::CompositeKeyPair> kp_gpu;
-    std::vector<uint64_t> hatx_gpu;
-    if (gpu0 && gpu1) {
-      std::mt19937_64 rng_k1(321 + static_cast<uint64_t>(N));
-      kp_gpu = std::make_unique<gates::CompositeKeyPair>(
-          gates::composite_gen_trunc_gate(*gpu0, rng_k1, frac_bits,
-                                          compiler::GateKind::GapARS, static_cast<int>(N),
-                                          &suf_gpu));
-      hatx_gpu.resize(N);
+    for (const auto& gate_name : gate_names) {
+      compiler::GateKind gk = parse_gate(gate_name);
+      std::cout << "\n[PFSS bench] gate=" << gate_name << " N=" << N
+                << " reps=" << reps << " frac_bits=" << frac_bits << "\n";
+      std::vector<uint64_t> plain(N);
+      std::mt19937_64 rng(42 + static_cast<uint64_t>(N));
       for (size_t i = 0; i < N; i++) {
-        hatx_gpu[i] = proto::add_mod(plain[i], kp_gpu->k0.compiled.r_in);
+        // Positive inputs to simplify expected truncation.
+        uint64_t v = static_cast<uint64_t>(rng() % 65536);
+        plain[i] = v;
       }
-    }
 
-    // Correctness sanity: CPU baseline once and compare GPU once if present.
-    std::cout << "[PFSS bench] CPU correctness run...\n";
-    ProtoLocalChan::Shared sh_chk;
-    ProtoLocalChan c0_chk(&sh_chk, true), c1_chk(&sh_chk, false);
-    gates::FaithfulTruncPostProc hook_chk;
-    hook_chk.f = frac_bits;
-    hook_chk.r_in = kp_cpu.k0.compiled.r_in;
-    hook_chk.r_hi_share = kp_cpu.k0.r_hi_share;
-    gates::CompositeBatchInput in{hatx_cpu.data(), N, nullptr};
-    std::exception_ptr cpu_exc;
-    gates::CompositeBatchOutput out_cpu1;
-    std::thread cpu_p1([&]() {
-      try {
-        out_cpu1 = gates::composite_eval_batch_with_postproc(1, cpu, c1_chk, kp_cpu.k1, suf_cpu, in, hook_chk);
-      } catch (...) { cpu_exc = std::current_exception(); }
-    });
-    auto out_cpu0 = gates::composite_eval_batch_with_postproc(0, cpu, c0_chk, kp_cpu.k0, suf_cpu, in, hook_chk);
-    cpu_p1.join();
-    if (cpu_exc) std::rethrow_exception(cpu_exc);
-    std::vector<uint64_t> expected(N);
-    for (size_t i = 0; i < N; i++) {
-      expected[i] = plain[i] >> frac_bits;
-    }
-    if (!check_outputs(out_cpu0, out_cpu1, kp_cpu, expected)) {
-      std::cerr << "CPU self-check failed.\n";
-      return 1;
-    }
-
-    if (kp_gpu) {
-      std::cout << "[PFSS bench] GPU correctness run...\n";
-      ProtoLocalChan::Shared sh_gpu;
-      ProtoLocalChan c0g(&sh_gpu, true), c1g(&sh_gpu, false);
-    gates::CompositeBatchInput in_gpu{hatx_gpu.data(), N, nullptr};
-    std::exception_ptr gpu_exc;
-    gates::CompositeBatchOutput out_gpu1;
-    cudaEvent_t ev_start{}, ev_end{};
-    cudaStream_t s = nullptr;
-    if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(gpu0.get())) {
-      s = reinterpret_cast<cudaStream_t>(staged->device_stream());
-      if (s) {
-        cudaEventCreate(&ev_start);
-        cudaEventCreate(&ev_end);
-        cudaEventRecord(ev_start, s);
+      std::cout << "[PFSS bench] keygen...\n";
+      suf::SUF<uint64_t> suf_cpu, suf_gpu;
+      std::mt19937_64 rng_k0(123 + static_cast<uint64_t>(N));
+      auto kp_cpu = gates::composite_gen_trunc_gate(cpu, rng_k0, frac_bits,
+                                                    gk, static_cast<int>(N),
+                                                    &suf_cpu);
+      std::vector<uint64_t> hatx_cpu(N);
+      for (size_t i = 0; i < N; i++) {
+        hatx_cpu[i] = proto::add_mod(plain[i], kp_cpu.k0.compiled.r_in);
       }
-    }
-    std::thread gpu_p1([&]() {
-      try {
-        out_gpu1 = gates::composite_eval_batch_with_postproc(1, *gpu1, c1g, kp_gpu->k1, suf_gpu, in_gpu, hook_chk);
-      } catch (...) { gpu_exc = std::current_exception(); }
-    });
-    auto out_gpu0 = gates::composite_eval_batch_with_postproc(0, *gpu0, c0g, kp_gpu->k0, suf_gpu, in_gpu, hook_chk);
-    if (s && ev_end) cudaEventRecord(ev_end, s);
-    gpu_p1.join();
-    if (gpu_exc) std::rethrow_exception(gpu_exc);
-    if (s && ev_start && ev_end) {
-      cudaEventSynchronize(ev_end);
-      float ms = 0.f;
-      cudaEventElapsedTime(&ms, ev_start, ev_end);
-      std::cout << "[PFSS bench] GPU device-time (events) ~" << ms << " ms (N=" << N << ")\n";
-      cudaEventDestroy(ev_start);
-      cudaEventDestroy(ev_end);
-    }
-    if (!check_outputs(out_gpu0, out_gpu1, *kp_gpu, expected)) {
-      std::cerr << "GPU vs expectation failed.\n";
-      return 1;
-    }
-  }
+      std::unique_ptr<gates::CompositeKeyPair> kp_gpu;
+      std::vector<uint64_t> hatx_gpu;
+      if (gpu0 && gpu1) {
+        std::mt19937_64 rng_k1(321 + static_cast<uint64_t>(N));
+        kp_gpu = std::make_unique<gates::CompositeKeyPair>(
+            gates::composite_gen_trunc_gate(*gpu0, rng_k1, frac_bits,
+                                            gk, static_cast<int>(N),
+                                            &suf_gpu));
+        hatx_gpu.resize(N);
+        for (size_t i = 0; i < N; i++) {
+          hatx_gpu[i] = proto::add_mod(plain[i], kp_gpu->k0.compiled.r_in);
+        }
+      }
 
-    auto cpu_br = bench_once(cpu, cpu, kp_cpu, suf_cpu, hatx_cpu, frac_bits, reps);
-    std::cout << "[PFSS trunc GapARS] CPU: avg=" << cpu_br.avg_ms << "ms"
-              << " min=" << cpu_br.min_ms << "ms max=" << cpu_br.max_ms << "ms over "
-              << reps << " reps (N=" << N << ")\n";
+      // Correctness sanity: CPU baseline once and compare GPU once if present.
+      std::cout << "[PFSS bench] CPU correctness run...\n";
+      ProtoLocalChan::Shared sh_chk;
+      ProtoLocalChan c0_chk(&sh_chk, true), c1_chk(&sh_chk, false);
+      gates::FaithfulTruncPostProc hook_chk;
+      hook_chk.f = frac_bits;
+      hook_chk.r_in = kp_cpu.k0.compiled.r_in;
+      hook_chk.r_hi_share = kp_cpu.k0.r_hi_share;
+      gates::CompositeBatchInput in{hatx_cpu.data(), N, nullptr};
+      std::exception_ptr cpu_exc;
+      gates::CompositeBatchOutput out_cpu1;
+      std::thread cpu_p1([&]() {
+        try {
+          out_cpu1 = gates::composite_eval_batch_with_postproc(1, cpu, c1_chk, kp_cpu.k1, suf_cpu, in, hook_chk);
+        } catch (...) { cpu_exc = std::current_exception(); }
+      });
+      auto out_cpu0 = gates::composite_eval_batch_with_postproc(0, cpu, c0_chk, kp_cpu.k0, suf_cpu, in, hook_chk);
+      cpu_p1.join();
+      if (cpu_exc) std::rethrow_exception(cpu_exc);
+      std::vector<uint64_t> expected(N);
+      for (size_t i = 0; i < N; i++) {
+        expected[i] = plain[i] >> frac_bits;
+      }
+      if (!check_outputs(out_cpu0, out_cpu1, kp_cpu, expected)) {
+        std::cerr << "CPU self-check failed.\n";
+        return 1;
+      }
 
-    if (kp_gpu) {
-      auto gpu_br = bench_once(*gpu0, *gpu1, *kp_gpu, suf_gpu, hatx_gpu, frac_bits, reps);
-      std::cout << "[PFSS trunc GapARS] GPU: avg=" << gpu_br.avg_ms << "ms"
-                << " min=" << gpu_br.min_ms << "ms max=" << gpu_br.max_ms << "ms over "
+      if (kp_gpu) {
+        std::cout << "[PFSS bench] GPU correctness run...\n";
+        ProtoLocalChan::Shared sh_gpu;
+        ProtoLocalChan c0g(&sh_gpu, true), c1g(&sh_gpu, false);
+        gates::CompositeBatchInput in_gpu{hatx_gpu.data(), N, nullptr};
+        std::exception_ptr gpu_exc;
+        gates::CompositeBatchOutput out_gpu1;
+        cudaEvent_t ev_start{}, ev_end{};
+        cudaStream_t s = nullptr;
+        if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(gpu0.get())) {
+          s = reinterpret_cast<cudaStream_t>(staged->device_stream());
+          if (s) {
+            cudaEventCreate(&ev_start);
+            cudaEventCreate(&ev_end);
+            cudaEventRecord(ev_start, s);
+          }
+        }
+        std::thread gpu_p1([&]() {
+          try {
+            out_gpu1 = gates::composite_eval_batch_with_postproc(1, *gpu1, c1g, kp_gpu->k1, suf_gpu, in_gpu, hook_chk);
+          } catch (...) { gpu_exc = std::current_exception(); }
+        });
+        auto out_gpu0 = gates::composite_eval_batch_with_postproc(0, *gpu0, c0g, kp_gpu->k0, suf_gpu, in_gpu, hook_chk);
+        if (s && ev_end) cudaEventRecord(ev_end, s);
+        gpu_p1.join();
+        if (gpu_exc) std::rethrow_exception(gpu_exc);
+        if (s && ev_start && ev_end) {
+          cudaEventSynchronize(ev_end);
+          float ms = 0.f;
+          cudaEventElapsedTime(&ms, ev_start, ev_end);
+          std::cout << "[PFSS bench] GPU device-time (events) ~" << ms << " ms (N=" << N << ")\n";
+          cudaEventDestroy(ev_start);
+          cudaEventDestroy(ev_end);
+        }
+        if (!check_outputs(out_gpu0, out_gpu1, *kp_gpu, expected)) {
+          std::cerr << "GPU vs expectation failed.\n";
+          return 1;
+        }
+      }
+
+      auto cpu_br = bench_once(cpu, cpu, kp_cpu, suf_cpu, hatx_cpu, frac_bits, reps);
+      std::cout << "[PFSS " << gate_name << "] CPU: avg=" << cpu_br.avg_ms << "ms"
+                << " min=" << cpu_br.min_ms << "ms max=" << cpu_br.max_ms << "ms over "
                 << reps << " reps (N=" << N << ")\n";
+
+      if (kp_gpu) {
+        auto gpu_br = bench_once(*gpu0, *gpu1, *kp_gpu, suf_gpu, hatx_gpu, frac_bits, reps);
+        std::cout << "[PFSS " << gate_name << "] GPU: avg=" << gpu_br.avg_ms << "ms"
+                  << " min=" << gpu_br.min_ms << "ms max=" << gpu_br.max_ms << "ms over "
+                  << reps << " reps (N=" << N << ")\n";
+      }
     }
   }
   return 0;

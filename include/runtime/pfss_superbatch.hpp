@@ -134,6 +134,8 @@ struct PreparedCompositeJob {
   const gates::CompositePartyKey* key = nullptr;
   gates::PostProcHook* hook = nullptr;
   std::vector<uint64_t> hatx_public;
+  std::vector<int> row_offsets;  // optional ragged offsets (prefix sums), last entry = total elems
+  std::vector<int> row_lengths;  // optional ragged lengths per row
   nn::TensorView<uint64_t> out;  // destination for masked output share
   size_t token = static_cast<size_t>(-1);  // filled by PfssSuperBatch
 };

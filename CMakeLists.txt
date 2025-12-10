@@ -356,6 +356,10 @@ add_test(NAME bench_gemm_overlap COMMAND bench_gemm_overlap)
 add_executable(bench_pfss_cpu_gpu src/bench/bench_pfss_cpu_gpu.cpp)
 target_include_directories(bench_pfss_cpu_gpu PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(bench_pfss_cpu_gpu PRIVATE nn_ops compiler_passes suf_fss cuda_pfss OpenSSL::Crypto ${MYL7_LINK_LIBS})
+
+add_executable(bench_softmax_norm src/bench/bench_softmax_norm.cpp)
+target_include_directories(bench_softmax_norm PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(bench_softmax_norm PRIVATE nn_ops compiler_passes suf_fss cuda_pfss OpenSSL::Crypto ${MYL7_LINK_LIBS})
 endif()
 
 add_executable(bench_truncation src/bench/bench_truncation.cpp)

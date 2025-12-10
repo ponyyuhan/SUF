@@ -285,21 +285,25 @@ inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t
   auto* packed_backend = dynamic_cast<proto::PackedLtBackend*>(&backend);
   auto make_groups = [&](const std::vector<compiler::RawPredQuery>& qs,
                          int in_bits_default,
+                         int eff_bits_hint,
                          std::vector<typename CompositePartyKey::PackedGroup>& dst0,
                          std::vector<typename CompositePartyKey::PackedGroup>& dst1,
                          int& total_words) {
     if (!packed_backend || qs.empty()) return;
+    uint8_t eff_bits_u8 = (eff_bits_hint > 0 && eff_bits_hint <= 64)
+                              ? static_cast<uint8_t>(eff_bits_hint)
+                              : static_cast<uint8_t>(in_bits_default);
     size_t idx = 0;
     const size_t limit = qs.size();
     while (idx < limit) {
       const auto& q = qs[idx];
       compiler::RawPredKind kind = q.kind;
-      uint8_t bits_in = (q.kind == compiler::RawPredKind::kLtU64) ? static_cast<uint8_t>(in_bits_default) : q.f;
+      uint8_t bits_in = (q.kind == compiler::RawPredKind::kLtU64) ? eff_bits_u8 : q.f;
       size_t start = idx;
       std::vector<uint64_t> thrs;
       while (idx < limit && thrs.size() < 64) {
         const auto& qi = qs[idx];
-        uint8_t qi_bits = (qi.kind == compiler::RawPredKind::kLtU64) ? static_cast<uint8_t>(in_bits_default) : qi.f;
+        uint8_t qi_bits = (qi.kind == compiler::RawPredKind::kLtU64) ? eff_bits_u8 : qi.f;
         if (qi.kind != kind || qi_bits != bits_in) break;
         thrs.push_back(qi.theta);
         idx++;
@@ -320,7 +324,7 @@ inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t
   };
   if (packed_backend && !compiled.pred.queries.empty()) {
     out.k0.use_packed_pred = out.k1.use_packed_pred = true;
-    make_groups(compiled.pred.queries, compiled.pred.n,
+    make_groups(compiled.pred.queries, compiled.pred.n, compiled.pred.eff_bits,
                 out.k0.packed_pred_groups, out.k1.packed_pred_groups,
                 out.k0.packed_pred_words);
     out.k1.packed_pred_words = out.k0.packed_pred_words;
@@ -332,14 +336,18 @@ inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t
       cuts.push_back(compiler::RawPredQuery{compiler::RawPredKind::kLtU64, static_cast<uint8_t>(compiled.coeff.n), c});
     }
     out.k0.use_packed_cut = out.k1.use_packed_cut = true;
-    make_groups(cuts, compiled.coeff.n,
+    make_groups(cuts, compiled.coeff.n, compiled.coeff.eff_bits,
                 out.k0.packed_cut_groups, out.k1.packed_cut_groups,
                 out.k0.packed_cut_words);
     out.k1.packed_cut_words = out.k0.packed_cut_words;
   }
   for (const auto& q : compiled.pred.queries) {
     uint64_t thr = q.theta;
-    int bits = (q.kind == compiler::RawPredKind::kLtU64) ? compiled.pred.n : q.f;
+    int bits = (q.kind == compiler::RawPredKind::kLtU64)
+                   ? ((compiled.pred.eff_bits > 0 && compiled.pred.eff_bits <= compiled.pred.n)
+                          ? compiled.pred.eff_bits
+                          : compiled.pred.n)
+                   : q.f;
     auto thr_bits = backend.u64_to_bits_msb(thr, bits);
     std::vector<proto::u8> payload{1u};
     auto kp = backend.gen_dcf(bits, thr_bits, payload);
@@ -348,9 +356,12 @@ inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t
   }
   // Cutpoint predicates for selector network (XOR bits)
   for (const auto& cut : compiled.coeff.cutpoints_ge) {
-    auto thr_bits = backend.u64_to_bits_msb(cut, compiled.coeff.n);
+    int bits = (compiled.coeff.eff_bits > 0 && compiled.coeff.eff_bits <= compiled.coeff.n)
+                   ? compiled.coeff.eff_bits
+                   : compiled.coeff.n;
+    auto thr_bits = backend.u64_to_bits_msb(cut, bits);
     std::vector<proto::u8> payload{1u};
-    auto kp = backend.gen_dcf(compiled.coeff.n, thr_bits, payload);
+    auto kp = backend.gen_dcf(bits, thr_bits, payload);
     out.k0.cut_pred_keys.push_back(kp.k0);
     out.k1.cut_pred_keys.push_back(kp.k1);
   }
@@ -788,7 +799,11 @@ inline std::vector<uint64_t> composite_eval_share_backend(int party,
     }
   } else {
     for (size_t i = 0; i < compiled.pred.queries.size(); i++) {
-      int bits_in = (compiled.pred.queries[i].kind == compiler::RawPredKind::kLtU64) ? compiled.pred.n : compiled.pred.queries[i].f;
+      int bits_in = (compiled.pred.queries[i].kind == compiler::RawPredKind::kLtU64)
+                        ? ((compiled.pred.eff_bits > 0 && compiled.pred.eff_bits <= compiled.pred.n)
+                               ? compiled.pred.eff_bits
+                               : compiled.pred.n)
+                        : compiled.pred.queries[i].f;
       bits_xor[i] = proto::eval_pred_bit_share(backend, bits_in, k.pred_meta, k.pred_keys[i], hatx);
     }
   }
@@ -976,7 +991,11 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
   } else {
     pred_bits_xor.resize(compiled.pred.queries.size() * N, 0);
     for (size_t qi = 0; qi < compiled.pred.queries.size(); qi++) {
-      int bits_in = (compiled.pred.queries[qi].kind == compiler::RawPredKind::kLtU64) ? compiled.pred.n : compiled.pred.queries[qi].f;
+      int bits_in = (compiled.pred.queries[qi].kind == compiler::RawPredKind::kLtU64)
+                        ? ((compiled.pred.eff_bits > 0 && compiled.pred.eff_bits <= compiled.pred.n)
+                               ? compiled.pred.eff_bits
+                               : compiled.pred.n)
+                        : compiled.pred.queries[qi].f;
       // pack keys_flat [N][key_bytes]
       size_t key_bytes = k.pred_keys[qi].bytes.size();
       std::vector<uint8_t> keys_flat(N * key_bytes);

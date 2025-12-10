@@ -259,9 +259,13 @@ bool matmul_publicW_gpu(const TensorView<uint64_t>& X_share,
   int64_t* bias_ptr = params.bias ? sc.dB : nullptr;
   bool launched = false;
   TileMode mode = tile_mode_from_env();
-  // Heuristic: prefer the wider tile when N/K are moderately large or when env forces it.
+  // Heuristic: prefer wider tiles for large N/K, allow env override; fall back to narrower.
   if ((mode == TileMode::Wide) || (mode == TileMode::Auto && N >= 128 && K >= 128)) {
     launched = launch_matmul_kernel<16, 64, 64, 4>(
+        sc.dX, sc.dW, bias_ptr, sc.dY, batch, M, K, N, params.w_transposed, stream);
+  }
+  if (!launched) {
+    launched = launch_matmul_kernel<16, 32, 64, 2>(
         sc.dX, sc.dW, bias_ptr, sc.dY, batch, M, K, N, params.w_transposed, stream);
   }
   if (!launched) {

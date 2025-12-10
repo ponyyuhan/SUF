@@ -61,6 +61,8 @@ enum class PredOutMode : uint8_t {
 
 struct PredProgramDesc {
   int n = 64;
+  int eff_bits = 64;  // optional packing hint; <=n, default un-packed (64)
+  bool ragged = false;  // optional: expects per-row valid lengths
   PredOutMode out_mode = PredOutMode::kU64PerBit_Xor;
   std::vector<RawPredQuery> queries;  // deduplicated, stable order
 };
@@ -75,6 +77,8 @@ struct IntervalPayload {
 
 struct CoeffProgramDesc {
   int n = 64;
+  int eff_bits = 64;  // optional packing hint; <=n, default un-packed (64)
+  bool ragged = false;  // optional: expects per-row valid lengths
   CoeffMode mode = CoeffMode::kStepDcf;
   int out_words = 0;  // e.g. r*(d+1)
   // Interval LUT mode

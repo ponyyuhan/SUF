@@ -146,22 +146,37 @@ extern "C" __global__ void packed_cmp_kernel_keyed(const uint8_t* keys_flat,
   int out_words = (static_cast<int>(hdr->num_thr) + 63) / 64;
   uint64_t mask = mask_bits_dev(hdr->in_bits);
   uint64_t x = xs[idx] & mask;
-  for (int w = 0; w < out_words; w++) {
-    int base = w * 64;
-    int limit = (base + 64 < static_cast<int>(hdr->num_thr)) ? (base + 64) : static_cast<int>(hdr->num_thr);
-    uint64_t word = 0;
-    for (int b = base; b < limit; b++) {
+  // Process two mask words per AES block (low/high 64 bits) to reduce AES calls.
+  for (int w = 0; w < out_words; w += 2) {
+    int base0 = w * 64;
+    int limit0 = (base0 + 64 < static_cast<int>(hdr->num_thr)) ? (base0 + 64) : static_cast<int>(hdr->num_thr);
+    uint64_t word0 = 0;
+    for (int b = base0; b < limit0; b++) {
       uint64_t thr = thresholds[b] & mask;
-      if (x < thr) word |= (1ull << (b - base));
+      if (x < thr) word0 |= (1ull << (b - base0));
+    }
+    uint64_t word1 = 0;
+    if (w + 1 < out_words) {
+      int base1 = (w + 1) * 64;
+      int limit1 = (base1 + 64 < static_cast<int>(hdr->num_thr)) ? (base1 + 64) : static_cast<int>(hdr->num_thr);
+      for (int b = base1; b < limit1; b++) {
+        uint64_t thr = thresholds[b] & mask;
+        if (x < thr) word1 |= (1ull << (b - base1));
+      }
     }
     uint8_t ctr_block[16] = {0};
-    uint64_t ctr = hdr->nonce ^ (static_cast<uint64_t>(idx) << 32) ^ static_cast<uint64_t>(w);
-    for (int k = 0; k < 8; k++) ctr_block[k] = static_cast<uint8_t>((ctr >> (8 * k)) & 0xFFu);
+    uint64_t ctr = hdr->nonce ^ (static_cast<uint64_t>(idx) << 32) ^ static_cast<uint64_t>(w / 2);
+    reinterpret_cast<uint64_t*>(ctr_block)[0] = ctr;
+    reinterpret_cast<uint64_t*>(ctr_block)[1] = 0;
     aes128_encrypt_block(ctr_block, hdr->round_keys);
-    uint64_t ks = 0;
-    for (int k = 0; k < 8; k++) ks |= (static_cast<uint64_t>(ctr_block[k]) << (8 * k));
-    uint64_t share = (hdr->party == 0) ? ks : (word ^ ks);
-    out_masks[idx * static_cast<size_t>(out_words) + static_cast<size_t>(w)] = share;
+    uint64_t ks0 = reinterpret_cast<uint64_t*>(ctr_block)[0];
+    uint64_t ks1 = reinterpret_cast<uint64_t*>(ctr_block)[1];
+    uint64_t share0 = (hdr->party == 0) ? ks0 : (word0 ^ ks0);
+    out_masks[idx * static_cast<size_t>(out_words) + static_cast<size_t>(w)] = share0;
+    if (w + 1 < out_words) {
+      uint64_t share1 = (hdr->party == 0) ? ks1 : (word1 ^ ks1);
+      out_masks[idx * static_cast<size_t>(out_words) + static_cast<size_t>(w + 1)] = share1;
+    }
   }
 }
 
@@ -185,16 +200,21 @@ extern "C" __global__ void vector_lut_kernel_keyed(const uint8_t* keys_flat,
     if (x >= c0 && x < c1) { iv = static_cast<int>(j); break; }
   }
   const uint64_t* row = payload + static_cast<size_t>(iv) * hdr->out_words;
-  for (int w = 0; w < hdr->out_words; w++) {
+  for (int w = 0; w < hdr->out_words; w += 2) {
     uint8_t ctr_block[16] = {0};
-    uint64_t ctr = hdr->nonce ^ (static_cast<uint64_t>(idx) << 32) ^
-                   (static_cast<uint64_t>(iv) * hdr->out_words + static_cast<uint64_t>(w));
-    for (int k = 0; k < 8; k++) ctr_block[k] = static_cast<uint8_t>((ctr >> (8 * k)) & 0xFFu);
+    uint64_t base_ctr = static_cast<uint64_t>(iv) * hdr->out_words + static_cast<uint64_t>(w);
+    uint64_t ctr = hdr->nonce ^ (static_cast<uint64_t>(idx) << 32) ^ base_ctr;
+    reinterpret_cast<uint64_t*>(ctr_block)[0] = ctr;
+    reinterpret_cast<uint64_t*>(ctr_block)[1] = 0;
     aes128_encrypt_block(ctr_block, hdr->round_keys);
-    uint64_t ks = 0;
-    for (int k = 0; k < 8; k++) ks |= (static_cast<uint64_t>(ctr_block[k]) << (8 * k));
-    uint64_t share = (hdr->party == 0) ? ks : (row[w] - ks);
-    out[idx * static_cast<size_t>(hdr->out_words) + static_cast<size_t>(w)] = share;
+    uint64_t ks0 = reinterpret_cast<uint64_t*>(ctr_block)[0];
+    uint64_t ks1 = reinterpret_cast<uint64_t*>(ctr_block)[1];
+    uint64_t share0 = (hdr->party == 0) ? ks0 : (row[w] - ks0);
+    out[idx * static_cast<size_t>(hdr->out_words) + static_cast<size_t>(w)] = share0;
+    if (w + 1 < hdr->out_words) {
+      uint64_t share1 = (hdr->party == 0) ? ks1 : (row[w + 1] - ks1);
+      out[idx * static_cast<size_t>(hdr->out_words) + static_cast<size_t>(w + 1)] = share1;
+    }
   }
 }
 
