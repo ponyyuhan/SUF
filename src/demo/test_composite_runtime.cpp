@@ -113,16 +113,32 @@ int main() {
 
   LocalChan::Shared sh;
   std::vector<uint64_t> out1_0(N), out1_1(N), out2_0(N), out2_1(N);
+  auto make_job = [&](const suf::SUF<uint64_t>* suf,
+                      const gates::CompositePartyKey* key,
+                      const std::vector<uint64_t>& hatx,
+                      nn::TensorView<uint64_t> out) {
+    runtime::PreparedCompositeJob job;
+    job.suf = suf;
+    job.key = key;
+    job.hook = &noop;
+    job.hatx_public = hatx;
+    job.out = out;
+    job.shape.total_elems = static_cast<uint32_t>(hatx.size());
+    job.shape.num_rows = static_cast<uint16_t>(hatx.size());
+    job.shape.eff_bits = 64;
+    job.shape.ragged = false;
+    return job;
+  };
   std::thread t1([&](){
     LocalChan ch{&sh, false};
-    batch1.enqueue_composite({&suf1, &kp1.k1, &noop, hatx1, nn::TensorView<uint64_t>(out1_1.data(), {N})});
-    batch1.enqueue_composite({&suf2, &kp2.k1, &noop, hatx2, nn::TensorView<uint64_t>(out2_1.data(), {N})});
+    batch1.enqueue_composite(make_job(&suf1, &kp1.k1, hatx1, nn::TensorView<uint64_t>(out1_1.data(), {N})));
+    batch1.enqueue_composite(make_job(&suf2, &kp2.k1, hatx2, nn::TensorView<uint64_t>(out2_1.data(), {N})));
     batch1.flush_and_finalize(1, backend, ch);
   });
   {
     LocalChan ch{&sh, true};
-    batch0.enqueue_composite({&suf1, &kp1.k0, &noop, hatx1, nn::TensorView<uint64_t>(out1_0.data(), {N})});
-    batch0.enqueue_composite({&suf2, &kp2.k0, &noop, hatx2, nn::TensorView<uint64_t>(out2_0.data(), {N})});
+    batch0.enqueue_composite(make_job(&suf1, &kp1.k0, hatx1, nn::TensorView<uint64_t>(out1_0.data(), {N})));
+    batch0.enqueue_composite(make_job(&suf2, &kp2.k0, hatx2, nn::TensorView<uint64_t>(out2_0.data(), {N})));
     batch0.flush_and_finalize(0, backend, ch);
   }
   t1.join();

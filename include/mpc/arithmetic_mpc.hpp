@@ -9,7 +9,7 @@ namespace mpc {
 template<typename RingT>
 inline AddShare<RingT> mul_share(
     int party,
-    net::Chan& ch,
+    ::net::Chan& ch,
     AddShare<RingT> x,
     AddShare<RingT> y,
     BeaverTripleA<RingT> t) {

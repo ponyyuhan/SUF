@@ -36,6 +36,12 @@ struct PfssGpuStagedEval {
                                              uint64_t* outs_flat) const = 0;
   // Expose underlying compute stream handle for overlap (opaque to callers).
   virtual void* device_stream() const = 0;
+  // Optional scratch/device outputs for callers that want to keep results on device.
+  virtual const uint64_t* last_device_output() const { return nullptr; }
+  // Optional bool device outputs (words).
+  virtual const uint64_t* last_device_bools() const { return nullptr; }
+  // Optional: ensure device buffers are large enough for a given arith/bool word count.
+  virtual void ensure_output_buffers(size_t /*arith_words*/, size_t /*bool_words*/) const {}
 };
 
 #ifdef SUF_HAVE_CUDA

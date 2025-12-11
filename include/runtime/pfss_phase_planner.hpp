@@ -25,6 +25,10 @@ class PfssPhasePlanner {
     size_t trunc_flushes = 0;
     size_t coeff_hatx_words = 0;
     size_t trunc_hatx_words = 0;
+    size_t coeff_active_elems = 0;
+    size_t trunc_active_elems = 0;
+    size_t coeff_cost_effbits = 0;
+    size_t trunc_cost_effbits = 0;
   };
 
   void bind(PfssSuperBatch* coeff_batch, PfssSuperBatch* trunc_batch) {
@@ -52,6 +56,10 @@ class PfssPhasePlanner {
     stats_.trunc_flushes = trunc_ ? trunc_->stats().flushes : 0;
     stats_.coeff_hatx_words = coeff_ ? coeff_->stats().max_bucket_hatx : 0;
     stats_.trunc_hatx_words = trunc_ ? trunc_->stats().max_bucket_hatx : 0;
+    stats_.coeff_active_elems = coeff_ ? coeff_->stats().active_elems : 0;
+    stats_.trunc_active_elems = trunc_ ? trunc_->stats().active_elems : 0;
+    stats_.coeff_cost_effbits = coeff_ ? coeff_->stats().cost_effbits : 0;
+    stats_.trunc_cost_effbits = trunc_ ? trunc_->stats().cost_effbits : 0;
   }
 
   const Stats& stats() const { return stats_; }
@@ -85,6 +93,10 @@ class PfssLayerPlanner {
     size_t max_coeff_flushes = 1ull << 10;
     size_t max_trunc_flushes = 1ull << 10;
     size_t max_phases = 1ull << 12;
+    size_t max_coeff_active_elems = 1ull << 28;
+    size_t max_trunc_active_elems = 1ull << 28;
+    size_t max_coeff_cost_effbits = 1ull << 32;
+    size_t max_trunc_cost_effbits = 1ull << 32;
   };
 
   struct Totals {
@@ -97,6 +109,10 @@ class PfssLayerPlanner {
     size_t trunc_hatx_bytes = 0;
     size_t coeff_flushes = 0;
     size_t trunc_flushes = 0;
+    size_t coeff_active_elems = 0;
+    size_t trunc_active_elems = 0;
+    size_t coeff_cost_effbits = 0;
+    size_t trunc_cost_effbits = 0;
   };
 
   void set_limits(const Limits& lim) { limits_ = lim; }
@@ -182,11 +198,15 @@ class PfssLayerPlanner {
         size_t jobs = 0;
         size_t hatx_words = 0;
         size_t flushes = 0;
+        size_t active_elems = 0;
+        size_t cost_effbits = 0;
       };
       Pending p;
       const auto& st = b.stats();
       p.jobs = st.jobs + st.pending_jobs;
       p.hatx_words = std::max(st.max_bucket_hatx, st.pending_hatx);
+      p.active_elems = st.active_elems;
+      p.cost_effbits = st.cost_effbits;
       if (b.has_pending()) p.flushes += 1;
       p.flushes += st.flushes;
       return p;
@@ -204,24 +224,32 @@ class PfssLayerPlanner {
           totals_.coeff_jobs += stats->coeff.jobs;
           totals_.coeff_hatx_words += stats->coeff.max_bucket_hatx;
           totals_.coeff_flushes += stats->coeff.flushes;
+          totals_.coeff_active_elems += stats->coeff.active_elems;
+          totals_.coeff_cost_effbits += stats->coeff.cost_effbits;
           if (&trunc_batch != &coeff_batch) {
             totals_.trunc_jobs += stats->trunc.jobs;
             totals_.trunc_hatx_words += stats->trunc.max_bucket_hatx;
             totals_.trunc_flushes += stats->trunc.flushes;
+            totals_.trunc_active_elems += stats->trunc.active_elems;
+            totals_.trunc_cost_effbits += stats->trunc.cost_effbits;
           }
         }
       } else {
         totals_.coeff_jobs += coeff_pending.jobs;
         totals_.coeff_hatx_words += coeff_pending.hatx_words;
         totals_.coeff_flushes += coeff_pending.flushes;
+        totals_.coeff_active_elems += coeff_pending.active_elems;
+        totals_.coeff_cost_effbits += coeff_pending.cost_effbits;
         if (&trunc_batch != &coeff_batch && trunc_pending) {
           totals_.trunc_jobs += trunc_pending->jobs;
           totals_.trunc_hatx_words += trunc_pending->hatx_words;
           totals_.trunc_flushes += trunc_pending->flushes;
+          totals_.trunc_active_elems += trunc_pending->active_elems;
+          totals_.trunc_cost_effbits += trunc_pending->cost_effbits;
         }
       }
     } else {
-      auto flush_once = [&](PfssSuperBatch& b, size_t& flush_counter, size_t& jobs_counter, size_t& hatx_counter, size_t& hatx_bytes_counter) {
+      auto flush_once = [&](PfssSuperBatch& b, size_t& flush_counter, size_t& jobs_counter, size_t& hatx_counter, size_t& hatx_bytes_counter, size_t& active_counter, size_t& cost_counter) {
         if (b.has_pending()) {
           b.flush_eval(party, backend, pfss_ch);
         }
@@ -232,14 +260,20 @@ class PfssLayerPlanner {
         jobs_counter += st.jobs;
         hatx_counter += st.hatx_words;
         hatx_bytes_counter += st.hatx_bytes;
+        active_counter += st.active_elems;
+        cost_counter += st.cost_effbits;
         flush_counter += st.flushes;
         b.clear();
       };
-      flush_once(coeff_batch, totals_.coeff_flushes, totals_.coeff_jobs, totals_.coeff_hatx_words, totals_.coeff_hatx_bytes);
+      flush_once(coeff_batch, totals_.coeff_flushes, totals_.coeff_jobs, totals_.coeff_hatx_words, totals_.coeff_hatx_bytes, totals_.coeff_active_elems, totals_.coeff_cost_effbits);
       if (&trunc_batch != &coeff_batch) {
-        flush_once(trunc_batch, totals_.trunc_flushes, totals_.trunc_jobs, totals_.trunc_hatx_words, totals_.trunc_hatx_bytes);
+        flush_once(trunc_batch, totals_.trunc_flushes, totals_.trunc_jobs, totals_.trunc_hatx_words, totals_.trunc_hatx_bytes, totals_.trunc_active_elems, totals_.trunc_cost_effbits);
       }
     }
+    totals_.coeff_active_elems += coeff_batch.stats().active_elems;
+    totals_.trunc_active_elems += trunc_batch.stats().active_elems;
+    totals_.coeff_cost_effbits += coeff_batch.stats().cost_effbits;
+    totals_.trunc_cost_effbits += trunc_batch.stats().cost_effbits;
     enforce_limits();
   }
 
@@ -267,6 +301,18 @@ class PfssLayerPlanner {
     }
     if (totals_.trunc_flushes > limits_.max_trunc_flushes) {
       throw std::runtime_error("PfssLayerPlanner: trunc flush budget exceeded");
+    }
+    if (totals_.coeff_active_elems > limits_.max_coeff_active_elems) {
+      throw std::runtime_error("PfssLayerPlanner: coeff active elems budget exceeded");
+    }
+    if (totals_.trunc_active_elems > limits_.max_trunc_active_elems) {
+      throw std::runtime_error("PfssLayerPlanner: trunc active elems budget exceeded");
+    }
+    if (totals_.coeff_cost_effbits > limits_.max_coeff_cost_effbits) {
+      throw std::runtime_error("PfssLayerPlanner: coeff eff_bits budget exceeded");
+    }
+    if (totals_.trunc_cost_effbits > limits_.max_trunc_cost_effbits) {
+      throw std::runtime_error("PfssLayerPlanner: trunc eff_bits budget exceeded");
     }
   }
 

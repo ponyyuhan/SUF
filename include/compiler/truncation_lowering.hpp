@@ -69,15 +69,27 @@ inline TruncationLoweringResult lower_truncation_gate(proto::PfssBackend& backen
     res.hook0 = std::move(h0);
     res.hook1 = std::move(h1);
   } else if (kind == GateKind::FaithfulARS || kind == GateKind::GapARS) {
-    auto h0 = std::make_unique<gates::FaithfulArsPostProc>();
-    auto h1 = std::make_unique<gates::FaithfulArsPostProc>();
-    h0->f = h1->f = params.frac_bits;
-    h0->r_hi_share = res.keys.k0.r_hi_share;
-    h1->r_hi_share = res.keys.k1.r_hi_share;
-    h0->r_in = res.keys.k0.compiled.r_in;
-    h1->r_in = res.keys.k1.compiled.r_in;
-    res.hook0 = std::move(h0);
-    res.hook1 = std::move(h1);
+    if (kind == GateKind::GapARS) {
+      auto h0_gap = std::make_unique<gates::GapArsPostProc>();
+      auto h1_gap = std::make_unique<gates::GapArsPostProc>();
+      h0_gap->f = h1_gap->f = params.frac_bits;
+      h0_gap->r_hi_share = res.keys.k0.r_hi_share;
+      h1_gap->r_hi_share = res.keys.k1.r_hi_share;
+      h0_gap->r_in = res.keys.k0.compiled.r_in;
+      h1_gap->r_in = res.keys.k1.compiled.r_in;
+      res.hook0 = std::move(h0_gap);
+      res.hook1 = std::move(h1_gap);
+    } else {
+      auto h0_f = std::make_unique<gates::FaithfulArsPostProc>();
+      auto h1_f = std::make_unique<gates::FaithfulArsPostProc>();
+      h0_f->f = h1_f->f = params.frac_bits;
+      h0_f->r_hi_share = res.keys.k0.r_hi_share;
+      h1_f->r_hi_share = res.keys.k1.r_hi_share;
+      h0_f->r_in = res.keys.k0.compiled.r_in;
+      h1_f->r_in = res.keys.k1.compiled.r_in;
+      res.hook0 = std::move(h0_f);
+      res.hook1 = std::move(h1_f);
+    }
   }
   // Optional per-element path: generate distinct masks/compiled keys per element.
   if (params.per_element_masks && batch_N > 1) {

@@ -106,6 +106,10 @@ struct PfssResultView {
   size_t arith_words = 0;
   const uint64_t* bools = nullptr;
   size_t bool_words = 0;
+  const uint64_t* arith_device = nullptr;
+  size_t arith_device_words = 0;
+  const uint64_t* bools_device = nullptr;
+  size_t bools_device_words = 0;
   size_t r = 0;
   size_t ell = 0;
 
@@ -136,6 +140,15 @@ struct PreparedCompositeJob {
   std::vector<uint64_t> hatx_public;
   std::vector<int> row_offsets;  // optional ragged offsets (prefix sums), last entry = total elems
   std::vector<int> row_lengths;  // optional ragged lengths per row
+  // Optional shape metadata for planner/packing budgets.
+  struct PfssJobShape {
+    uint32_t total_elems = 0;      // active elements (packed)
+    uint16_t num_rows = 0;         // rows in logical shape
+    uint16_t eff_bits = 64;        // effective bits per element
+    uint16_t max_row_len = 0;      // max over row_lengths
+    bool ragged = false;           // true if valid_lens applied
+    uint32_t row_offset_index = 0; // placeholder for future pooling
+  } shape;
   nn::TensorView<uint64_t> out;  // destination for masked output share
   size_t token = static_cast<size_t>(-1);  // filled by PfssSuperBatch
 };
@@ -168,6 +181,8 @@ class PfssSuperBatch {
   void set_limits(const Limits& lim) { limits_ = lim; }
   void set_gpu_stager(PfssGpuStager* stager) { gpu_stager_ = stager; }
   PfssGpuStager* gpu_stager() const { return gpu_stager_; }
+  void set_device_outputs(bool enable) { device_outputs_ = enable; }
+  bool device_outputs() const { return device_outputs_; }
 
   // Evaluate all queued composite jobs and store PFSS outputs.
   void flush_eval(int party, proto::PfssBackendBatch& backend, proto::IChannel& ch);
@@ -194,6 +209,8 @@ class PfssSuperBatch {
     size_t pred_bits = 0;
     size_t hatx_words = 0;
     size_t hatx_bytes = 0;
+    size_t active_elems = 0;      // sum of job.shape.total_elems
+    size_t cost_effbits = 0;      // sum of job.shape.total_elems * eff_bits
     size_t max_bucket_hatx = 0;   // largest packed hatx length in a bucket
     size_t max_bucket_jobs = 0;   // largest number of jobs fused into one bucket
     size_t pending_jobs = 0;      // current pending jobs before flush
@@ -211,6 +228,12 @@ class PfssSuperBatch {
     size_t ell = 0;
     std::vector<uint64_t> arith;  // [N * r]
     std::vector<uint64_t> bools;  // [N * ell]
+    DeviceBufferRef dev_arith{};       // owned when staged via PfssGpuStager
+    DeviceBufferRef dev_bools{};
+    const uint64_t* dev_arith_ptr = nullptr;  // backend-owned device pointer (non-owning)
+    size_t dev_arith_words = 0;
+    const uint64_t* dev_bools_ptr = nullptr;
+    size_t dev_bools_words = 0;
   };
   struct CompletedJob {
     size_t r = 0;
@@ -236,6 +259,7 @@ class PfssSuperBatch {
   size_t pending_jobs_ = 0;
   size_t pending_hatx_words_ = 0;
   size_t pending_dev_bytes_ = 0;
+  bool device_outputs_ = false;
 
   void populate_completed_();
 };

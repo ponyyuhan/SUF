@@ -288,8 +288,38 @@ struct FaithfulArsPostProc : public PostProcHook {
   }
 };
 
-// GapARS fast-path hook: currently same as faithful ARS.
-using GapArsPostProc = FaithfulArsPostProc;
+struct GapArsPostProc : public FaithfulArsPostProc {
+  void run_batch(int party,
+                 proto::IChannel&,
+                 proto::BeaverMul64&,
+                 const uint64_t* hatx_public,
+                 const uint64_t* arith_share_in,
+                 size_t arith_stride,
+                 const uint64_t* bool_share_in,
+                 size_t bool_stride,
+                 size_t N,
+                 uint64_t* haty_share_out) const override {
+    uint64_t sign_mask = (f <= 0) ? 0ull : (f >= 64 ? 0ull : (~uint64_t(0) << (64 - f)));
+    uint64_t modulus = (f <= 0 || f >= 64) ? 0ull : (uint64_t(1) << (64 - f));
+    for (size_t i = 0; i < N; i++) {
+      const uint64_t* arow = arith_share_in + i * arith_stride;
+      const uint64_t* brow = bool_share_in + i * bool_stride;
+      uint64_t base = (idx_y < static_cast<int>(arith_stride)) ? arow[idx_y] : 0ull;
+      uint64_t carry = (idx_carry >= 0 && idx_carry < static_cast<int>(bool_stride)) ? brow[idx_carry] : 0ull;
+      uint64_t sign = (idx_sign >= 0 && idx_sign < static_cast<int>(bool_stride)) ? brow[idx_sign] : 0ull;
+      uint64_t top = (hatx_public != nullptr && f < 64 && party == 0) ? (hatx_public[i] >> f) : 0ull;
+      uint64_t y = proto::add_mod(base, top);
+      y = proto::sub_mod(y, r_hi_share);
+      y = proto::sub_mod(y, carry);
+      if (modulus != 0 && hatx_public != nullptr && (hatx_public[i] < r_in) && party == 0) {
+        y = proto::add_mod(y, modulus);
+      }
+      uint64_t sign_term = proto::mul_mod(sign, sign_mask);
+      y = proto::add_mod(y, sign_term);
+      haty_share_out[i] = y;
+    }
+  }
+};
 
 // Horner eval for cubic polynomial using public x̂ and secret-shared coeffs.
 // Intended for SiLU/nExp payloads where PFSS returns coeffs (c0..c3) and

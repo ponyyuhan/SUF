@@ -40,6 +40,10 @@
 /home/yuhan/new/SUF/build/CMakeFiles/test_cuda_pack_effbits.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_cuda_pred_mask.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_cuda_packed_pfss.dir
+/home/yuhan/new/SUF/build/CMakeFiles/test_cuda_beaver_mul.dir
+/home/yuhan/new/SUF/build/CMakeFiles/test_cuda_trunc_postproc.dir
+/home/yuhan/new/SUF/build/CMakeFiles/test_cuda_horner_cubic.dir
+/home/yuhan/new/SUF/build/CMakeFiles/test_cuda_recip_task.dir
 /home/yuhan/new/SUF/build/CMakeFiles/test_softmax_gpu_smoke.dir
 /home/yuhan/new/SUF/build/CMakeFiles/bench_gemm.dir
 /home/yuhan/new/SUF/build/CMakeFiles/bench_gemm_overlap.dir

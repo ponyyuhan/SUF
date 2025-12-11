@@ -61,6 +61,9 @@
 #include "suf/ref_eval.hpp"
 #include "suf/validate.hpp"
 #include "proto/packed_backend.hpp"
+#ifdef SUF_HAVE_CUDA
+#include <cuda_runtime.h>
+#endif
 
 namespace gates {
 
@@ -129,11 +132,16 @@ struct CompositeBatchInput {
   const uint64_t* hatx; // [N]
   size_t N;
   const uint64_t* hatx_device = nullptr; // optional device pointer for GPU backends
+  bool device_outputs = false; // optional hint for GPU backends to retain device outputs
 };
 
 struct CompositeBatchOutput {
   std::vector<uint64_t> haty_share; // [N * r]
   std::vector<uint64_t> bool_share; // [N * ell]
+  const uint64_t* haty_device = nullptr; // optional device pointer (GPU backends)
+  size_t haty_device_words = 0;
+  const uint64_t* bool_device = nullptr; // optional device pointer (GPU backends)
+  size_t bool_device_words = 0;
 };
 
 // Serializable tape container for offline material.
@@ -906,10 +914,16 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
                                                          const suf::SUF<uint64_t>& F,
                                                          const CompositeBatchInput& in) {
   CompositeBatchOutput out;
+  out.haty_device = nullptr;
+  out.bool_device = nullptr;
+  out.haty_device_words = 0;
+  out.bool_device_words = 0;
   const auto& compiled = k.compiled;
   size_t N = in.N;
   out.haty_share.resize(N * static_cast<size_t>(compiled.r), 0);
   out.bool_share.resize(N * static_cast<size_t>(compiled.ell), 0);
+  auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(&backend);
+  bool want_device_out = staged && in.device_outputs;
   if (auto* ref = dynamic_cast<proto::ReferenceBackend*>(&backend)) {
     // Deterministic path: evaluate SUF ref and mask with r_out; booleans additive on party0.
     for (size_t i = 0; i < N; ++i) {
@@ -953,7 +967,6 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
   std::vector<uint64_t> pred_masks;
   std::vector<uint64_t> cut_masks;
   auto* packed = dynamic_cast<proto::PackedLtBackend*>(&backend);
-  auto* staged = dynamic_cast<const proto::PfssGpuStagedEval*>(&backend);
   std::vector<uint64_t> xs_vec(in.hatx, in.hatx + N);
   if (dbg) std::cerr << "[party " << party << "] pred eval start packed=" << (packed && k.use_packed_pred) << " N=" << N << "\n";
   if (packed && k.use_packed_pred && !k.packed_pred_groups.empty()) {
@@ -1259,6 +1272,40 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       }
       out.haty_share[i * compiled.r + static_cast<size_t>(j)] = proto::add_mod(acc, k.r_out_share[static_cast<size_t>(j)]);
     }
+  }
+  if (staged && want_device_out) {
+#ifdef SUF_HAVE_CUDA
+    auto* gpu = dynamic_cast<proto::PfssGpuStagedEval*>(staged);
+    auto* stream_ptr = (gpu) ? gpu->device_stream() : nullptr;
+    if (gpu && stream_ptr != nullptr) {
+      auto* stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+      // Ensure device buffers are large enough for full arith/bool outputs.
+      gpu->ensure_output_buffers(out.haty_share.size(), out.bool_share.size());
+      // Copy host outputs to backend buffers so pointers remain stable until next call.
+      if (!out.haty_share.empty() && gpu->last_device_output()) {
+        size_t bytes = out.haty_share.size() * sizeof(uint64_t);
+        cudaMemcpyAsync(const_cast<uint64_t*>(gpu->last_device_output()),
+                        out.haty_share.data(), bytes,
+                        cudaMemcpyHostToDevice, stream);
+        out.haty_device = gpu->last_device_output();
+        out.haty_device_words = out.haty_share.size();
+      }
+      if (!out.bool_share.empty() && gpu->last_device_bools()) {
+        size_t bytes = out.bool_share.size() * sizeof(uint64_t);
+        cudaMemcpyAsync(const_cast<uint64_t*>(gpu->last_device_bools()),
+                        out.bool_share.data(), bytes,
+                        cudaMemcpyHostToDevice, stream);
+        out.bool_device = gpu->last_device_bools();
+        out.bool_device_words = out.bool_share.size();
+      }
+      cudaStreamSynchronize(stream);
+      // Surface device pointers regardless of host staging so callers can keep data on device.
+      out.haty_device = gpu->last_device_output();
+      out.haty_device_words = N * static_cast<size_t>(compiled.r);
+      out.bool_device = gpu->last_device_bools();
+      out.bool_device_words = N * static_cast<size_t>(compiled.ell);
+    }
+#endif
   }
   return out;
 }

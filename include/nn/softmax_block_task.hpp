@@ -62,6 +62,9 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
             plan_.nexp,
             std::span<const uint64_t>(t_packed_.data(), t_packed_.size()),
             std::span<uint64_t>(exp_packed_.data(), exp_packed_.size()));
+        if (!plan_.valid_lens.empty()) {
+          nexp_task_->set_shape_hint(&row_offsets_, &plan_.valid_lens);
+        }
         st_ = St::ExpRun;
         return runtime::detail::Need::None;
       }
@@ -146,6 +149,9 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
               trunc_bundle,
               std::span<const uint64_t>(prod_packed_.data(), prod_packed_.size()),
               std::span<uint64_t>(prob_packed_.data(), prob_packed_.size()));
+        }
+        if (!plan_.valid_lens.empty()) {
+          trunc_task_->set_shape_hint(&row_offsets_, &plan_.valid_lens);
         }
         st_ = St::TruncRun;
         return runtime::detail::Need::None;

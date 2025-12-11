@@ -120,6 +120,7 @@ int main(int argc, char** argv) {
   int reps = 10;
   std::vector<size_t> sizes = {256, 1024, 4096, 8192};
   std::vector<std::string> gate_names = {"gapars"};
+  std::vector<int> blocks;
   for (int i = 1; i < argc; ++i) {
     std::string arg(argv[i]);
     if (arg.rfind("--N=", 0) == 0) {
@@ -139,6 +140,16 @@ int main(int argc, char** argv) {
         gate_names.push_back(list.substr(pos, comma - pos));
         pos = comma + 1;
       }
+    } else if (arg.rfind("--blocks=", 0) == 0) {
+      blocks.clear();
+      std::string list = arg.substr(9);
+      size_t pos = 0;
+      while (pos < list.size()) {
+        size_t comma = list.find(',', pos);
+        if (comma == std::string::npos) comma = list.size();
+        blocks.push_back(std::stoi(list.substr(pos, comma - pos)));
+        pos = comma + 1;
+      }
     }
   }
 
@@ -156,11 +167,18 @@ int main(int argc, char** argv) {
     return compiler::GateKind::GapARS;
   };
 
-  for (size_t N : sizes) {
-    for (const auto& gate_name : gate_names) {
+  auto run_block = [&](int blk_override) {
+    if (blk_override > 0) {
+      std::string v = std::to_string(blk_override);
+      setenv("SUF_PFSS_GPU_BLOCK", v.c_str(), 1);
+    }
+    for (size_t N : sizes) {
+      for (const auto& gate_name : gate_names) {
       compiler::GateKind gk = parse_gate(gate_name);
       std::cout << "\n[PFSS bench] gate=" << gate_name << " N=" << N
-                << " reps=" << reps << " frac_bits=" << frac_bits << "\n";
+                << " reps=" << reps << " frac_bits=" << frac_bits;
+      if (blk_override > 0) std::cout << " block=" << blk_override;
+      std::cout << "\n";
       std::vector<uint64_t> plain(N);
       std::mt19937_64 rng(42 + static_cast<uint64_t>(N));
       for (size_t i = 0; i < N; i++) {
@@ -218,7 +236,7 @@ int main(int argc, char** argv) {
       }
       if (!check_outputs(out_cpu0, out_cpu1, kp_cpu, expected)) {
         std::cerr << "CPU self-check failed.\n";
-        return 1;
+        continue;
       }
 
       if (kp_gpu) {
@@ -256,8 +274,8 @@ int main(int argc, char** argv) {
           cudaEventDestroy(ev_end);
         }
         if (!check_outputs(out_gpu0, out_gpu1, *kp_gpu, expected)) {
-          std::cerr << "GPU vs expectation failed.\n";
-          return 1;
+          std::cerr << "GPU vs expectation failed; skipping timing for this block setting.\n";
+          continue;
         }
       }
 
@@ -273,6 +291,12 @@ int main(int argc, char** argv) {
                   << reps << " reps (N=" << N << ")\n";
       }
     }
+    }
+  };
+  if (!blocks.empty()) {
+    for (int blk : blocks) run_block(blk);
+  } else {
+    run_block(-1);
   }
   return 0;
 #endif

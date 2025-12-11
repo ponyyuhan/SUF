@@ -673,6 +673,58 @@ test_cuda_packed_pfss/fast:
 .PHONY : test_cuda_packed_pfss/fast
 
 #=============================================================================
+# Target rules for targets named test_cuda_beaver_mul
+
+# Build rule for target.
+test_cuda_beaver_mul: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_cuda_beaver_mul
+.PHONY : test_cuda_beaver_mul
+
+# fast build rule for target.
+test_cuda_beaver_mul/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_beaver_mul.dir/build.make CMakeFiles/test_cuda_beaver_mul.dir/build
+.PHONY : test_cuda_beaver_mul/fast
+
+#=============================================================================
+# Target rules for targets named test_cuda_trunc_postproc
+
+# Build rule for target.
+test_cuda_trunc_postproc: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_cuda_trunc_postproc
+.PHONY : test_cuda_trunc_postproc
+
+# fast build rule for target.
+test_cuda_trunc_postproc/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_trunc_postproc.dir/build.make CMakeFiles/test_cuda_trunc_postproc.dir/build
+.PHONY : test_cuda_trunc_postproc/fast
+
+#=============================================================================
+# Target rules for targets named test_cuda_horner_cubic
+
+# Build rule for target.
+test_cuda_horner_cubic: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_cuda_horner_cubic
+.PHONY : test_cuda_horner_cubic
+
+# fast build rule for target.
+test_cuda_horner_cubic/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_horner_cubic.dir/build.make CMakeFiles/test_cuda_horner_cubic.dir/build
+.PHONY : test_cuda_horner_cubic/fast
+
+#=============================================================================
+# Target rules for targets named test_cuda_recip_task
+
+# Build rule for target.
+test_cuda_recip_task: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 test_cuda_recip_task
+.PHONY : test_cuda_recip_task
+
+# fast build rule for target.
+test_cuda_recip_task/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_recip_task.dir/build.make CMakeFiles/test_cuda_recip_task.dir/build
+.PHONY : test_cuda_recip_task/fast
+
+#=============================================================================
 # Target rules for targets named test_softmax_gpu_smoke
 
 # Build rule for target.
@@ -762,6 +814,30 @@ test_myl7_bit_order: cmake_check_build_system
 test_myl7_bit_order/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_myl7_bit_order.dir/build.make CMakeFiles/test_myl7_bit_order.dir/build
 .PHONY : test_myl7_bit_order/fast
+
+cuda/cuda_primitives.o: cuda/cuda_primitives.cu.o
+.PHONY : cuda/cuda_primitives.o
+
+# target to build an object file
+cuda/cuda_primitives.cu.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/cuda_primitives.cu.o
+.PHONY : cuda/cuda_primitives.cu.o
+
+cuda/cuda_primitives.i: cuda/cuda_primitives.cu.i
+.PHONY : cuda/cuda_primitives.i
+
+# target to preprocess a source file
+cuda/cuda_primitives.cu.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/cuda_primitives.cu.i
+.PHONY : cuda/cuda_primitives.cu.i
+
+cuda/cuda_primitives.s: cuda/cuda_primitives.cu.s
+.PHONY : cuda/cuda_primitives.s
+
+# target to generate assembly for a file
+cuda/cuda_primitives.cu.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/cuda_pfss.dir/build.make CMakeFiles/cuda_pfss.dir/cuda/cuda_primitives.cu.s
+.PHONY : cuda/cuda_primitives.cu.s
 
 cuda/pfss_backend_gpu.o: cuda/pfss_backend_gpu.cu.o
 .PHONY : cuda/pfss_backend_gpu.o
@@ -1315,6 +1391,54 @@ src/demo/test_composite_runtime.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_composite_runtime.dir/build.make CMakeFiles/test_composite_runtime.dir/src/demo/test_composite_runtime.cpp.s
 .PHONY : src/demo/test_composite_runtime.cpp.s
 
+src/demo/test_cuda_beaver_mul.o: src/demo/test_cuda_beaver_mul.cpp.o
+.PHONY : src/demo/test_cuda_beaver_mul.o
+
+# target to build an object file
+src/demo/test_cuda_beaver_mul.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_beaver_mul.dir/build.make CMakeFiles/test_cuda_beaver_mul.dir/src/demo/test_cuda_beaver_mul.cpp.o
+.PHONY : src/demo/test_cuda_beaver_mul.cpp.o
+
+src/demo/test_cuda_beaver_mul.i: src/demo/test_cuda_beaver_mul.cpp.i
+.PHONY : src/demo/test_cuda_beaver_mul.i
+
+# target to preprocess a source file
+src/demo/test_cuda_beaver_mul.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_beaver_mul.dir/build.make CMakeFiles/test_cuda_beaver_mul.dir/src/demo/test_cuda_beaver_mul.cpp.i
+.PHONY : src/demo/test_cuda_beaver_mul.cpp.i
+
+src/demo/test_cuda_beaver_mul.s: src/demo/test_cuda_beaver_mul.cpp.s
+.PHONY : src/demo/test_cuda_beaver_mul.s
+
+# target to generate assembly for a file
+src/demo/test_cuda_beaver_mul.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_beaver_mul.dir/build.make CMakeFiles/test_cuda_beaver_mul.dir/src/demo/test_cuda_beaver_mul.cpp.s
+.PHONY : src/demo/test_cuda_beaver_mul.cpp.s
+
+src/demo/test_cuda_horner_cubic.o: src/demo/test_cuda_horner_cubic.cpp.o
+.PHONY : src/demo/test_cuda_horner_cubic.o
+
+# target to build an object file
+src/demo/test_cuda_horner_cubic.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_horner_cubic.dir/build.make CMakeFiles/test_cuda_horner_cubic.dir/src/demo/test_cuda_horner_cubic.cpp.o
+.PHONY : src/demo/test_cuda_horner_cubic.cpp.o
+
+src/demo/test_cuda_horner_cubic.i: src/demo/test_cuda_horner_cubic.cpp.i
+.PHONY : src/demo/test_cuda_horner_cubic.i
+
+# target to preprocess a source file
+src/demo/test_cuda_horner_cubic.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_horner_cubic.dir/build.make CMakeFiles/test_cuda_horner_cubic.dir/src/demo/test_cuda_horner_cubic.cpp.i
+.PHONY : src/demo/test_cuda_horner_cubic.cpp.i
+
+src/demo/test_cuda_horner_cubic.s: src/demo/test_cuda_horner_cubic.cpp.s
+.PHONY : src/demo/test_cuda_horner_cubic.s
+
+# target to generate assembly for a file
+src/demo/test_cuda_horner_cubic.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_horner_cubic.dir/build.make CMakeFiles/test_cuda_horner_cubic.dir/src/demo/test_cuda_horner_cubic.cpp.s
+.PHONY : src/demo/test_cuda_horner_cubic.cpp.s
+
 src/demo/test_cuda_pack_effbits.o: src/demo/test_cuda_pack_effbits.cpp.o
 .PHONY : src/demo/test_cuda_pack_effbits.o
 
@@ -1411,6 +1535,30 @@ src/demo/test_cuda_prg.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_prg.dir/build.make CMakeFiles/test_cuda_prg.dir/src/demo/test_cuda_prg.cpp.s
 .PHONY : src/demo/test_cuda_prg.cpp.s
 
+src/demo/test_cuda_recip_task.o: src/demo/test_cuda_recip_task.cpp.o
+.PHONY : src/demo/test_cuda_recip_task.o
+
+# target to build an object file
+src/demo/test_cuda_recip_task.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_recip_task.dir/build.make CMakeFiles/test_cuda_recip_task.dir/src/demo/test_cuda_recip_task.cpp.o
+.PHONY : src/demo/test_cuda_recip_task.cpp.o
+
+src/demo/test_cuda_recip_task.i: src/demo/test_cuda_recip_task.cpp.i
+.PHONY : src/demo/test_cuda_recip_task.i
+
+# target to preprocess a source file
+src/demo/test_cuda_recip_task.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_recip_task.dir/build.make CMakeFiles/test_cuda_recip_task.dir/src/demo/test_cuda_recip_task.cpp.i
+.PHONY : src/demo/test_cuda_recip_task.cpp.i
+
+src/demo/test_cuda_recip_task.s: src/demo/test_cuda_recip_task.cpp.s
+.PHONY : src/demo/test_cuda_recip_task.s
+
+# target to generate assembly for a file
+src/demo/test_cuda_recip_task.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_recip_task.dir/build.make CMakeFiles/test_cuda_recip_task.dir/src/demo/test_cuda_recip_task.cpp.s
+.PHONY : src/demo/test_cuda_recip_task.cpp.s
+
 src/demo/test_cuda_trunc_gapars.o: src/demo/test_cuda_trunc_gapars.cpp.o
 .PHONY : src/demo/test_cuda_trunc_gapars.o
 
@@ -1434,6 +1582,30 @@ src/demo/test_cuda_trunc_gapars.s: src/demo/test_cuda_trunc_gapars.cpp.s
 src/demo/test_cuda_trunc_gapars.cpp.s:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_trunc_gapars.dir/build.make CMakeFiles/test_cuda_trunc_gapars.dir/src/demo/test_cuda_trunc_gapars.cpp.s
 .PHONY : src/demo/test_cuda_trunc_gapars.cpp.s
+
+src/demo/test_cuda_trunc_postproc.o: src/demo/test_cuda_trunc_postproc.cpp.o
+.PHONY : src/demo/test_cuda_trunc_postproc.o
+
+# target to build an object file
+src/demo/test_cuda_trunc_postproc.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_trunc_postproc.dir/build.make CMakeFiles/test_cuda_trunc_postproc.dir/src/demo/test_cuda_trunc_postproc.cpp.o
+.PHONY : src/demo/test_cuda_trunc_postproc.cpp.o
+
+src/demo/test_cuda_trunc_postproc.i: src/demo/test_cuda_trunc_postproc.cpp.i
+.PHONY : src/demo/test_cuda_trunc_postproc.i
+
+# target to preprocess a source file
+src/demo/test_cuda_trunc_postproc.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_trunc_postproc.dir/build.make CMakeFiles/test_cuda_trunc_postproc.dir/src/demo/test_cuda_trunc_postproc.cpp.i
+.PHONY : src/demo/test_cuda_trunc_postproc.cpp.i
+
+src/demo/test_cuda_trunc_postproc.s: src/demo/test_cuda_trunc_postproc.cpp.s
+.PHONY : src/demo/test_cuda_trunc_postproc.s
+
+# target to generate assembly for a file
+src/demo/test_cuda_trunc_postproc.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/test_cuda_trunc_postproc.dir/build.make CMakeFiles/test_cuda_trunc_postproc.dir/src/demo/test_cuda_trunc_postproc.cpp.s
+.PHONY : src/demo/test_cuda_trunc_postproc.cpp.s
 
 src/demo/test_gapars_selector.o: src/demo/test_gapars_selector.cpp.o
 .PHONY : src/demo/test_gapars_selector.o
@@ -2400,11 +2572,15 @@ help:
 	@echo "... test_composite_equiv_proto_myl7"
 	@echo "... test_composite_equiv_proto_sigmafast"
 	@echo "... test_composite_runtime"
+	@echo "... test_cuda_beaver_mul"
+	@echo "... test_cuda_horner_cubic"
 	@echo "... test_cuda_pack_effbits"
 	@echo "... test_cuda_packed_pfss"
 	@echo "... test_cuda_pred_mask"
 	@echo "... test_cuda_prg"
+	@echo "... test_cuda_recip_task"
 	@echo "... test_cuda_trunc_gapars"
+	@echo "... test_cuda_trunc_postproc"
 	@echo "... test_gapars_selector"
 	@echo "... test_layernorm_task"
 	@echo "... test_llm_gates"
@@ -2429,6 +2605,9 @@ help:
 	@echo "... test_transformer_async"
 	@echo "... test_trunc_task"
 	@echo "... test_truncation"
+	@echo "... cuda/cuda_primitives.o"
+	@echo "... cuda/cuda_primitives.i"
+	@echo "... cuda/cuda_primitives.s"
 	@echo "... cuda/pfss_backend_gpu.o"
 	@echo "... cuda/pfss_backend_gpu.i"
 	@echo "... cuda/pfss_backend_gpu.s"
@@ -2498,6 +2677,12 @@ help:
 	@echo "... src/demo/test_composite_runtime.o"
 	@echo "... src/demo/test_composite_runtime.i"
 	@echo "... src/demo/test_composite_runtime.s"
+	@echo "... src/demo/test_cuda_beaver_mul.o"
+	@echo "... src/demo/test_cuda_beaver_mul.i"
+	@echo "... src/demo/test_cuda_beaver_mul.s"
+	@echo "... src/demo/test_cuda_horner_cubic.o"
+	@echo "... src/demo/test_cuda_horner_cubic.i"
+	@echo "... src/demo/test_cuda_horner_cubic.s"
 	@echo "... src/demo/test_cuda_pack_effbits.o"
 	@echo "... src/demo/test_cuda_pack_effbits.i"
 	@echo "... src/demo/test_cuda_pack_effbits.s"
@@ -2510,9 +2695,15 @@ help:
 	@echo "... src/demo/test_cuda_prg.o"
 	@echo "... src/demo/test_cuda_prg.i"
 	@echo "... src/demo/test_cuda_prg.s"
+	@echo "... src/demo/test_cuda_recip_task.o"
+	@echo "... src/demo/test_cuda_recip_task.i"
+	@echo "... src/demo/test_cuda_recip_task.s"
 	@echo "... src/demo/test_cuda_trunc_gapars.o"
 	@echo "... src/demo/test_cuda_trunc_gapars.i"
 	@echo "... src/demo/test_cuda_trunc_gapars.s"
+	@echo "... src/demo/test_cuda_trunc_postproc.o"
+	@echo "... src/demo/test_cuda_trunc_postproc.i"
+	@echo "... src/demo/test_cuda_trunc_postproc.s"
 	@echo "... src/demo/test_gapars_selector.o"
 	@echo "... src/demo/test_gapars_selector.i"
 	@echo "... src/demo/test_gapars_selector.s"

@@ -11,6 +11,26 @@ PfssHandle PfssSuperBatch::enqueue_composite(PreparedCompositeJob job) {
   if (job.token == static_cast<size_t>(-1)) {
     job.token = completed_.size();
   }
+  if (job.key) {
+    const auto& comp = job.key->compiled;
+    uint16_t pred_eff = (comp.pred.eff_bits > 0 && comp.pred.eff_bits <= comp.pred.n)
+                            ? static_cast<uint16_t>(comp.pred.eff_bits)
+                            : 0;
+    uint16_t coeff_eff = (comp.coeff.eff_bits > 0 && comp.coeff.eff_bits <= comp.coeff.n)
+                             ? static_cast<uint16_t>(comp.coeff.eff_bits)
+                             : 0;
+    uint16_t eff_bits = job.shape.eff_bits;
+    if (eff_bits == 0 || eff_bits == 64) {
+      eff_bits = pred_eff ? pred_eff : (coeff_eff ? coeff_eff : 64);
+    } else if (pred_eff && pred_eff < eff_bits) {
+      eff_bits = pred_eff;
+    }
+    if (eff_bits == 0 || eff_bits > 64) eff_bits = 64;
+    job.shape.eff_bits = eff_bits;
+  }
+  if (job.shape.total_elems == 0) {
+    job.shape.total_elems = static_cast<uint32_t>(job.hatx_public.size());
+  }
   if (slots_.size() <= job.token) {
     slots_.resize(job.token + 1);
   }
@@ -30,6 +50,26 @@ PfssHandle PfssSuperBatch::enqueue_composite(PreparedCompositeJob job) {
     if (total != hatx_words) {
       throw std::runtime_error("PfssSuperBatch: ragged offsets mismatch hatx size");
     }
+    job.shape.ragged = true;
+    if (job.shape.num_rows == 0) {
+      job.shape.num_rows = static_cast<uint16_t>(job.row_lengths.size());
+    }
+    if (job.shape.total_elems == 0) {
+      job.shape.total_elems = static_cast<uint32_t>(total);
+    }
+    if (job.shape.max_row_len == 0) {
+      for (int L : job.row_lengths) {
+        job.shape.max_row_len =
+            std::max<uint16_t>(job.shape.max_row_len, static_cast<uint16_t>(L));
+      }
+    }
+  } else {
+    if (job.shape.num_rows == 0 && job.shape.total_elems > 0) {
+      job.shape.num_rows = static_cast<uint16_t>(job.shape.total_elems);
+    }
+    if (job.shape.max_row_len == 0 && job.shape.total_elems > 0) {
+      job.shape.max_row_len = static_cast<uint16_t>(job.shape.total_elems);
+    }
   }
   size_t new_pending_jobs = pending_jobs_ + 1;
   size_t new_pending_hatx = pending_hatx_words_ + hatx_words;
@@ -48,6 +88,8 @@ PfssHandle PfssSuperBatch::enqueue_composite(PreparedCompositeJob job) {
   }
   pending_jobs_ = new_pending_jobs;
   pending_hatx_words_ = new_pending_hatx;
+  stats_.active_elems += job.shape.total_elems;
+  stats_.cost_effbits += static_cast<size_t>(job.shape.total_elems) * static_cast<size_t>(job.shape.eff_bits);
   stats_.pending_jobs = pending_jobs_;
   stats_.pending_hatx = pending_hatx_words_;
   stats_.pending_device_bytes = pending_dev_bytes_;
@@ -143,6 +185,12 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
   std::unordered_map<GroupKey, size_t, GroupKeyHash> group_index;
   std::vector<GroupData> groups;
 
+  if (gpu_stager_) {
+    for (auto& gr : group_results_) {
+      if (gr.dev_arith.ptr) gpu_stager_->free_bytes(gr.dev_arith);
+      if (gr.dev_bools.ptr) gpu_stager_->free_bytes(gr.dev_bools);
+    }
+  }
   group_results_.clear();
   slices_.assign(jobs_.size(), JobSlice{});
   size_t total_arith_words = 0;
@@ -229,6 +277,7 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
       }
       gates::CompositeBatchInput in{b.hatx.data(), b.hatx.size(),
                                     dev_capable ? reinterpret_cast<const uint64_t*>(b.dev_hatx.ptr) : nullptr};
+      in.device_outputs = device_outputs_ && dev_capable;
       auto out = gates::composite_eval_batch_backend(party, backend, ch, *b.key, *b.suf, in);
       size_t gr_idx = group_results_.size();
       GroupResult gr;
@@ -238,6 +287,22 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
       gr.ell = b.ell;
       gr.arith = std::move(out.haty_share);
       gr.bools = std::move(out.bool_share);
+      if (device_outputs_ && dev_capable) {
+        if (out.haty_device && out.haty_device_words > 0) {
+          gr.dev_arith_ptr = out.haty_device;
+          gr.dev_arith_words = out.haty_device_words;
+        } else if (gpu_stager_ && !gr.arith.empty()) {
+          HostBufferRef host{gr.arith.data(), gr.arith.size() * sizeof(uint64_t)};
+          gr.dev_arith = gpu_stager_->stage_to_device(host);
+        }
+        if (out.bool_device && out.bool_device_words > 0) {
+          gr.dev_bools_ptr = out.bool_device;
+          gr.dev_bools_words = out.bool_device_words;
+        } else if (gpu_stager_ && !gr.bools.empty()) {
+          HostBufferRef host_b{gr.bools.data(), gr.bools.size() * sizeof(uint64_t)};
+          gr.dev_bools = gpu_stager_->stage_to_device(host_b);
+        }
+      }
       total_arith_words += gr.arith.size();
       total_bool_words += gr.bools.size();
       for (const auto& bj : b.jobs) {
@@ -274,6 +339,10 @@ PfssResultView PfssSuperBatch::view(const PfssHandle& h) const {
       v.bools = h.slot->bool_storage->data();
       v.bool_words = h.slot->bool_storage->size();
     }
+    v.arith_device = nullptr;
+    v.arith_device_words = 0;
+    v.bools_device = nullptr;
+    v.bools_device_words = 0;
     v.r = h.slot->r;
     v.ell = h.slot->ell;
     return v;
@@ -284,6 +353,26 @@ PfssResultView PfssSuperBatch::view(const PfssHandle& h) const {
   v.arith_words = cj.arith.size();
   v.bools = cj.bools.data();
   v.bool_words = cj.bools.size();
+  if (h.token < slices_.size()) {
+    const auto& sl = slices_[h.token];
+    if (sl.group_result < group_results_.size()) {
+      const auto& gr = group_results_[sl.group_result];
+      if (gr.dev_arith.ptr) {
+        v.arith_device = reinterpret_cast<const uint64_t*>(gr.dev_arith.ptr) + sl.start * cj.r;
+        v.arith_device_words = sl.len * cj.r;
+      } else if (gr.dev_arith_ptr) {
+        v.arith_device = gr.dev_arith_ptr + sl.start * cj.r;
+        v.arith_device_words = sl.len * cj.r;
+      }
+      if (gr.dev_bools.ptr) {
+        v.bools_device = reinterpret_cast<const uint64_t*>(gr.dev_bools.ptr) + sl.start * cj.ell;
+        v.bools_device_words = sl.len * cj.ell;
+      } else if (gr.dev_bools_ptr) {
+        v.bools_device = gr.dev_bools_ptr + sl.start * cj.ell;
+        v.bools_device_words = sl.len * cj.ell;
+      }
+    }
+  }
   v.r = cj.r;
   v.ell = cj.ell;
   return v;
@@ -352,6 +441,18 @@ void PfssSuperBatch::populate_completed_() {
 }
 
 void PfssSuperBatch::clear() {
+  if (gpu_stager_) {
+    for (auto& gr : group_results_) {
+      if (gr.dev_arith.ptr) {
+        gpu_stager_->free_bytes(gr.dev_arith);
+        gr.dev_arith = DeviceBufferRef{};
+      }
+      if (gr.dev_bools.ptr) {
+        gpu_stager_->free_bytes(gr.dev_bools);
+        gr.dev_bools = DeviceBufferRef{};
+      }
+    }
+  }
   jobs_.clear();
   group_results_.clear();
   completed_.clear();

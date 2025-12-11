@@ -106,6 +106,10 @@ int main() {
   lim.max_coeff_hatx_bytes = lim.max_coeff_hatx_words * sizeof(uint64_t);
   lim.max_trunc_hatx_bytes = lim.max_trunc_hatx_words * sizeof(uint64_t);
   lim.max_phases = 32;
+  lim.max_coeff_active_elems = 1ull << 20;
+  lim.max_trunc_active_elems = 1ull << 20;
+  lim.max_coeff_cost_effbits = 1ull << 24;
+  lim.max_trunc_cost_effbits = 1ull << 24;
   planner0.set_limits(lim);
   planner1.set_limits(lim);
   ctx0.pfss_layer_planner = &planner0;
@@ -182,6 +186,16 @@ int main() {
   assert(planner1.totals().trunc_hatx_bytes <= lim.max_trunc_hatx_bytes);
   assert(planner0.totals().phases <= lim.max_phases);
   assert(planner1.totals().phases <= lim.max_phases);
+  assert(planner0.totals().coeff_active_elems <= lim.max_coeff_active_elems);
+  assert(planner1.totals().coeff_active_elems <= lim.max_coeff_active_elems);
+  assert(planner0.totals().trunc_active_elems <= lim.max_trunc_active_elems);
+  assert(planner1.totals().trunc_active_elems <= lim.max_trunc_active_elems);
+  assert(planner0.totals().coeff_cost_effbits <= lim.max_coeff_cost_effbits);
+  assert(planner1.totals().coeff_cost_effbits <= lim.max_coeff_cost_effbits);
+  assert(planner0.totals().trunc_cost_effbits <= lim.max_trunc_cost_effbits);
+  assert(planner1.totals().trunc_cost_effbits <= lim.max_trunc_cost_effbits);
+  assert(planner0.totals().coeff_active_elems > 0);
+  assert(planner1.totals().coeff_active_elems > 0);
 
   return 0;
 }

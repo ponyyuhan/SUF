@@ -112,6 +112,7 @@ if(SUF_ENABLE_CUDA)
     add_library(cuda_pfss STATIC
       cuda/pfss_kernels.cu
       cuda/poly_kernels.cu
+      cuda/cuda_primitives.cu
       cuda/pfss_backend_gpu.cu)
     target_include_directories(cuda_pfss PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/cuda ${CMAKE_CURRENT_SOURCE_DIR}/include)
     target_link_libraries(cuda_pfss PUBLIC CUDA::cudart OpenSSL::Crypto)
@@ -128,6 +129,7 @@ if(NOT HAVE_SUF_CUDA)
     add_library(cuda_pfss STATIC
       cuda/pfss_kernels.cu
       cuda/poly_kernels.cu
+      cuda/cuda_primitives.cu
       cuda/pfss_backend_gpu.cu)
     target_include_directories(cuda_pfss PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/cuda ${CMAKE_CURRENT_SOURCE_DIR}/include)
     if(TARGET CUDA::cudart)
@@ -337,6 +339,22 @@ add_executable(test_cuda_packed_pfss src/demo/test_cuda_packed_pfss.cpp)
 target_include_directories(test_cuda_packed_pfss PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_cuda_packed_pfss PRIVATE suf_fss cuda_pfss OpenSSL::Crypto)
 
+add_executable(test_cuda_beaver_mul src/demo/test_cuda_beaver_mul.cpp)
+target_include_directories(test_cuda_beaver_mul PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_cuda_beaver_mul PRIVATE suf_fss cuda_pfss OpenSSL::Crypto)
+
+add_executable(test_cuda_trunc_postproc src/demo/test_cuda_trunc_postproc.cpp)
+target_include_directories(test_cuda_trunc_postproc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_cuda_trunc_postproc PRIVATE suf_fss cuda_pfss OpenSSL::Crypto)
+
+add_executable(test_cuda_horner_cubic src/demo/test_cuda_horner_cubic.cpp)
+target_include_directories(test_cuda_horner_cubic PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_cuda_horner_cubic PRIVATE suf_fss cuda_pfss OpenSSL::Crypto)
+
+add_executable(test_cuda_recip_task src/demo/test_cuda_recip_task.cpp)
+target_include_directories(test_cuda_recip_task PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_cuda_recip_task PRIVATE nn_ops compiler_passes suf_fss cuda_pfss OpenSSL::Crypto)
+
 add_executable(test_softmax_gpu_smoke src/demo/test_softmax_gpu_smoke.cpp)
 target_include_directories(test_softmax_gpu_smoke PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_softmax_gpu_smoke PRIVATE nn_ops compiler_passes suf_fss cuda_pfss ${MYL7_LINK_LIBS})
@@ -387,6 +405,10 @@ add_test(NAME test_cuda_trunc_gapars COMMAND test_cuda_trunc_gapars)
 add_test(NAME test_cuda_prg COMMAND test_cuda_prg)
 add_test(NAME test_cuda_pred_mask COMMAND test_cuda_pred_mask)
 add_test(NAME test_cuda_packed_pfss COMMAND test_cuda_packed_pfss)
+add_test(NAME test_cuda_beaver_mul COMMAND test_cuda_beaver_mul)
+add_test(NAME test_cuda_trunc_postproc COMMAND test_cuda_trunc_postproc)
+add_test(NAME test_cuda_horner_cubic COMMAND test_cuda_horner_cubic)
+add_test(NAME test_cuda_recip_task COMMAND test_cuda_recip_task)
 endif()
 
 # Placeholder executor coverage for MLP/attention (reuse existing binaries for smoke until dedicated harnesses are added).

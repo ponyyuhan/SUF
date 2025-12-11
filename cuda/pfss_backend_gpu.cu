@@ -455,6 +455,13 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
     if (hdr0->payload_len != static_cast<uint16_t>(out_bytes)) {
       throw std::runtime_error("GpuPfssBackend: out_bytes mismatch payload_len");
     }
+    bool profile = (std::getenv("SUF_PFSS_GPU_PROFILE") != nullptr);
+    cudaEvent_t ev_start = nullptr, ev_compute = nullptr, ev_end = nullptr;
+    if (profile) {
+      check_cuda(cudaEventCreate(&ev_start), "create profile ev_start interval");
+      check_cuda(cudaEventCreate(&ev_compute), "create profile ev_compute interval");
+      check_cuda(cudaEventCreate(&ev_end), "create profile ev_end interval");
+    }
     try {
       ensure_streams();
       size_t keys_size = key_bytes * xs_u64.size();
@@ -471,7 +478,7 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
       } else {
         xs_buf_.ensure(xs_bytes);
       }
-      out_buf_.ensure(xs_u64.size() * static_cast<size_t>(out_bytes));
+      bool_buf_.ensure(xs_u64.size() * static_cast<size_t>(out_bytes));
       copy_keys_if_needed(keys_flat, keys_size);
       if (pack_eff) {
         check_cuda(cudaMemcpyAsync(packed_buf_.ptr, packed_xs.data(), xs_bytes,
@@ -498,12 +505,12 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
       }
       eval_dcf_many_kernel<<<grid, kBlock, 0, stream_>>>(keys_buf_.ptr, key_bytes, in_bits, out_bytes,
                                                          xs_dev,
-                                                         reinterpret_cast<uint8_t*>(out_buf_.ptr),
+                                                         reinterpret_cast<uint8_t*>(bool_buf_.ptr),
                                                          xs_u64.size());
       check_cuda(cudaGetLastError(), "eval_dcf_many_kernel");
       check_cuda(cudaEventRecord(compute_done_, stream_), "event record compute");
       check_cuda(cudaStreamWaitEvent(copy_stream_, compute_done_, 0), "wait compute");
-      check_cuda(cudaMemcpyAsync(outs_flat, out_buf_.ptr,
+      check_cuda(cudaMemcpyAsync(outs_flat, bool_buf_.ptr,
                                  xs_u64.size() * static_cast<size_t>(out_bytes),
                                  cudaMemcpyDeviceToHost, copy_stream_),
                  "cudaMemcpy outs");
@@ -534,7 +541,7 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
     ensure_streams();
     size_t keys_size = key_bytes * N;
     keys_buf_.ensure(keys_size);
-    out_buf_.ensure(N * static_cast<size_t>(out_bytes));
+    bool_buf_.ensure(N * static_cast<size_t>(out_bytes));
     copy_keys_if_needed(keys_flat, keys_size);
     check_cuda(cudaEventRecord(h2d_done_, copy_stream_), "event record h2d");
     check_cuda(cudaStreamWaitEvent(stream_, h2d_done_, 0), "wait h2d");
@@ -542,13 +549,13 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
     int grid = static_cast<int>((N + kBlock - 1) / kBlock);
     eval_dcf_many_kernel<<<grid, kBlock, 0, stream_>>>(keys_buf_.ptr, key_bytes, in_bits, out_bytes,
                                                        xs_device,
-                                                       reinterpret_cast<uint8_t*>(out_buf_.ptr),
+                                                       reinterpret_cast<uint8_t*>(bool_buf_.ptr),
                                                        N);
     check_cuda(cudaGetLastError(), "eval_dcf_many_kernel");
     check_cuda(cudaEventRecord(compute_done_, stream_), "event record compute");
     check_cuda(cudaStreamWaitEvent(copy_stream_, compute_done_, 0), "wait compute");
     if (outs_flat) {
-      check_cuda(cudaMemcpyAsync(outs_flat, out_buf_.ptr,
+      check_cuda(cudaMemcpyAsync(outs_flat, bool_buf_.ptr,
                                  N * static_cast<size_t>(out_bytes),
                                  cudaMemcpyDeviceToHost, copy_stream_),
                  "cudaMemcpy outs");
@@ -564,8 +571,24 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
                            int in_bits,
                            int out_words,
                            u64* outs_bitmask) const override {
-    std::lock_guard<std::mutex> lg(mu_);
+    if (std::getenv("SUF_DISABLE_PACKED_CMP_KERNEL")) {
+      // Fall back to host path when kernel is disabled or suspected to be unstable.
+      for (size_t i = 0; i < xs_u64.size(); i++) {
+        FssKey kb;
+        kb.bytes.assign(keys_flat + i * key_bytes, keys_flat + (i + 1) * key_bytes);
+        eval_packed_cmp_host(kb, std::vector<uint64_t>{xs_u64[i]}, out_words,
+                             outs_bitmask + i * static_cast<size_t>(out_words));
+      }
+      return;
+    }
     if (xs_u64.empty()) return;
+    if (key_bytes == 0 || !keys_flat) {
+      throw std::runtime_error("GpuPfssBackend: packed_lt key buffer empty");
+    }
+    if (out_words <= 0) {
+      throw std::runtime_error("GpuPfssBackend: packed_lt out_words must be >0");
+    }
+    std::lock_guard<std::mutex> lg(mu_);
     if (key_bytes < sizeof(PackedCmpKeyHeader)) throw std::runtime_error("GpuPfssBackend: packed key too small");
     const auto* hdr0 = reinterpret_cast<const PackedCmpKeyHeader*>(keys_flat);
     if (hdr0->in_bits != static_cast<uint16_t>(in_bits)) throw std::runtime_error("GpuPfssBackend: packed in_bits mismatch");
@@ -575,7 +598,7 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
       ensure_streams();
       size_t keys_size = key_bytes * xs_u64.size();
       keys_buf_.ensure(keys_size);
-      bool pack_eff = (in_bits > 0 && in_bits < 64);
+    bool pack_eff = (in_bits > 0 && in_bits < 64);
       std::vector<uint64_t> packed_xs;
       size_t xs_bytes = xs_u64.size() * sizeof(uint64_t);
       if (pack_eff) {
@@ -585,7 +608,7 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
       } else {
         xs_buf_.ensure(xs_bytes);
       }
-      out_buf_.ensure(xs_u64.size() * static_cast<size_t>(out_words) * sizeof(uint64_t));
+      bool_buf_.ensure(xs_u64.size() * static_cast<size_t>(out_words) * sizeof(uint64_t));
       copy_keys_if_needed(keys_flat, keys_size);
       if (pack_eff) {
         check_cuda(cudaMemcpyAsync(packed_buf_.ptr, packed_xs.data(), xs_bytes,
@@ -612,12 +635,13 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
       }
       packed_cmp_kernel_keyed<<<grid, kBlock, 0, stream_>>>(keys_buf_.ptr, key_bytes,
                                                             xs_dev,
-                                                            reinterpret_cast<uint64_t*>(out_buf_.ptr),
+                                                            reinterpret_cast<uint64_t*>(bool_buf_.ptr),
                                                             xs_u64.size());
-      check_cuda(cudaGetLastError(), "packed_cmp_kernel_keyed");
+      auto st = cudaGetLastError();
+      if (st != cudaSuccess) throw std::runtime_error(std::string("packed_cmp_kernel_keyed launch: ") + cudaGetErrorString(st));
       check_cuda(cudaEventRecord(compute_done_, stream_), "event record compute packed");
       check_cuda(cudaStreamWaitEvent(copy_stream_, compute_done_, 0), "wait compute packed");
-      check_cuda(cudaMemcpyAsync(outs_bitmask, out_buf_.ptr,
+      check_cuda(cudaMemcpyAsync(outs_bitmask, bool_buf_.ptr,
                                  xs_u64.size() * static_cast<size_t>(out_words) * sizeof(uint64_t),
                                  cudaMemcpyDeviceToHost, copy_stream_),
                  "cudaMemcpy packed outs");
@@ -625,12 +649,13 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
       return;
     } catch (...) {
       // fallback
-    }
-    for (size_t i = 0; i < xs_u64.size(); i++) {
-      FssKey kb;
-      kb.bytes.assign(keys_flat + i * key_bytes, keys_flat + (i + 1) * key_bytes);
-      eval_packed_cmp_host(kb, std::vector<uint64_t>{xs_u64[i]}, out_words,
-                           outs_bitmask + i * static_cast<size_t>(out_words));
+      for (size_t i = 0; i < xs_u64.size(); i++) {
+        FssKey kb;
+        kb.bytes.assign(keys_flat + i * key_bytes, keys_flat + (i + 1) * key_bytes);
+        eval_packed_cmp_host(kb, std::vector<uint64_t>{xs_u64[i]}, out_words,
+                             outs_bitmask + i * static_cast<size_t>(out_words));
+      }
+      return;
     }
   }
 
@@ -642,29 +667,111 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
                                   int out_words,
                                   uint64_t* outs_bitmask) const override {
     if (N == 0) return;
+    if (key_bytes == 0 || !keys_flat) {
+      throw std::runtime_error("eval_packed_lt_many_device: key buffer empty");
+    }
+    if (out_words <= 0) {
+      throw std::runtime_error("eval_packed_lt_many_device: out_words must be >0");
+    }
     if (!xs_device) throw std::runtime_error("eval_packed_lt_many_device: xs_device is null");
+
+    // Optional escape hatch to avoid kernel if it misbehaves; fall back to host eval.
+    if (std::getenv("SUF_DISABLE_PACKED_CMP_KERNEL")) {
+      std::vector<uint64_t> xs_host(N);
+      check_cuda(cudaMemcpy(xs_host.data(), xs_device, N * sizeof(uint64_t), cudaMemcpyDeviceToHost),
+                 "packed lt copy xs for fallback");
+      for (size_t i = 0; i < N; i++) {
+        FssKey kb;
+        kb.bytes.assign(keys_flat + i * key_bytes, keys_flat + (i + 1) * key_bytes);
+        eval_packed_cmp_host(kb, std::vector<uint64_t>{xs_host[i]}, out_words,
+                             outs_bitmask + i * static_cast<size_t>(out_words));
+      }
+      return;
+    }
+    bool profile = (std::getenv("SUF_PFSS_GPU_PROFILE") != nullptr);
+    cudaEvent_t ev_start = nullptr, ev_compute = nullptr, ev_end = nullptr;
+    if (profile) {
+      check_cuda(cudaEventCreate(&ev_start), "create profile ev_start");
+      check_cuda(cudaEventCreate(&ev_compute), "create profile ev_compute");
+      check_cuda(cudaEventCreate(&ev_end), "create profile ev_end");
+    }
     ensure_streams();
     size_t keys_size = key_bytes * N;
     keys_buf_.ensure(keys_size);
-    out_buf_.ensure(N * static_cast<size_t>(out_words) * sizeof(uint64_t));
+    bool_buf_.ensure(N * static_cast<size_t>(out_words) * sizeof(uint64_t));
     copy_keys_if_needed(keys_flat, keys_size);
     check_cuda(cudaEventRecord(h2d_done_, copy_stream_), "event record h2d packed");
     check_cuda(cudaStreamWaitEvent(stream_, h2d_done_, 0), "wait h2d packed");
     const int kBlock = kernel_block_size();
     int grid = static_cast<int>((N + kBlock - 1) / kBlock);
+    if (profile) {
+      check_cuda(cudaEventRecord(ev_start, stream_), "record profile start packed");
+    }
     packed_cmp_kernel_keyed<<<grid, kBlock, 0, stream_>>>(keys_buf_.ptr, key_bytes,
                                                           xs_device,
-                                                          reinterpret_cast<uint64_t*>(out_buf_.ptr),
+                                                          reinterpret_cast<uint64_t*>(bool_buf_.ptr),
                                                           N);
-    check_cuda(cudaGetLastError(), "packed_cmp_kernel_keyed");
+    auto st = cudaGetLastError();
+    if (st != cudaSuccess) {
+      // fallback: copy xs to host, run host eval, copy back if outs_bitmask null
+      std::vector<uint64_t> xs_host(N);
+      check_cuda(cudaMemcpy(xs_host.data(), xs_device, N * sizeof(uint64_t), cudaMemcpyDeviceToHost),
+                 "packed lt copy xs for fallback2");
+      std::vector<uint64_t> host_masks(N * static_cast<size_t>(out_words), 0);
+      for (size_t i = 0; i < N; i++) {
+        FssKey kb;
+        kb.bytes.assign(keys_flat + i * key_bytes, keys_flat + (i + 1) * key_bytes);
+        eval_packed_cmp_host(kb, std::vector<uint64_t>{xs_host[i]}, out_words,
+                             host_masks.data() + i * static_cast<size_t>(out_words));
+      }
+      // copy to outs_bitmask and device buffer
+      if (outs_bitmask) {
+        std::memcpy(outs_bitmask, host_masks.data(), host_masks.size() * sizeof(uint64_t));
+      }
+      check_cuda(cudaMemcpyAsync(out_buf_.ptr, host_masks.data(),
+                                 host_masks.size() * sizeof(uint64_t),
+                                 cudaMemcpyHostToDevice, copy_stream_),
+                 "packed lt fallback copy to device");
+      check_cuda(cudaStreamSynchronize(copy_stream_), "packed lt fallback sync");
+      if (profile) {
+        if (ev_start) cudaEventDestroy(ev_start);
+        if (ev_compute) cudaEventDestroy(ev_compute);
+        if (ev_end) cudaEventDestroy(ev_end);
+      }
+      return;
+    }
     check_cuda(cudaEventRecord(compute_done_, stream_), "event record compute packed");
+    if (profile) {
+      check_cuda(cudaEventRecord(ev_compute, stream_), "record profile compute packed");
+    }
     if (outs_bitmask) {
       check_cuda(cudaStreamWaitEvent(copy_stream_, compute_done_, 0), "wait compute packed");
-      check_cuda(cudaMemcpyAsync(outs_bitmask, out_buf_.ptr,
+      check_cuda(cudaMemcpyAsync(outs_bitmask, bool_buf_.ptr,
                                  N * static_cast<size_t>(out_words) * sizeof(uint64_t),
                                  cudaMemcpyDeviceToHost, copy_stream_),
                  "cudaMemcpy packed outs");
       check_cuda(cudaStreamSynchronize(copy_stream_), "stream sync packed");
+      if (profile) {
+        check_cuda(cudaEventRecord(ev_end, copy_stream_), "record profile end packed");
+        check_cuda(cudaEventSynchronize(ev_end), "sync profile end packed");
+      }
+    } else if (profile) {
+      check_cuda(cudaEventRecord(ev_end, stream_), "record profile end packed no copy");
+      check_cuda(cudaEventSynchronize(ev_end), "sync profile end packed no copy");
+    }
+    if (profile) {
+      float ms_compute = 0.0f, ms_total = 0.0f;
+      check_cuda(cudaEventElapsedTime(&ms_compute, ev_start, ev_compute), "elapsed compute packed");
+      check_cuda(cudaEventElapsedTime(&ms_total, ev_start, ev_end), "elapsed total packed");
+      std::cerr << "[pfss_gpu] packed_cmp N=" << N << " in_bits=" << in_bits
+                << " out_words=" << out_words
+                << " total_ms=" << ms_total
+                << " compute_ms=" << ms_compute
+                << " copy_ms=" << (ms_total - ms_compute)
+                << "\n";
+      cudaEventDestroy(ev_start);
+      cudaEventDestroy(ev_compute);
+      cudaEventDestroy(ev_end);
     }
   }
 
@@ -679,6 +786,13 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
     const auto* hdr0 = reinterpret_cast<const IntervalKeyHeader*>(keys_flat);
     if (hdr0->out_words != static_cast<uint16_t>(out_words)) {
       throw std::runtime_error("GpuPfssBackend: out_words mismatch payload");
+    }
+    bool profile = (std::getenv("SUF_PFSS_GPU_PROFILE") != nullptr);
+    cudaEvent_t ev_start = nullptr, ev_compute = nullptr, ev_end = nullptr;
+    if (profile) {
+      check_cuda(cudaEventCreate(&ev_start), "create profile ev_start interval");
+      check_cuda(cudaEventCreate(&ev_compute), "create profile ev_compute interval");
+      check_cuda(cudaEventCreate(&ev_end), "create profile ev_end interval");
     }
     try {
       ensure_streams();
@@ -720,12 +834,18 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
       } else {
         xs_dev = reinterpret_cast<const uint64_t*>(xs_buf_.ptr);
       }
+      if (profile) {
+        check_cuda(cudaEventRecord(ev_start, stream_), "record profile start interval");
+      }
       vector_lut_kernel_keyed<<<grid, kBlock, 0, stream_>>>(keys_buf_.ptr, key_bytes,
                                                             xs_dev,
                                                             reinterpret_cast<uint64_t*>(out_buf_.ptr),
                                                             xs_u64.size());
       check_cuda(cudaGetLastError(), "vector_lut_kernel_keyed");
       check_cuda(cudaEventRecord(compute_done_, stream_), "event record compute interval");
+      if (profile) {
+        check_cuda(cudaEventRecord(ev_compute, stream_), "record profile compute interval");
+      }
       check_cuda(cudaStreamWaitEvent(copy_stream_, compute_done_, 0), "wait compute interval");
       check_cuda(cudaMemcpyAsync(outs_flat,
                                  out_buf_.ptr,
@@ -733,6 +853,23 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
                                  cudaMemcpyDeviceToHost, copy_stream_),
                  "cudaMemcpy interval outs");
       check_cuda(cudaStreamSynchronize(copy_stream_), "stream sync interval");
+      if (profile) {
+        check_cuda(cudaEventRecord(ev_end, copy_stream_), "record profile end interval");
+        check_cuda(cudaEventSynchronize(ev_end), "sync profile end interval");
+        float ms_compute = 0.0f, ms_total = 0.0f;
+        check_cuda(cudaEventElapsedTime(&ms_compute, ev_start, ev_compute), "elapsed compute interval");
+        check_cuda(cudaEventElapsedTime(&ms_total, ev_start, ev_end), "elapsed total interval");
+        std::cerr << "[pfss_gpu] interval_host N=" << xs_u64.size()
+                  << " in_bits=" << (hdr0->in_bits > 0 ? hdr0->in_bits : 64)
+                  << " out_words=" << out_words
+                  << " total_ms=" << ms_total
+                  << " compute_ms=" << ms_compute
+                  << " copy_ms=" << (ms_total - ms_compute)
+                  << "\n";
+        cudaEventDestroy(ev_start);
+        cudaEventDestroy(ev_compute);
+        cudaEventDestroy(ev_end);
+      }
       return;
     } catch (...) {
       // Fallback to host.
@@ -758,11 +895,21 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
                                      uint64_t* outs_flat) const override {
     if (N == 0) return;
     if (!xs_device) throw std::runtime_error("eval_interval_lut_many_device: xs_device is null");
+    bool profile = (std::getenv("SUF_PFSS_GPU_PROFILE") != nullptr);
+    cudaEvent_t ev_start = nullptr, ev_compute = nullptr, ev_end = nullptr;
+    if (profile) {
+      check_cuda(cudaEventCreate(&ev_start), "create profile ev_start interval_dev");
+      check_cuda(cudaEventCreate(&ev_compute), "create profile ev_compute interval_dev");
+      check_cuda(cudaEventCreate(&ev_end), "create profile ev_end interval_dev");
+    }
     ensure_streams();
     size_t keys_size = key_bytes * N;
     keys_buf_.ensure(keys_size);
     out_buf_.ensure(N * static_cast<size_t>(out_words) * sizeof(uint64_t));
     copy_keys_if_needed(keys_flat, keys_size);
+    if (profile) {
+      check_cuda(cudaEventRecord(ev_start, stream_), "record profile start interval_dev");
+    }
     check_cuda(cudaEventRecord(h2d_done_, copy_stream_), "event record h2d interval");
     check_cuda(cudaStreamWaitEvent(stream_, h2d_done_, 0), "wait h2d interval");
     const int kBlock = kernel_block_size();
@@ -773,6 +920,9 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
                                                           N);
     check_cuda(cudaGetLastError(), "vector_lut_kernel_keyed");
     check_cuda(cudaEventRecord(compute_done_, stream_), "event record compute interval");
+    if (profile) {
+      check_cuda(cudaEventRecord(ev_compute, stream_), "record profile compute interval_dev");
+    }
     if (outs_flat) {
       check_cuda(cudaStreamWaitEvent(copy_stream_, compute_done_, 0), "wait compute interval");
       check_cuda(cudaMemcpyAsync(outs_flat,
@@ -781,12 +931,46 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
                                  cudaMemcpyDeviceToHost, copy_stream_),
                  "cudaMemcpy interval outs");
       check_cuda(cudaStreamSynchronize(copy_stream_), "stream sync interval");
+      if (profile) {
+        check_cuda(cudaEventRecord(ev_end, copy_stream_), "record profile end interval_dev");
+        check_cuda(cudaEventSynchronize(ev_end), "sync profile end interval_dev");
+      }
     } else {
       check_cuda(cudaStreamSynchronize(stream_), "stream sync interval device-only");
+      if (profile) {
+        check_cuda(cudaEventRecord(ev_end, stream_), "record profile end interval_dev nocopy");
+        check_cuda(cudaEventSynchronize(ev_end), "sync profile end interval_dev nocopy");
+      }
+    }
+    if (profile) {
+      float ms_compute = 0.0f, ms_total = 0.0f;
+      check_cuda(cudaEventElapsedTime(&ms_compute, ev_start, ev_compute), "elapsed compute interval_dev");
+      check_cuda(cudaEventElapsedTime(&ms_total, ev_start, ev_end), "elapsed total interval_dev");
+      std::cerr << "[pfss_gpu] interval_dev N=" << N
+                << " out_words=" << out_words
+                << " total_ms=" << ms_total
+                << " compute_ms=" << ms_compute
+                << " copy_ms=" << (ms_total - ms_compute)
+                << "\n";
+      cudaEventDestroy(ev_start);
+      cudaEventDestroy(ev_compute);
+      cudaEventDestroy(ev_end);
     }
   }
 
   void* device_stream() const override { return reinterpret_cast<void*>(stream_); }
+ const uint64_t* last_device_output() const override {
+    return reinterpret_cast<const uint64_t*>(out_buf_.ptr);
+  }
+  const uint64_t* last_device_bools() const override {
+    return reinterpret_cast<const uint64_t*>(bool_buf_.ptr);
+  }
+
+  // Ensure device buffers for arith/bool outputs are allocated.
+  void ensure_output_buffers(size_t arith_words, size_t bool_words) const {
+    if (arith_words > 0) out_buf_.ensure(arith_words * sizeof(uint64_t));
+    if (bool_words > 0) bool_buf_.ensure(bool_words * sizeof(uint64_t));
+  }
 
  private:
   struct DeviceBuffer {
@@ -813,6 +997,7 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
   mutable DeviceBuffer keys_buf_;
   mutable DeviceBuffer xs_buf_;
   mutable DeviceBuffer out_buf_;
+  mutable DeviceBuffer bool_buf_;
   mutable DeviceBuffer packed_buf_;
   mutable std::mutex mu_;
   const bool cache_keys_ = (std::getenv("SUF_NO_CACHE_KEYS") == nullptr);
@@ -825,11 +1010,14 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
   static int kernel_block_size() {
     static int blk = [] {
       const char* env = std::getenv("SUF_PFSS_GPU_BLOCK");
-      int v = 256;
+      // Prefer wider blocks for PFSS kernels on A10-class GPUs; smaller blocks
+      // (e.g., 128) have shown correctness issues with the packed traversal.
+      int v = 512;
       if (env) {
         int tmp = std::atoi(env);
-        if (tmp >= 64 && tmp <= 1024) v = tmp;
+        if (tmp >= 256 && tmp <= 1024) v = tmp;
       }
+      if (v < 256) v = 256;
       if (v % 32 != 0) v = ((v / 32) + 1) * 32;
       return v;
     }();

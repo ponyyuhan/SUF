@@ -190,7 +190,8 @@ SoftmaxResult run_softmax_party(int party,
                                 runtime::RowBroadcastTripleProvider* rb,
                                 proto::PfssBackendBatch& backend,
                                 LocalChan& net_ch,
-                                std::span<const uint64_t> t_qf) {
+                                std::span<const uint64_t> t_qf,
+                                bool device_only = false) {
   runtime::PhaseExecutor pe;
   runtime::PhaseResources R;
   R.party = party;
@@ -201,6 +202,10 @@ SoftmaxResult run_softmax_party(int party,
   R.pfss_coeff = &pe.pfss_coeff_batch();
   R.pfss_trunc = &pe.pfss_trunc_batch();
   R.opens = &pe.open_collector();
+  if (device_only) {
+    pe.pfss_coeff_batch().set_device_outputs(true);
+    pe.pfss_trunc_batch().set_device_outputs(true);
+  }
 
   nn::SoftmaxPlan plan;
   plan.frac_bits = fb;
@@ -395,7 +400,7 @@ struct BenchResult {
   double gpu_dev_ms = 0.0;
 };
 
-BenchResult bench_softmax(int rows, int cols, int fb, int reps) {
+BenchResult bench_softmax(int rows, int cols, int fb, int reps, bool device_only) {
   std::mt19937_64 rng(7);
   std::vector<uint64_t> t_plain(static_cast<size_t>(rows * cols));
   for (auto& v : t_plain) v = static_cast<uint64_t>(rng() % (1 << fb));
@@ -403,10 +408,6 @@ BenchResult bench_softmax(int rows, int cols, int fb, int reps) {
   std::vector<int> valid(rows, cols);
 
   proto::ReferenceBackend ref_be;
-#ifdef SUF_HAVE_CUDA
-  auto gpu_be0 = proto::make_real_gpu_backend();
-  auto gpu_be1 = proto::make_real_gpu_backend();
-#endif
 
   gates::NExpGateParams nexp_params{fb, 16};
   std::mt19937_64 rng_keys(99);
@@ -434,22 +435,23 @@ BenchResult bench_softmax(int rows, int cols, int fb, int reps) {
     prob_choice.signed_value = false;
     std::thread t([&]() {
       try {
-        r1 = run_softmax_party(1, rows, cols, fb, valid, nexp_bundle0, recip_bundle0, prob_choice, &rb1, be1, c1, std::span<const uint64_t>(t1.data(), t1.size()));
+        r1 = run_softmax_party(1, rows, cols, fb, valid, nexp_bundle0, recip_bundle0, prob_choice, &rb1, be1, c1, std::span<const uint64_t>(t1.data(), t1.size()), device_timing || device_only);
       } catch (...) { exc = std::current_exception(); }
     });
     float dev_ms = 0.0f;
     cudaEvent_t ev_start = nullptr, ev_end = nullptr;
     proto::PfssGpuStagedEval* staged = device_timing ? dynamic_cast<proto::PfssGpuStagedEval*>(&be0) : nullptr;
     cudaStream_t stream = staged ? reinterpret_cast<cudaStream_t>(staged->device_stream()) : nullptr;
-    if (staged && stream) {
+    if (staged) {
+      if (stream == nullptr) stream = 0;
       cudaEventCreate(&ev_start);
       cudaEventCreate(&ev_end);
       cudaEventRecord(ev_start, stream);
     }
-    r0 = run_softmax_party(0, rows, cols, fb, valid, nexp_bundle0, recip_bundle0, prob_choice, &rb0, be0, c0, std::span<const uint64_t>(t0.data(), t0.size()));
+    r0 = run_softmax_party(0, rows, cols, fb, valid, nexp_bundle0, recip_bundle0, prob_choice, &rb0, be0, c0, std::span<const uint64_t>(t0.data(), t0.size()), device_timing || device_only);
     t.join();
     if (exc) std::rethrow_exception(exc);
-    if (staged && stream) {
+    if (staged) {
       cudaEventRecord(ev_end, stream);
       cudaEventSynchronize(ev_end);
       cudaEventElapsedTime(&dev_ms, ev_start, ev_end);
@@ -457,21 +459,47 @@ BenchResult bench_softmax(int rows, int cols, int fb, int reps) {
       cudaEventDestroy(ev_end);
     }
     auto end = std::chrono::steady_clock::now();
-    // Verify
-    for (size_t i = 0; i < r0.probs.size(); ++i) {
-      uint64_t rec = r0.probs[i] + r1.probs[i];
-      // loose check: should be <=1<<fb
-      if (rec > (1ull << fb) + 4) throw std::runtime_error("softmax recon mismatch");
+    if (!device_only) {
+      const char* dbg = std::getenv("SOFTMAX_BENCH_DEBUG");
+      for (size_t i = 0; i < r0.probs.size(); ++i) {
+        uint64_t a = r0.probs[i];
+        uint64_t b = r1.probs[i];
+        uint64_t rec = a + b;
+        if (rec > (1ull << fb) + 4) {
+          if (dbg) {
+            std::cerr << "softmax recon mismatch idx=" << i
+                      << " a=" << a << " b=" << b
+                      << " rec=" << rec << " fb=" << fb
+                      << " rows=" << rows << " cols=" << cols
+                      << " party0_first=" << (r0.probs.empty() ? 0 : r0.probs[0])
+                      << " party1_first=" << (r1.probs.empty() ? 0 : r1.probs[0])
+                      << "\n";
+          }
+          throw std::runtime_error("softmax recon mismatch");
+        }
+      }
     }
     double host_ms = std::chrono::duration<double, std::milli>(end - start).count();
+    if (device_only && dev_ms > 0.0f) host_ms = dev_ms;
     return {host_ms, static_cast<double>(dev_ms)};
   };
 
   BenchResult br{};
   double cpu_sum = 0.0, gpu_sum = 0.0;
-  for (int i = 0; i < reps; ++i) cpu_sum += run_pair(ref_be, ref_be, nexp_mat_cpu, recip_mat_cpu, /*device_timing=*/false).first;
-  br.cpu_ms = cpu_sum / reps;
+  if (!device_only) {
+    for (int i = 0; i < reps; ++i) cpu_sum += run_pair(ref_be, ref_be, nexp_mat_cpu, recip_mat_cpu, /*device_timing=*/false).first;
+    br.cpu_ms = cpu_sum / reps;
+  }
 #ifdef SUF_HAVE_CUDA
+  // Exercise CUDA kernels by default for the GPU run.
+  setenv("SUF_PFSS_CACHE_KEYS", "1", 0);
+  setenv("SUF_PFSS_CACHE_HATX", "1", 0);
+  setenv("SUF_TRUNC_GPU", "1", 0);
+  setenv("SUF_MUL_GPU", "1", 0);
+  setenv("SUF_RECIP_GPU_KERNELS", "1", 0);
+  setenv("SUF_HORNER_GPU", "1", 0);
+  auto gpu_be0 = proto::make_real_gpu_backend();
+  auto gpu_be1 = proto::make_real_gpu_backend();
   if (gpu_be0 && gpu_be1) {
     std::mt19937_64 rng_gpu(101);
     auto nexp_mat_gpu = gates::dealer_make_nexp_task_material(*gpu_be0, nexp_params, rng_gpu, cols * rows, cols * rows);
@@ -490,17 +518,13 @@ BenchResult bench_softmax(int rows, int cols, int fb, int reps) {
   return br;
 }
 
-BenchResult bench_layernorm(int rows, int cols, int fb, int reps) {
+BenchResult bench_layernorm(int rows, int cols, int fb, int reps, bool device_only) {
   std::mt19937_64 rng(17);
   std::vector<uint64_t> x_plain(static_cast<size_t>(rows * cols));
   for (auto& v : x_plain) v = static_cast<uint64_t>(rng() % (1 << fb));
   std::vector<uint64_t> x0 = x_plain, x1(x_plain.size(), 0ull);
 
   proto::ReferenceBackend ref_be;
-#ifdef SUF_HAVE_CUDA
-  auto gpu_be0 = proto::make_real_gpu_backend();
-  auto gpu_be1 = proto::make_real_gpu_backend();
-#endif
 
   auto bundle_cpu = build_layernorm_bundle(ref_be, rows, cols, fb);
   auto run_pair = [&](proto::PfssBackendBatch& be0, proto::PfssBackendBatch& be1,
@@ -520,6 +544,12 @@ BenchResult bench_layernorm(int rows, int cols, int fb, int reps) {
     R0.pfss_coeff = &pe0.pfss_coeff_batch(); R0.pfss_trunc = &pe0.pfss_trunc_batch();
     R1.pfss_coeff = &pe1.pfss_coeff_batch(); R1.pfss_trunc = &pe1.pfss_trunc_batch();
     R0.opens = &pe0.open_collector(); R1.opens = &pe1.open_collector();
+    if (device_timing || device_only) {
+      pe0.pfss_coeff_batch().set_device_outputs(true);
+      pe0.pfss_trunc_batch().set_device_outputs(true);
+      pe1.pfss_coeff_batch().set_device_outputs(true);
+      pe1.pfss_trunc_batch().set_device_outputs(true);
+    }
 
     std::vector<uint64_t> y0(x0.size(), 0ull), y1(x1.size(), 0ull);
     auto bundle0 = b0.bundle;
@@ -534,7 +564,8 @@ BenchResult bench_layernorm(int rows, int cols, int fb, int reps) {
     cudaEvent_t ev_start = nullptr, ev_end = nullptr;
     proto::PfssGpuStagedEval* staged = device_timing ? dynamic_cast<proto::PfssGpuStagedEval*>(&be0) : nullptr;
     cudaStream_t stream = staged ? reinterpret_cast<cudaStream_t>(staged->device_stream()) : nullptr;
-    if (staged && stream) {
+    if (staged) {
+      if (stream == nullptr) stream = 0;
       cudaEventCreate(&ev_start);
       cudaEventCreate(&ev_end);
       cudaEventRecord(ev_start, stream);
@@ -562,7 +593,7 @@ BenchResult bench_layernorm(int rows, int cols, int fb, int reps) {
     pe0.run(R0);
     t.join();
     if (exc) std::rethrow_exception(exc);
-    if (staged && stream) {
+    if (staged) {
       cudaEventRecord(ev_end, stream);
       cudaEventSynchronize(ev_end);
       cudaEventElapsedTime(&dev_ms, ev_start, ev_end);
@@ -570,20 +601,32 @@ BenchResult bench_layernorm(int rows, int cols, int fb, int reps) {
       cudaEventDestroy(ev_end);
     }
     auto end = std::chrono::steady_clock::now();
-    // quick recon sanity
-    for (size_t i = 0; i < y0.size(); ++i) {
-      volatile uint64_t rec = y0[i] + y1[i];
-      (void)rec;
+    if (!device_only) {
+      for (size_t i = 0; i < y0.size(); ++i) {
+        volatile uint64_t rec = y0[i] + y1[i];
+        (void)rec;
+      }
     }
     double host_ms = std::chrono::duration<double, std::milli>(end - start).count();
+    if (device_only && dev_ms > 0.0f) host_ms = dev_ms;
     return {host_ms, static_cast<double>(dev_ms)};
   };
 
   BenchResult br{};
   double cpu_sum = 0.0, gpu_sum = 0.0;
-  for (int i = 0; i < reps; ++i) cpu_sum += run_pair(ref_be, ref_be, bundle_cpu, bundle_cpu, /*device_timing=*/false).first;
-  br.cpu_ms = cpu_sum / reps;
+  if (!device_only) {
+    for (int i = 0; i < reps; ++i) cpu_sum += run_pair(ref_be, ref_be, bundle_cpu, bundle_cpu, /*device_timing=*/false).first;
+    br.cpu_ms = cpu_sum / reps;
+  }
 #ifdef SUF_HAVE_CUDA
+  setenv("SUF_PFSS_CACHE_KEYS", "1", 0);
+  setenv("SUF_PFSS_CACHE_HATX", "1", 0);
+  setenv("SUF_TRUNC_GPU", "1", 0);
+  setenv("SUF_MUL_GPU", "1", 0);
+  setenv("SUF_RECIP_GPU_KERNELS", "1", 0);
+  setenv("SUF_HORNER_GPU", "1", 0);
+  auto gpu_be0 = proto::make_real_gpu_backend();
+  auto gpu_be1 = proto::make_real_gpu_backend();
   if (gpu_be0 && gpu_be1) {
     auto bundle_gpu = build_layernorm_bundle(*gpu_be0, rows, cols, fb);
     double gpu_dev_sum = 0.0;
@@ -604,6 +647,9 @@ BenchResult bench_layernorm(int rows, int cols, int fb, int reps) {
 
 int main(int argc, char** argv) {
   int rows = 4, cols = 8, fb = 8, reps = 2;
+  bool device_only = (std::getenv("SUF_BENCH_DEVICE_ONLY") != nullptr);
+  int gpu_block = -1;
+  std::vector<int> sweep_blocks;
   for (int i = 1; i < argc; ++i) {
     std::string a(argv[i]);
     if (a.rfind("--rows=", 0) == 0) rows = std::stoi(a.substr(7));
@@ -614,20 +660,61 @@ int main(int argc, char** argv) {
       std::string p = a.substr(9);
       if (p == "safe") { rows = 256; cols = 128; reps = 1; }
       else if (p == "tiny") { rows = 4; cols = 8; reps = 2; }
+      else if (p == "large") { rows = 4096; cols = 512; reps = 2; }
+    }
+    else if (a == "--device-only") {
+      device_only = true;
+    } else if (a.rfind("--blocks=", 0) == 0) {
+      gpu_block = std::stoi(a.substr(9));
+    } else if (a.rfind("--sweep-blocks=", 0) == 0) {
+      std::string list = a.substr(15);
+      size_t pos = 0;
+      while (pos < list.size()) {
+        size_t comma = list.find(',', pos);
+        std::string tok = list.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos);
+        if (!tok.empty()) sweep_blocks.push_back(std::stoi(tok));
+        if (comma == std::string::npos) break;
+        pos = comma + 1;
+      }
     }
   }
 
-  std::cout << std::unitbuf;
-  std::cout << "Softmax bench rows=" << rows << " cols=" << cols << " fb=" << fb << " reps=" << reps << "\n";
-  auto soft = bench_softmax(rows, cols, fb, reps);
-  std::cout << "Softmax CPU avg_ms=" << soft.cpu_ms << " GPU avg_ms=" << soft.gpu_ms;
-  if (soft.gpu_dev_ms > 0.0) std::cout << " GPU_device_ms=" << soft.gpu_dev_ms;
-  std::cout << "\n";
+  if (gpu_block > 0) {
+    std::string b = std::to_string(gpu_block);
+    setenv("SUF_PFSS_GPU_BLOCK", b.c_str(), 1);
+  }
 
-  std::cout << "LayerNorm bench rows=" << rows << " cols=" << cols << " fb=" << fb << " reps=" << reps << "\n";
-  auto ln = bench_layernorm(rows, cols, fb, reps);
-  std::cout << "LayerNorm CPU avg_ms=" << ln.cpu_ms << " GPU avg_ms=" << ln.gpu_ms;
-  if (ln.gpu_dev_ms > 0.0) std::cout << " GPU_device_ms=" << ln.gpu_dev_ms;
-  std::cout << "\n";
+  std::cout << std::unitbuf;
+  auto run_once = [&](int blk) {
+    if (blk > 0) {
+      std::string b = std::to_string(blk);
+      setenv("SUF_PFSS_GPU_BLOCK", b.c_str(), 1);
+    }
+    std::cout << "Softmax bench rows=" << rows << " cols=" << cols << " fb=" << fb
+              << " reps=" << reps;
+    if (blk > 0) std::cout << " block=" << blk;
+    std::cout << "\n";
+    auto soft = bench_softmax(rows, cols, fb, reps, device_only);
+    if (!device_only) std::cout << "Softmax CPU avg_ms=" << soft.cpu_ms << " ";
+    std::cout << "GPU avg_ms=" << soft.gpu_ms;
+    if (soft.gpu_dev_ms > 0.0) std::cout << " GPU_device_ms=" << soft.gpu_dev_ms;
+    std::cout << "\n";
+
+    std::cout << "LayerNorm bench rows=" << rows << " cols=" << cols << " fb=" << fb
+              << " reps=" << reps;
+    if (blk > 0) std::cout << " block=" << blk;
+    std::cout << "\n";
+    auto ln = bench_layernorm(rows, cols, fb, reps, device_only);
+    if (!device_only) std::cout << "LayerNorm CPU avg_ms=" << ln.cpu_ms << " ";
+    std::cout << "GPU avg_ms=" << ln.gpu_ms;
+    if (ln.gpu_dev_ms > 0.0) std::cout << " GPU_device_ms=" << ln.gpu_dev_ms;
+    std::cout << "\n";
+  };
+
+  if (!sweep_blocks.empty()) {
+    for (int blk : sweep_blocks) run_once(blk);
+  } else {
+    run_once(gpu_block);
+  }
   return 0;
 }
