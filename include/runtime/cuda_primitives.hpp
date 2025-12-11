@@ -63,6 +63,49 @@ void launch_horner_cubic_kernel(const uint64_t* d_x,
                                 size_t n,
                                 void* stream /* cudaStream_t */);
 
+// Row-broadcast Beaver mul: mat is rows*cols, vec is rows (broadcast per row).
+// A,B,C are Beaver triple shares shaped like mat (A,C) and vec (B expanded per row).
+// d_open is opened mat - A, e_open is opened vec - B (broadcast).
+// All pointers are device, output is mat-sized.
+void launch_row_broadcast_mul_kernel(int party,
+                                     const uint64_t* d_mat,
+                                     const uint64_t* d_vec_bcast,
+                                     const uint64_t* d_A,
+                                     const uint64_t* d_B_bcast,
+                                     const uint64_t* d_C,
+                                     const uint64_t* d_d_open,
+                                     const uint64_t* d_e_open_bcast,
+                                     uint64_t* d_out,
+                                     size_t n,  // rows*cols
+                                     void* stream /* cudaStream_t */);
+
+// Row reduction: sum each row of a dense matrix (rows*cols) into out_rows.
+// All pointers are device. Optional valid_lens per row (device) to handle ragged rows.
+void launch_row_sum_kernel(const uint64_t* d_mat,
+                           int rows,
+                           int cols,
+                           const int* d_valid_lens,  // optional, can be nullptr for dense
+                           uint64_t* d_out_rows,
+                           void* stream /* cudaStream_t */);
+
+// Row mean: mean = sum / len (len from valid_lens or cols). Operates mod 2^64.
+void launch_row_mean_kernel(const uint64_t* d_mat,
+                            int rows,
+                            int cols,
+                            const int* d_valid_lens,  // optional, can be nullptr
+                            uint64_t* d_out_rows,
+                            void* stream /* cudaStream_t */);
+
+// Row variance: var = sum((x - mean)^2) / len. mean provided per row (device).
+// Expects mat in Qf, mean in Qf, outputs var in Q2f (mod 2^64).
+void launch_row_variance_kernel(const uint64_t* d_mat,
+                                const uint64_t* d_mean,
+                                int rows,
+                                int cols,
+                                const int* d_valid_lens,  // optional, can be nullptr
+                                uint64_t* d_out_rows,
+                                void* stream /* cudaStream_t */);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

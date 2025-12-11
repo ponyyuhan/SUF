@@ -138,6 +138,9 @@ struct PreparedCompositeJob {
   const gates::CompositePartyKey* key = nullptr;
   gates::PostProcHook* hook = nullptr;
   std::vector<uint64_t> hatx_public;
+  // Optional: device-resident hatx payload to skip upload in GPU backend.
+  const uint64_t* hatx_device = nullptr;
+  size_t hatx_device_words = 0;
   std::vector<int> row_offsets;  // optional ragged offsets (prefix sums), last entry = total elems
   std::vector<int> row_lengths;  // optional ragged lengths per row
   // Optional shape metadata for planner/packing budgets.
@@ -190,6 +193,12 @@ class PfssSuperBatch {
   // Apply hooks and write masked outputs for queued jobs. Safe to call after
   // flush_eval() if callers rely on legacy behavior.
   void finalize_all(int party, proto::IChannel& ch);
+  // Materialize only the host view (subtract r_out and write to dst) without
+  // forcing device buffers to be freed. Allows callers to keep device outputs
+  // resident across phases.
+  void materialize_host(int party, proto::IChannel& ch);
+  // Return true if device outputs are available for this batch/handle.
+  bool has_device_outputs() const { return device_outputs_; }
 
   // Convenience wrapper that performs flush() followed by finalize().
   void flush_and_finalize(int party, proto::PfssBackendBatch& backend, proto::IChannel& ch);

@@ -256,6 +256,13 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
       b.hatx.insert(b.hatx.end(), job.hatx_public.begin(), job.hatx_public.end());
       total_hatx_words += job.hatx_public.size();
       b.jobs.push_back(bj);
+      // If caller provided a device hatx buffer and this bucket currently
+      // only holds this job, reuse the device pointer to skip staging.
+      if (job.hatx_device && job.hatx_device_words == job.hatx_public.size() &&
+          b.jobs.size() == 1) {
+        b.dev_hatx.ptr = const_cast<uint64_t*>(job.hatx_device);
+        b.dev_hatx.bytes = job.hatx_device_words * sizeof(uint64_t);
+      }
       if (!job.row_offsets.empty()) {
         int base = b.row_offsets.empty() ? 0 : b.row_offsets.back();
         for (size_t k = 0; k + 1 < job.row_offsets.size(); ++k) {
@@ -271,7 +278,7 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
       stats_.max_bucket_hatx = std::max(stats_.max_bucket_hatx, b.hatx.size());
       stats_.max_bucket_jobs = std::max(stats_.max_bucket_jobs, b.jobs.size());
       bool dev_capable = gpu_stager_ && (dynamic_cast<runtime::CpuPassthroughStager*>(gpu_stager_) == nullptr);
-      if (gpu_stager_) {
+      if (gpu_stager_ && !b.dev_hatx.ptr) {
         HostBufferRef host{b.hatx.data(), b.hatx.size() * sizeof(uint64_t)};
         b.dev_hatx = gpu_stager_->stage_to_device(host);
       }
@@ -556,6 +563,93 @@ void PfssSuperBatch::finalize_all(int party, proto::IChannel& ch) {
   slices_.clear();
   group_results_.clear();
   flushed_ = false;
+}
+
+void PfssSuperBatch::materialize_host(int party, proto::IChannel& ch) {
+  if (!flushed_) return;
+  if (completed_.empty()) populate_completed_();
+  if (device_outputs_) return;  // caller intends to consume device buffers directly
+  for (size_t idx = 0; idx < jobs_.size(); ++idx) {
+    const auto& job = jobs_[idx];
+    if (job.token >= completed_.size()) continue;
+    if (idx >= slices_.size()) continue;
+    const auto& sl = slices_[idx];
+    if (sl.group_result == static_cast<size_t>(-1)) continue;
+    if (sl.group_result >= group_results_.size()) continue;
+    const auto& gr = group_results_[sl.group_result];
+
+    size_t r = gr.r;
+    size_t ell = gr.ell;
+    size_t arith_words = sl.len * r;
+    size_t bool_words = sl.len * ell;
+    const uint64_t* arith_base = gr.arith.data() + sl.start * r;
+    const uint64_t* bool_base =
+        (ell > 0 && !gr.bools.empty()) ? (gr.bools.data() + sl.start * ell) : nullptr;
+
+    std::vector<uint64_t> arith_slice(arith_base, arith_base + arith_words);
+    std::vector<uint64_t> bool_slice;
+    if (bool_base && bool_words > 0) {
+      bool_slice.assign(bool_base, bool_base + bool_words);
+    }
+
+    if (job.hook) {
+      size_t generous_need = std::max<size_t>(512, job.hatx_public.size() * 256);
+      std::vector<proto::BeaverTriple64Share> synth_triples;
+      synth_triples.reserve(generous_need);
+      std::mt19937_64 rng(job.key->compiled.r_in ^ 0x70667373u);
+      for (size_t i = 0; i < generous_need; ++i) {
+        uint64_t a = rng();
+        uint64_t b = rng();
+        uint64_t c = proto::mul_mod(a, b);
+        uint64_t a0 = rng();
+        uint64_t a1 = a - a0;
+        uint64_t b0 = rng();
+        uint64_t b1 = b - b0;
+        uint64_t c0 = rng();
+        uint64_t c1 = c - c0;
+        synth_triples.push_back((party == 0) ? proto::BeaverTriple64Share{a0, b0, c0}
+                                             : proto::BeaverTriple64Share{a1, b1, c1});
+      }
+      proto::BeaverMul64 mul{party, ch, synth_triples, 0};
+      job.hook->configure(job.key->compiled.layout);
+      std::vector<uint64_t> hooked(arith_words, 0);
+      job.hook->run_batch(party, ch, mul,
+                          job.hatx_public.data(),
+                          arith_slice.data(), r,
+                          bool_slice.data(), ell,
+                          sl.len,
+                          hooked.data());
+      arith_slice.swap(hooked);
+    }
+
+    CompletedJob& cj = completed_[job.token];
+    cj.r = r;
+    cj.ell = ell;
+    cj.arith.resize(arith_slice.size());
+    for (size_t i = 0; i < sl.len; ++i) {
+      for (size_t rr = 0; rr < r; ++rr) {
+        size_t out_idx = i * r + rr;
+        uint64_t val = arith_slice[out_idx];
+        uint64_t rout = (rr < job.key->r_out_share.size()) ? job.key->r_out_share[rr] : 0ull;
+        val = proto::sub_mod(val, rout);
+        cj.arith[out_idx] = val;
+        if (out_idx < job.out.numel() && job.out.data) {
+          job.out.data[out_idx] = val;
+        }
+      }
+    }
+    cj.bools = std::move(bool_slice);
+    if (job.token < slots_.size() && slots_[job.token]) {
+      auto& slot = slots_[job.token];
+      slot->r = r;
+      slot->ell = ell;
+      if (!slot->arith_storage) slot->arith_storage = std::make_shared<std::vector<uint64_t>>();
+      if (!slot->bool_storage) slot->bool_storage = std::make_shared<std::vector<uint64_t>>();
+      slot->arith_storage->assign(cj.arith.begin(), cj.arith.end());
+      slot->bool_storage->assign(cj.bools.begin(), cj.bools.end());
+      slot->ready.store(true);
+    }
+  }
 }
 
 void PfssSuperBatch::flush_and_finalize(int party,

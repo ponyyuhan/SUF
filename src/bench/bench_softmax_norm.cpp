@@ -193,6 +193,10 @@ SoftmaxResult run_softmax_party(int party,
                                 std::span<const uint64_t> t_qf,
                                 bool device_only = false) {
   runtime::PhaseExecutor pe;
+  if (device_only) {
+    pe.set_device_pipeline(true);
+    pe.set_device_pipeline_materialize(false);
+  }
   runtime::PhaseResources R;
   R.party = party;
   R.pfss_backend = &backend;
@@ -212,6 +216,7 @@ SoftmaxResult run_softmax_party(int party,
   plan.rows = rows;
   plan.cols = cols;
   plan.valid_lens = valid;
+  plan.device_only = device_only;
   plan.nexp = nexp;
   plan.recip = recip;
   plan.prob_trunc = trunc_choice;
@@ -506,6 +511,8 @@ BenchResult bench_softmax(int rows, int cols, int fb, int reps, bool device_only
     auto recip_mat_gpu = gates::dealer_make_recip_task_material(*gpu_be0, fb, /*nr_iters=*/1, rng_gpu, cols * rows);
     double gpu_dev_sum = 0.0;
     bool dev_time = (std::getenv("SUF_BENCH_DEVICE_TIME") != nullptr);
+    setenv("SUF_SOFTMAX_GPU", "1", 0);
+    setenv("SUF_LN_GPU", "1", 0);
     for (int i = 0; i < reps; ++i) {
       auto [host_ms, dev_ms] = run_pair(*gpu_be0, *gpu_be1, nexp_mat_gpu, recip_mat_gpu, dev_time);
       gpu_sum += host_ms;
@@ -535,6 +542,12 @@ BenchResult bench_layernorm(int rows, int cols, int fb, int reps, bool device_on
     RowBroadcastTripleProviderImpl rb0(b0.rb_mat, 0), rb1(b1.rb_mat, 1);
 
     runtime::PhaseExecutor pe0, pe1;
+    if (device_timing || device_only) {
+      pe0.set_device_pipeline(true);
+      pe1.set_device_pipeline(true);
+      pe0.set_device_pipeline_materialize(false);
+      pe1.set_device_pipeline_materialize(false);
+    }
     runtime::PhaseResources R0, R1;
     R0.party = 0; R1.party = 1;
     runtime::ProtoChanFromNet pch0(c0), pch1(c1);

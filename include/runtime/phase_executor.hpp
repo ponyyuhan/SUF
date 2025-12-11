@@ -17,6 +17,7 @@ struct PhaseResources {
   PfssSuperBatch* pfss_trunc = nullptr;
   OpenCollector* opens = nullptr;
   PfssPhasePlanner* pfss_planner = nullptr;  // optional single-flush planner per phase
+  bool device_pipeline = false;  // optional: keep PFSS outputs on device across phases
 };
 
 // Multi-wave phase executor: drives PhaseTasks that enqueue PFSS/open work.
@@ -83,11 +84,13 @@ class PhaseExecutor {
   template <typename PfssChanT>
   void flush_phase(int party, proto::PfssBackendBatch& backend, PfssChanT& pfss_ch, net::Chan& net_ch) {
     if (!pfss_coeff_.empty()) {
-      pfss_coeff_.flush_and_finalize(party, backend, pfss_ch);
+      pfss_coeff_.flush_eval(party, backend, pfss_ch);
+      pfss_coeff_.materialize_host(party, pfss_ch);
       if (!keep_batches_) pfss_coeff_.clear();
     }
     if (!pfss_trunc_.empty()) {
-      pfss_trunc_.flush_and_finalize(party, backend, pfss_ch);
+      pfss_trunc_.flush_eval(party, backend, pfss_ch);
+      pfss_trunc_.materialize_host(party, pfss_ch);
       if (!keep_batches_) pfss_trunc_.clear();
     }
     if (!opens_.empty()) {
@@ -123,19 +126,27 @@ class PhaseExecutor {
   void set_lazy_mode(bool enable) { lazy_mode_ = enable; }
   void set_lazy_limits(const LazyLimits& lim) { lazy_limits_ = lim; }
   void set_keep_batches(bool keep) { keep_batches_ = keep; }
+  // Enable device pipeline: skip host materialization until caller explicitly
+  // requests it (e.g., for device-only benches). Callers must later invoke
+  // materialize_host() on the batches or manually clear them.
+  void set_device_pipeline(bool enable) { device_pipeline_ = enable; }
+  void set_device_pipeline_materialize(bool enable) { device_pipeline_materialize_ = enable; }
 
   template <typename PfssChanT>
   void finalize_pfss_once(int party, proto::PfssBackendBatch& backend, PfssChanT& pfss_ch) {
     auto flush_once = [&](PfssSuperBatch& b) {
       if (b.has_pending()) b.flush_eval(party, backend, pfss_ch);
-      if (b.has_flushed()) b.finalize_all(party, pfss_ch);
-      b.clear();
+      if (b.has_flushed() && (!device_pipeline_ || device_pipeline_materialize_)) {
+        b.materialize_host(party, pfss_ch);
+      }
+      if (!device_pipeline_ || device_pipeline_materialize_) b.clear();
     };
     flush_once(pfss_coeff_);
     if (&pfss_trunc_ != &pfss_coeff_) flush_once(pfss_trunc_);
   }
 
   void run(PhaseResources& R) {
+    R.device_pipeline = device_pipeline_;
     if (lazy_mode_) {
       run_lazy(R);
       return;
@@ -183,7 +194,10 @@ class PhaseExecutor {
           if (flush_guard + 1 > max_flushes_) {
             throw std::runtime_error("PhaseExecutor: PFSS finalize budget exceeded");
           }
-          b->finalize_all(R.party, *R.pfss_chan);
+          if (!device_pipeline_ || device_pipeline_materialize_) {
+            b->materialize_host(R.party, *R.pfss_chan);
+          }
+          if (!device_pipeline_ || device_pipeline_materialize_) b->clear();
           flush_guard++;
           did = true;
         }
@@ -389,6 +403,12 @@ class PhaseExecutor {
     stats_.pfss_trunc_hatx_words = pts.hatx_words;
     stats_.pfss_trunc_hatx_bytes = pts.hatx_bytes;
 
+    if (device_pipeline_ && device_pipeline_materialize_) {
+      if (R.pfss_chan) {
+        if (pfss_coeff_.has_flushed()) pfss_coeff_.materialize_host(R.party, *R.pfss_chan);
+        if (pfss_trunc_.has_flushed()) pfss_trunc_.materialize_host(R.party, *R.pfss_chan);
+      }
+    }
     if (!keep_batches_) {
       pfss_coeff_.clear();
       pfss_trunc_.clear();
@@ -404,6 +424,8 @@ class PhaseExecutor {
   size_t max_flushes_ = 1ull << 16;  // safety guard
   bool lazy_mode_ = true;
   bool keep_batches_ = true;
+  bool device_pipeline_ = false;
+  bool device_pipeline_materialize_ = true;
   LazyLimits lazy_limits_{};
 };
 

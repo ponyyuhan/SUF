@@ -99,7 +99,8 @@ class StagedSoftmaxTask : public runtime::detail::PhaseTask {
               plan_.cols,
               std::span<const int>(plan_.valid_lens),
               std::span<uint64_t>(prod_q2f_.data(), prod_q2f_.size()),
-              plan_.row_triples);
+              plan_.row_triples,
+              /*device_only=*/false);
           prob_range_.lo = 0;
           prob_range_.hi = static_cast<int64_t>(1) << plan_.frac_bits;
           prob_range_.is_signed = false;

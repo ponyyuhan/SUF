@@ -109,6 +109,140 @@ __global__ void horner_cubic_kernel(const uint64_t* __restrict__ x,
   out[idx] = y;
 }
 
+__global__ void row_broadcast_mul_kernel(int party,
+                                         const uint64_t* __restrict__ mat,
+                                         const uint64_t* __restrict__ vec_bcast,
+                                         const uint64_t* __restrict__ A,
+                                         const uint64_t* __restrict__ B_bcast,
+                                         const uint64_t* __restrict__ C,
+                                         const uint64_t* __restrict__ d_open,
+                                         const uint64_t* __restrict__ e_open_bcast,
+                                         uint64_t* __restrict__ out,
+                                         size_t n) {
+  size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= n) return;
+  uint64_t d = d_open[idx];
+  uint64_t e = e_open_bcast[idx];
+  uint64_t z = C[idx];
+  z = add_mod(z, mul_mod(d, B_bcast[idx]));
+  z = add_mod(z, mul_mod(e, A[idx]));
+  if (party == 0) {
+    z = add_mod(z, mul_mod(d, e));
+  }
+  out[idx] = z;
+}
+
+// Simple row-sum reduction: one block per row. Assumes cols <= 1024 for now.
+__global__ void row_sum_kernel(const uint64_t* __restrict__ mat,
+                               int rows,
+                               int cols,
+                               const int* __restrict__ valid_lens,
+                               uint64_t* __restrict__ out_rows) {
+  int r = blockIdx.x;
+  if (r >= rows) return;
+  int L = valid_lens ? valid_lens[r] : cols;
+  uint64_t acc = 0;
+  for (int c = threadIdx.x; c < L; c += blockDim.x) {
+    size_t idx = static_cast<size_t>(r) * static_cast<size_t>(cols) + static_cast<size_t>(c);
+    acc = add_mod(acc, mat[idx]);
+  }
+  // Reduce within block (naive): shared memory reduction.
+  __shared__ uint64_t buf[256];
+  int tid = threadIdx.x;
+  buf[tid] = acc;
+  __syncthreads();
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (tid < stride) buf[tid] = add_mod(buf[tid], buf[tid + stride]);
+    __syncthreads();
+  }
+  if (tid == 0) out_rows[r] = buf[0];
+}
+
+__global__ void row_mean_kernel(const uint64_t* __restrict__ mat,
+                                int rows,
+                                int cols,
+                                const int* __restrict__ valid_lens,
+                                uint64_t* __restrict__ out_rows) {
+  int r = blockIdx.x;
+  if (r >= rows) return;
+  int L = valid_lens ? valid_lens[r] : cols;
+  if (L <= 0) {
+    if (threadIdx.x == 0) out_rows[r] = 0;
+    return;
+  }
+  uint64_t acc = 0;
+  for (int c = threadIdx.x; c < L; c += blockDim.x) {
+    size_t idx = static_cast<size_t>(r) * static_cast<size_t>(cols) + static_cast<size_t>(c);
+    acc = add_mod(acc, mat[idx]);
+  }
+  __shared__ uint64_t buf[256];
+  int tid = threadIdx.x;
+  buf[tid] = acc;
+  __syncthreads();
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (tid < stride) buf[tid] = add_mod(buf[tid], buf[tid + stride]);
+    __syncthreads();
+  }
+  if (tid == 0) {
+    // Divide by L mod 2^64: use multiplicative inverse modulo 2^64 when L odd; fallback to shift if power of two.
+    uint64_t sum = buf[0];
+    uint64_t mean = 0;
+    if ((L & (L - 1)) == 0) {
+      int shift = 0;
+      while ((1 << shift) != L && shift < 63) ++shift;
+      mean = (shift >= 64) ? 0ull : (sum >> shift);
+    } else {
+      // Approximate inverse using 128-bit division (host would be better; here we keep it simple).
+      unsigned __int128 num = static_cast<unsigned __int128>(sum);
+      mean = static_cast<uint64_t>(num / static_cast<unsigned>(L));
+    }
+    out_rows[r] = mean;
+  }
+}
+
+__global__ void row_variance_kernel(const uint64_t* __restrict__ mat,
+                                    const uint64_t* __restrict__ mean,
+                                    int rows,
+                                    int cols,
+                                    const int* __restrict__ valid_lens,
+                                    uint64_t* __restrict__ out_rows) {
+  int r = blockIdx.x;
+  if (r >= rows) return;
+  int L = valid_lens ? valid_lens[r] : cols;
+  uint64_t mu = mean[r];
+  uint64_t acc = 0;
+  for (int c = threadIdx.x; c < L; c += blockDim.x) {
+    size_t idx = static_cast<size_t>(r) * static_cast<size_t>(cols) + static_cast<size_t>(c);
+    uint64_t x = mat[idx];
+    int64_t diff = static_cast<int64_t>(x) - static_cast<int64_t>(mu);
+    uint64_t diff_u = static_cast<uint64_t>(diff);
+    acc = add_mod(acc, mul_mod(diff_u, diff_u));
+  }
+  __shared__ uint64_t buf[256];
+  int tid = threadIdx.x;
+  buf[tid] = acc;
+  __syncthreads();
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (tid < stride) buf[tid] = add_mod(buf[tid], buf[tid + stride]);
+    __syncthreads();
+  }
+  if (tid == 0) {
+    if (L <= 0) {
+      out_rows[r] = 0;
+      return;
+    }
+    uint64_t sumsq = buf[0];
+    if ((L & (L - 1)) == 0) {
+      int shift = 0;
+      while ((1 << shift) != L && shift < 63) ++shift;
+      out_rows[r] = (shift >= 64) ? 0ull : (sumsq >> shift);
+    } else {
+      unsigned __int128 num = static_cast<unsigned __int128>(sumsq);
+      out_rows[r] = static_cast<uint64_t>(num / static_cast<unsigned>(L));
+    }
+  }
+}
+
 }  // namespace
 
 extern "C" void launch_beaver_mul_kernel(int party,
@@ -197,5 +331,77 @@ extern "C" void launch_horner_cubic_kernel(const uint64_t* d_x,
   int grid = static_cast<int>((n + kBlock - 1) / kBlock);
   horner_cubic_kernel<<<grid, kBlock, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
       d_x, d_c0, d_c1, d_c2, d_c3, d_out, n);
+#endif
+}
+
+extern "C" void launch_row_broadcast_mul_kernel(int party,
+                                                const uint64_t* d_mat,
+                                                const uint64_t* d_vec_bcast,
+                                                const uint64_t* d_A,
+                                                const uint64_t* d_B_bcast,
+                                                const uint64_t* d_C,
+                                                const uint64_t* d_d_open,
+                                                const uint64_t* d_e_open_bcast,
+                                                uint64_t* d_out,
+                                                size_t n,
+                                                void* stream) {
+#ifndef SUF_HAVE_CUDA
+  (void)party; (void)d_mat; (void)d_vec_bcast; (void)d_A; (void)d_B_bcast; (void)d_C;
+  (void)d_d_open; (void)d_e_open_bcast; (void)d_out; (void)n; (void)stream;
+#else
+  if (n == 0) return;
+  constexpr int kBlock = 256;
+  int grid = static_cast<int>((n + kBlock - 1) / kBlock);
+  row_broadcast_mul_kernel<<<grid, kBlock, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+      party, d_mat, d_vec_bcast, d_A, d_B_bcast, d_C, d_d_open, d_e_open_bcast, d_out, n);
+#endif
+}
+
+extern "C" void launch_row_sum_kernel(const uint64_t* d_mat,
+                                       int rows,
+                                       int cols,
+                                       const int* d_valid_lens,
+                                       uint64_t* d_out_rows,
+                                       void* stream) {
+#ifndef SUF_HAVE_CUDA
+  (void)d_mat; (void)rows; (void)cols; (void)d_valid_lens; (void)d_out_rows; (void)stream;
+#else
+  if (rows <= 0 || cols <= 0) return;
+  dim3 grid(rows);
+  dim3 block(256);
+  row_sum_kernel<<<grid, block, 0, reinterpret_cast<cudaStream_t>(stream)>>>(d_mat, rows, cols, d_valid_lens, d_out_rows);
+#endif
+}
+
+extern "C" void launch_row_mean_kernel(const uint64_t* d_mat,
+                                        int rows,
+                                        int cols,
+                                        const int* d_valid_lens,
+                                        uint64_t* d_out_rows,
+                                        void* stream) {
+#ifndef SUF_HAVE_CUDA
+  (void)d_mat; (void)rows; (void)cols; (void)d_valid_lens; (void)d_out_rows; (void)stream;
+#else
+  if (rows <= 0 || cols <= 0) return;
+  dim3 grid(rows);
+  dim3 block(256);
+  row_mean_kernel<<<grid, block, 0, reinterpret_cast<cudaStream_t>(stream)>>>(d_mat, rows, cols, d_valid_lens, d_out_rows);
+#endif
+}
+
+extern "C" void launch_row_variance_kernel(const uint64_t* d_mat,
+                                            const uint64_t* d_mean,
+                                            int rows,
+                                            int cols,
+                                            const int* d_valid_lens,
+                                            uint64_t* d_out_rows,
+                                            void* stream) {
+#ifndef SUF_HAVE_CUDA
+  (void)d_mat; (void)d_mean; (void)rows; (void)cols; (void)d_valid_lens; (void)d_out_rows; (void)stream;
+#else
+  if (rows <= 0 || cols <= 0) return;
+  dim3 grid(rows);
+  dim3 block(256);
+  row_variance_kernel<<<grid, block, 0, reinterpret_cast<cudaStream_t>(stream)>>>(d_mat, d_mean, rows, cols, d_valid_lens, d_out_rows);
 #endif
 }
