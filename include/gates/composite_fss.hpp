@@ -708,6 +708,60 @@ inline std::vector<uint64_t> selectors_from_cutbits(const std::vector<uint64_t>&
   return sels;
 }
 
+// Block-batched selector network: converts XOR cut bits to additive and forms one-hot
+// piece selectors using 1 Beaver round per cut bit (b2a) and per chain multiply.
+inline void selectors_from_cutbits_block(const uint64_t* cut_bits_xor,
+                                         size_t cuts,
+                                         size_t N,
+                                         size_t blk,
+                                         size_t bsize,
+                                         int party,
+                                         proto::BeaverMul64& mul,
+                                         uint64_t* out,
+                                         size_t out_stride) {
+  uint64_t one = (party == 0) ? 1ull : 0ull;
+  if (cuts == 0) {
+    for (size_t off = 0; off < bsize; off++) out[off] = one;
+    return;
+  }
+  std::vector<uint64_t> a_share(bsize), b_share(bsize);
+  std::vector<uint64_t> prod_vec;
+  std::vector<uint64_t> cut_prev(bsize), cut_cur(bsize), not_prev(bsize);
+
+  auto b2a_cut = [&](size_t ci, std::vector<uint64_t>& dst) {
+    for (size_t off = 0; off < bsize; off++) {
+      uint64_t bx = cut_bits_xor[ci * N + (blk + off)] & 1ull;
+      a_share[off] = (party == 0) ? bx : 0ull;
+      b_share[off] = (party == 1) ? bx : 0ull;
+    }
+    mul.mul_batch(a_share, b_share, prod_vec);
+    for (size_t off = 0; off < bsize; off++) {
+      uint64_t two_prod = proto::add_mod(prod_vec[off], prod_vec[off]);
+      dst[off] = proto::sub_mod(proto::add_mod(a_share[off], b_share[off]), two_prod);
+    }
+  };
+
+  // First selector: sel0 = cut0
+  b2a_cut(0, cut_prev);
+  for (size_t off = 0; off < bsize; off++) out[0 * out_stride + off] = cut_prev[off];
+
+  // Middle selectors: sel_k = (1 - cut_{k-1}) * cut_k
+  for (size_t k = 1; k < cuts; k++) {
+    b2a_cut(k, cut_cur);
+    for (size_t off = 0; off < bsize; off++) {
+      not_prev[off] = proto::sub_mod(one, cut_prev[off]);
+    }
+    mul.mul_batch(not_prev, cut_cur, prod_vec);
+    for (size_t off = 0; off < bsize; off++) out[k * out_stride + off] = prod_vec[off];
+    cut_prev.swap(cut_cur);
+  }
+
+  // Last selector: sel_last = 1 - cut_{cuts-1}
+  for (size_t off = 0; off < bsize; off++) {
+    out[cuts * out_stride + off] = proto::sub_mod(one, cut_prev[off]);
+  }
+}
+
 inline void tape_append_u32(std::vector<uint8_t>& v, uint32_t x) {
   v.push_back(static_cast<uint8_t>(x));
   v.push_back(static_cast<uint8_t>(x >> 8));
@@ -1122,60 +1176,27 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
   auto coeff_table = build_coeff_table(compiled, k, /*add_deltas=*/(party == 0));
   if (dbg) std::cerr << "[party " << party << "] coeff table built\n";
 
-  // Always use a synthetic triple pool to avoid exhaustion in selectors/hook paths.
-  std::vector<proto::BeaverTriple64Share> synth_triples;
-  size_t generous_need = std::max<size_t>(2048, N * 512);
-  synth_triples.reserve(generous_need);
-  std::mt19937_64 rng(k.compiled.r_in ^ 0x73656c73u);  // "sels"
-  for (size_t i = 0; i < generous_need; ++i) {
-    uint64_t a = rng(), b = rng(), c = proto::mul_mod(a, b);
-    uint64_t a0 = rng(), b0 = rng(), c0 = rng();
-    synth_triples.push_back((party == 0) ? proto::BeaverTriple64Share{a0, b0, c0}
-                                         : proto::BeaverTriple64Share{a - a0, b - b0, c - c0});
+  // Use offline-provisioned triples from the key. These are sized in keygen
+  // per batch_N to cover selectors, bool DAG, and Horner.
+  if (k.triples.empty()) {
+    throw std::runtime_error("composite_eval_batch_backend: missing Beaver 64-bit triples in key");
   }
-  proto::BeaverMul64 mul_single{party, ch, synth_triples, 0};
-  // Synthetic bit triples (XOR shares) to cover batch length.
-  std::vector<proto::BeaverTripleBitShare> bit_triples;
-  size_t bit_need = std::max<size_t>(k.bit_triples.size(), N * 64);
-  bit_triples.reserve(bit_need);
-  std::mt19937_64 rng_bits(k.compiled.r_in ^ 0x62697473u);  // "bits"
-  for (size_t i = 0; i < bit_need; ++i) {
-    uint8_t a = static_cast<uint8_t>(rng_bits() & 1u);
-    uint8_t b = static_cast<uint8_t>(rng_bits() & 1u);
-    uint8_t c = static_cast<uint8_t>(a & b);
-    uint8_t a0 = static_cast<uint8_t>(rng_bits() & 1u);
-    uint8_t b0 = static_cast<uint8_t>(rng_bits() & 1u);
-    uint8_t c0 = static_cast<uint8_t>(rng_bits() & 1u);
-    proto::BeaverTripleBitShare share0{a0, b0, c0};
-    proto::BeaverTripleBitShare share1{static_cast<uint8_t>(a ^ a0),
-                                       static_cast<uint8_t>(b ^ b0),
-                                       static_cast<uint8_t>(c ^ c0)};
-    bit_triples.push_back((party == 0) ? share0 : share1);
-  }
-  const proto::BeaverTripleBitShare* bit_ptr = bit_triples.data();
+  proto::BeaverMul64 mul_single{party, ch, k.triples, 0};
+  const proto::BeaverTripleBitShare* bit_ptr =
+      k.bit_triples.empty() ? nullptr : k.bit_triples.data();
   if (dbg) std::cerr << "[party " << party << "] enter packed composite path\n";
   if (k.use_packed_pred && !pred_masks.empty() && k.packed_pred_words > 0) {
     const size_t block_sz = 64;
     size_t pieces = coeff_table.size();
     size_t stride = compiled.degree + 1;
-    std::vector<uint64_t> cut_i(k.cut_pred_keys.size(), 0);
     std::vector<uint64_t> selectors_block(pieces * block_sz, 0);
     std::vector<uint64_t> bool_block;
-    std::vector<uint64_t> coeff_sel(compiled.coeff.out_words, 0);
     for (size_t blk = 0; blk < N; blk += block_sz) {
       size_t bsize = std::min(block_sz, N - blk);
       std::fill(selectors_block.begin(), selectors_block.end(), 0ull);
       if (dbg) std::cerr << "[party " << party << "] block " << blk << " size " << bsize << " selectors\n";
-      for (size_t off = 0; off < bsize; off++) {
-        size_t idx = blk + off;
-        for (size_t ci = 0; ci < k.cut_pred_keys.size(); ci++) {
-          cut_i[ci] = cut_bits_xor[ci * N + idx] & 1ull;
-        }
-        auto sels = selectors_from_cutbits(cut_i, party, mul_single);
-        for (size_t p = 0; p < sels.size(); p++) {
-          selectors_block[p * block_sz + off] = sels[p];
-        }
-      }
+      selectors_from_cutbits_block(cut_bits_xor.data(), k.cut_pred_keys.size(), N, blk, bsize,
+                                   party, mul_single, selectors_block.data(), block_sz);
       if (dbg) std::cerr << "[party " << party << "] block " << blk << " selectors done mul_idx=" << mul_single.idx << "\n";
       for (size_t p = 0; p < pieces && p < compiled.bool_per_piece.size(); p++) {
         const auto& exprs = compiled.bool_per_piece[p];
@@ -1186,37 +1207,70 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
                                               static_cast<size_t>(k.packed_pred_words),
                                               bsize, k.wrap_share, party, mul_single,
                                               bit_ptr, 0, bool_block);
-        for (int j = 0; j < compiled.ell; j++) {
+        if (compiled.ell > 0) {
+          std::vector<uint64_t> sel_vec(bsize);
           for (size_t off = 0; off < bsize; off++) {
-            uint64_t term = mul_single.mul(selectors_block[p * block_sz + off],
-                                           bool_block[static_cast<size_t>(j) * bsize + off]);
-            size_t out_idx = (blk + off) * compiled.ell + static_cast<size_t>(j);
-            out.bool_share[out_idx] = proto::add_mod(out.bool_share[out_idx], term);
+            sel_vec[off] = selectors_block[p * block_sz + off];
+          }
+          std::vector<uint64_t> rhs_vec(bsize);
+          std::vector<uint64_t> prod_vec;
+          for (int j = 0; j < compiled.ell; j++) {
+            for (size_t off = 0; off < bsize; off++) {
+              rhs_vec[off] = bool_block[static_cast<size_t>(j) * bsize + off];
+            }
+            mul_single.mul_batch(sel_vec, rhs_vec, prod_vec);
+            for (size_t off = 0; off < bsize; off++) {
+              size_t out_idx = (blk + off) * compiled.ell + static_cast<size_t>(j);
+              out.bool_share[out_idx] = proto::add_mod(out.bool_share[out_idx], prod_vec[off]);
+            }
           }
         }
       }
       if (dbg) std::cerr << "[party " << party << "] block " << blk << " bools done mul_idx=" << mul_single.idx << "\n";
-      for (size_t off = 0; off < bsize; off++) {
-        std::fill(coeff_sel.begin(), coeff_sel.end(), 0ull);
-        for (size_t p = 0; p < pieces; p++) {
-          uint64_t sel = selectors_block[p * block_sz + off];
-          if (dbg) std::cerr << "[party " << party << "] block " << blk << " off " << off << " piece " << p << " coeff blend\n";
-          for (int j = 0; j < compiled.coeff.out_words; j++) {
-            uint64_t term = mul_single.mul(sel, coeff_table[p][static_cast<size_t>(j)]);
-            coeff_sel[static_cast<size_t>(j)] = proto::add_mod(coeff_sel[static_cast<size_t>(j)], term);
+      // Selector-weighted coefficient selection in batch to reduce Beaver rounds.
+      std::vector<uint64_t> coeff_sel_block(static_cast<size_t>(compiled.coeff.out_words) * bsize, 0);
+      std::vector<uint64_t> sel_vec(bsize);
+      std::vector<uint64_t> rhs_vec(bsize);
+      std::vector<uint64_t> prod_vec;
+      for (size_t p = 0; p < pieces; p++) {
+        for (size_t off = 0; off < bsize; off++) {
+          sel_vec[off] = selectors_block[p * block_sz + off];
+        }
+        for (int j = 0; j < compiled.coeff.out_words; j++) {
+          uint64_t cshare = coeff_table[p][static_cast<size_t>(j)];
+          for (size_t off = 0; off < bsize; off++) rhs_vec[off] = cshare;
+          mul_single.mul_batch(sel_vec, rhs_vec, prod_vec);
+          for (size_t off = 0; off < bsize; off++) {
+            coeff_sel_block[static_cast<size_t>(j) * bsize + off] =
+                proto::add_mod(coeff_sel_block[static_cast<size_t>(j) * bsize + off], prod_vec[off]);
           }
         }
+      }
+      // Batched Horner over the block to amortize Beaver rounds.
+      std::vector<uint64_t> x_share_vec(bsize);
+      for (size_t off = 0; off < bsize; off++) {
         uint64_t rin = r_in_at(k, blk + off);
-        uint64_t x_share = (party == 0) ? proto::sub_mod(in.hatx[blk + off], rin)
+        x_share_vec[off] = (party == 0) ? proto::sub_mod(in.hatx[blk + off], rin)
                                         : proto::sub_mod(0ull, rin);
-        for (int j = 0; j < compiled.r; j++) {
-          uint64_t acc = coeff_sel[static_cast<size_t>(j * stride + compiled.degree)];
-          for (int d = compiled.degree - 1; d >= 0; d--) {
-            acc = mul_single.mul(acc, x_share);
-            acc = proto::add_mod(acc, coeff_sel[static_cast<size_t>(j * stride + d)]);
+      }
+      std::vector<uint64_t> acc_vec(bsize);
+      for (int j = 0; j < compiled.r; j++) {
+        size_t base = static_cast<size_t>(j * stride);
+        for (size_t off = 0; off < bsize; off++) {
+          acc_vec[off] =
+              coeff_sel_block[(base + static_cast<size_t>(compiled.degree)) * bsize + off];
+        }
+        for (int d = compiled.degree - 1; d >= 0; d--) {
+          mul_single.mul_batch(acc_vec, x_share_vec, prod_vec);
+          for (size_t off = 0; off < bsize; off++) {
+            acc_vec[off] =
+                proto::add_mod(prod_vec[off],
+                               coeff_sel_block[(base + static_cast<size_t>(d)) * bsize + off]);
           }
+        }
+        for (size_t off = 0; off < bsize; off++) {
           out.haty_share[(blk + off) * compiled.r + static_cast<size_t>(j)] =
-              proto::add_mod(acc, k.r_out_share[static_cast<size_t>(j)]);
+              proto::add_mod(acc_vec[off], k.r_out_share[static_cast<size_t>(j)]);
         }
       }
     }
@@ -1225,60 +1279,127 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     return out;
   }
 
-  // Fallback scalar path (no packed predicates)
-  size_t bit_idx = 0;
+  // Fallback scalar path (no packed predicates). We still batch selector-weighted
+  // bool/coeff selection over blocks to amortize Beaver rounds.
+  const size_t block_sz = 64;
+  size_t pieces = coeff_table.size();
+  size_t stride = compiled.degree + 1;
   std::vector<uint64_t> preds_i(compiled.pred.queries.size(), 0);
-  std::vector<uint64_t> cut_i(k.cut_pred_keys.size(), 0);
-  std::vector<uint64_t> selectors;
-  std::vector<uint64_t> coeff_sel(compiled.coeff.out_words, 0);
+  std::vector<uint64_t> selectors_block(pieces * block_sz, 0);
+  std::vector<uint64_t> sel_vec;
+  std::vector<uint64_t> rhs_vec;
+  std::vector<uint64_t> prod_vec;
+  std::vector<uint64_t> bool_piece_block;
 
-  for (size_t i = 0; i < N; i++) {
-    const auto& wrap_vars = k.wrap_share;
-
-    auto get_pred = [&](size_t idx) -> uint64_t {
-      return (idx < preds_i.size()) ? preds_i[idx] : 0ull;
-    };
-
-    for (size_t qi = 0; qi < compiled.pred.queries.size(); qi++) {
-      preds_i[qi] = pred_bits_xor[qi * N + i] & 1ull;
+  for (size_t blk = 0; blk < N; blk += block_sz) {
+    size_t bsize = std::min(block_sz, N - blk);
+    std::fill(selectors_block.begin(), selectors_block.end(), 0ull);
+    if (compiled.ell > 0 && pieces > 0) {
+      bool_piece_block.assign(pieces * static_cast<size_t>(compiled.ell) * bsize, 0ull);
     }
-    for (size_t ci = 0; ci < k.cut_pred_keys.size(); ci++) {
-      cut_i[ci] = cut_bits_xor[ci * N + i] & 1ull;
-    }
-    selectors = selectors_from_cutbits(cut_i, party, mul_single);
-    bit_idx = 0; // reset for each element
 
-    // Bool outputs (selector-weighted)
-    for (int j = 0; j < compiled.ell; j++) {
-      uint64_t accb = 0;
-      for (size_t p = 0; p < selectors.size(); p++) {
-        if (p >= compiled.bool_per_piece.size()) break;
-        uint64_t bx = gates::eval_bool_xor_view(compiled.bool_per_piece[p][static_cast<size_t>(j)], get_pred, wrap_vars, mul_single, k.bit_triples.data(), &bit_idx) & 1ull;
-        uint64_t badd = gates::b2a_bit(bx, party, mul_single);
-        uint64_t term = mul_single.mul(selectors[p], badd);
-        accb = proto::add_mod(accb, term);
+    // Block-batched selectors from cut bits.
+    selectors_from_cutbits_block(cut_bits_xor.data(), k.cut_pred_keys.size(), N, blk, bsize,
+                                 party, mul_single, selectors_block.data(), block_sz);
+
+    // Per-element predicates -> bool DAG to additive bits.
+    for (size_t off = 0; off < bsize; off++) {
+      size_t i = blk + off;
+      const auto& wrap_vars = k.wrap_share;
+      auto get_pred = [&](size_t idx) -> uint64_t {
+        return (idx < preds_i.size()) ? preds_i[idx] : 0ull;
+      };
+      for (size_t qi = 0; qi < compiled.pred.queries.size(); qi++) {
+        preds_i[qi] = pred_bits_xor[qi * N + i] & 1ull;
       }
-      out.bool_share[i * compiled.ell + static_cast<size_t>(j)] = accb;
+
+      if (compiled.ell > 0 && pieces > 0) {
+        size_t bit_idx = 0;  // reset for each element, matching legacy order
+        for (size_t p = 0; p < pieces && p < compiled.bool_per_piece.size(); p++) {
+          const auto& exprs = compiled.bool_per_piece[p];
+          if (exprs.empty()) continue;
+          for (int j = 0; j < compiled.ell; j++) {
+            uint64_t bx =
+                gates::eval_bool_xor_view(exprs[static_cast<size_t>(j)],
+                                          get_pred, wrap_vars, mul_single,
+                                          bit_ptr, &bit_idx) &
+                1ull;
+            uint64_t badd = gates::b2a_bit(bx, party, mul_single);
+            bool_piece_block[(p * static_cast<size_t>(compiled.ell) + static_cast<size_t>(j)) * bsize + off] = badd;
+          }
+        }
+      }
     }
-    // Horner with selector-weighted coeffs
-    int stride = compiled.degree + 1;
-    uint64_t rin = r_in_at(k, i);
-    uint64_t x_share = (party == 0) ? proto::sub_mod(in.hatx[i], rin)
-                                    : proto::sub_mod(0ull, rin);
-    std::fill(coeff_sel.begin(), coeff_sel.end(), 0ull);
-    for (size_t p = 0; p < selectors.size(); p++) {
+
+    // Selector-weighted bool outputs (batched over block).
+    if (compiled.ell > 0 && pieces > 0) {
+      sel_vec.resize(bsize);
+      rhs_vec.resize(bsize);
+      for (size_t p = 0; p < pieces && p < compiled.bool_per_piece.size(); p++) {
+        for (size_t off = 0; off < bsize; off++) {
+          sel_vec[off] = selectors_block[p * block_sz + off];
+        }
+        for (int j = 0; j < compiled.ell; j++) {
+          for (size_t off = 0; off < bsize; off++) {
+            rhs_vec[off] =
+                bool_piece_block[(p * static_cast<size_t>(compiled.ell) + static_cast<size_t>(j)) * bsize + off];
+          }
+          mul_single.mul_batch(sel_vec, rhs_vec, prod_vec);
+          for (size_t off = 0; off < bsize; off++) {
+            size_t out_idx = (blk + off) * compiled.ell + static_cast<size_t>(j);
+            out.bool_share[out_idx] = proto::add_mod(out.bool_share[out_idx], prod_vec[off]);
+          }
+        }
+      }
+    }
+
+    // Selector-weighted coefficient selection (batched over block).
+    std::vector<uint64_t> coeff_sel_block(static_cast<size_t>(compiled.coeff.out_words) * bsize, 0ull);
+    sel_vec.resize(bsize);
+    rhs_vec.resize(bsize);
+    for (size_t p = 0; p < pieces; p++) {
+      for (size_t off = 0; off < bsize; off++) {
+        sel_vec[off] = selectors_block[p * block_sz + off];
+      }
       for (int j = 0; j < compiled.coeff.out_words; j++) {
-        uint64_t term = mul_single.mul(selectors[p], coeff_table[p][static_cast<size_t>(j)]);
-        coeff_sel[static_cast<size_t>(j)] = proto::add_mod(coeff_sel[static_cast<size_t>(j)], term);
+        uint64_t cshare = coeff_table[p][static_cast<size_t>(j)];
+        for (size_t off = 0; off < bsize; off++) rhs_vec[off] = cshare;
+        mul_single.mul_batch(sel_vec, rhs_vec, prod_vec);
+        for (size_t off = 0; off < bsize; off++) {
+          coeff_sel_block[static_cast<size_t>(j) * bsize + off] =
+              proto::add_mod(coeff_sel_block[static_cast<size_t>(j) * bsize + off], prod_vec[off]);
+        }
       }
     }
+
+    // Batched Horner over the block.
+    std::vector<uint64_t> x_share_vec(bsize);
+    for (size_t off = 0; off < bsize; off++) {
+      size_t i = blk + off;
+      uint64_t rin = r_in_at(k, i);
+      x_share_vec[off] = (party == 0) ? proto::sub_mod(in.hatx[i], rin)
+                                      : proto::sub_mod(0ull, rin);
+    }
+    std::vector<uint64_t> acc_vec(bsize);
     for (int j = 0; j < compiled.r; j++) {
-      uint64_t acc = coeff_sel[static_cast<size_t>(j * stride + compiled.degree)];
-      for (int d = compiled.degree - 1; d >= 0; d--) {
-        acc = mul_single.mul(acc, x_share);
-        acc = proto::add_mod(acc, coeff_sel[static_cast<size_t>(j * stride + d)]);
+      size_t base = static_cast<size_t>(j * stride);
+      for (size_t off = 0; off < bsize; off++) {
+        acc_vec[off] =
+            coeff_sel_block[(base + static_cast<size_t>(compiled.degree)) * bsize + off];
       }
-      out.haty_share[i * compiled.r + static_cast<size_t>(j)] = proto::add_mod(acc, k.r_out_share[static_cast<size_t>(j)]);
+      for (int d = compiled.degree - 1; d >= 0; d--) {
+        mul_single.mul_batch(acc_vec, x_share_vec, prod_vec);
+        for (size_t off = 0; off < bsize; off++) {
+          acc_vec[off] =
+              proto::add_mod(prod_vec[off],
+                             coeff_sel_block[(base + static_cast<size_t>(d)) * bsize + off]);
+        }
+      }
+      for (size_t off = 0; off < bsize; off++) {
+        size_t i = blk + off;
+        out.haty_share[i * compiled.r + static_cast<size_t>(j)] =
+            proto::add_mod(acc_vec[off], k.r_out_share[static_cast<size_t>(j)]);
+      }
     }
   }
   if (staged && want_device_out) {

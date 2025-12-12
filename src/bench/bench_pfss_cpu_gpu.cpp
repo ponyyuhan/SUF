@@ -59,19 +59,24 @@ BenchResult bench_once(proto::PfssBackendBatch& be0,
                        const std::vector<uint64_t>& hatx,
                        int frac_bits,
                        int reps) {
-  gates::FaithfulTruncPostProc hook;
-  hook.f = frac_bits;
   auto run = [&]() {
+    // Post-proc hooks are mutated/configured by composite_eval_batch_with_postproc
+    // (e.g., r_hi_share is party-specific), so each party needs its own instance.
+    gates::FaithfulTruncPostProc hook0;
+    gates::FaithfulTruncPostProc hook1;
+    hook0.f = frac_bits;
+    hook1.f = frac_bits;
+
     ProtoLocalChan::Shared sh;
     ProtoLocalChan c0(&sh, true), c1(&sh, false);
     gates::CompositeBatchInput in{hatx.data(), hatx.size(), nullptr};
     gates::CompositeBatchOutput o0, o1;
     std::thread t([&]() {
       o1 = gates::composite_eval_batch_with_postproc(
-          1, be1, c1, kp.k1, suf_gap, in, hook);
+          1, be1, c1, kp.k1, suf_gap, in, hook1);
     });
     o0 = gates::composite_eval_batch_with_postproc(
-        0, be0, c0, kp.k0, suf_gap, in, hook);
+        0, be0, c0, kp.k0, suf_gap, in, hook0);
     t.join();
     return std::make_pair(o0, o1);
   };
@@ -215,19 +220,19 @@ int main(int argc, char** argv) {
       std::cout << "[PFSS bench] CPU correctness run...\n";
       ProtoLocalChan::Shared sh_chk;
       ProtoLocalChan c0_chk(&sh_chk, true), c1_chk(&sh_chk, false);
-      gates::FaithfulTruncPostProc hook_chk;
-      hook_chk.f = frac_bits;
-      hook_chk.r_in = kp_cpu.k0.compiled.r_in;
-      hook_chk.r_hi_share = kp_cpu.k0.r_hi_share;
+      gates::FaithfulTruncPostProc hook_chk0;
+      gates::FaithfulTruncPostProc hook_chk1;
+      hook_chk0.f = frac_bits;
+      hook_chk1.f = frac_bits;
       gates::CompositeBatchInput in{hatx_cpu.data(), N, nullptr};
       std::exception_ptr cpu_exc;
       gates::CompositeBatchOutput out_cpu1;
       std::thread cpu_p1([&]() {
         try {
-          out_cpu1 = gates::composite_eval_batch_with_postproc(1, cpu, c1_chk, kp_cpu.k1, suf_cpu, in, hook_chk);
+          out_cpu1 = gates::composite_eval_batch_with_postproc(1, cpu, c1_chk, kp_cpu.k1, suf_cpu, in, hook_chk1);
         } catch (...) { cpu_exc = std::current_exception(); }
       });
-      auto out_cpu0 = gates::composite_eval_batch_with_postproc(0, cpu, c0_chk, kp_cpu.k0, suf_cpu, in, hook_chk);
+      auto out_cpu0 = gates::composite_eval_batch_with_postproc(0, cpu, c0_chk, kp_cpu.k0, suf_cpu, in, hook_chk0);
       cpu_p1.join();
       if (cpu_exc) std::rethrow_exception(cpu_exc);
       std::vector<uint64_t> expected(N);
@@ -258,10 +263,10 @@ int main(int argc, char** argv) {
         }
         std::thread gpu_p1([&]() {
           try {
-            out_gpu1 = gates::composite_eval_batch_with_postproc(1, *gpu1, c1g, kp_gpu->k1, suf_gpu, in_gpu, hook_chk);
+            out_gpu1 = gates::composite_eval_batch_with_postproc(1, *gpu1, c1g, kp_gpu->k1, suf_gpu, in_gpu, hook_chk1);
           } catch (...) { gpu_exc = std::current_exception(); }
         });
-        auto out_gpu0 = gates::composite_eval_batch_with_postproc(0, *gpu0, c0g, kp_gpu->k0, suf_gpu, in_gpu, hook_chk);
+        auto out_gpu0 = gates::composite_eval_batch_with_postproc(0, *gpu0, c0g, kp_gpu->k0, suf_gpu, in_gpu, hook_chk0);
         if (s && ev_end) cudaEventRecord(ev_end, s);
         gpu_p1.join();
         if (gpu_exc) std::rethrow_exception(gpu_exc);
