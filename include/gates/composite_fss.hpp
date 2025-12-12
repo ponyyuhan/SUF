@@ -121,10 +121,10 @@ struct CompositeKeyPair {
 };
 
 inline uint64_t r_in_at(const CompositePartyKey& k, size_t idx) {
-  if (!k.r_in_share_vec.empty()) {
-    if (idx >= k.r_in_share_vec.size()) throw std::runtime_error("r_in_share_vec too short");
+  if (!k.r_in_share_vec.empty() && idx < k.r_in_share_vec.size()) {
     return k.r_in_share_vec[idx];
   }
+  // Fallback to scalar share when per-element masks are absent or undersized.
   return k.r_in_share;
 }
 
@@ -211,12 +211,20 @@ inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t
                                                          uint64_t r_in,
                                                          const std::vector<uint64_t>& r_out,
                                                          size_t batch_N = 1,
-                                                         compiler::GateKind gate_kind = compiler::GateKind::SiLUSpline) {
+                                                         compiler::GateKind gate_kind = compiler::GateKind::SiLUSpline,
+                                                         int pred_eff_bits_hint = 0,
+                                                         int coeff_eff_bits_hint = 0) {
   if (r_out.size() != static_cast<size_t>(F.r_out)) {
     throw std::runtime_error("composite_gen_backend_with_masks: r_out size mismatch");
   }
   auto compiled = compiler::compile_suf_to_pfss_two_programs(
       F, r_in, r_out, compiler::CoeffMode::kStepDcf, gate_kind);
+  if (pred_eff_bits_hint > 0 && pred_eff_bits_hint <= compiled.pred.n) {
+    compiled.pred.eff_bits = pred_eff_bits_hint;
+  }
+  if (coeff_eff_bits_hint > 0 && coeff_eff_bits_hint <= compiled.coeff.n) {
+    compiled.coeff.eff_bits = coeff_eff_bits_hint;
+  }
 
   auto split_add = [&](uint64_t v) {
     uint64_t s0 = rng();

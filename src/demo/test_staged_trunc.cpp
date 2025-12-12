@@ -79,7 +79,7 @@ int main() {
                          runtime::OpenCollector& opens,
                          LocalChan& net) {
       runtime::StagedExecutor se;
-      runtime::PhaseResources R;
+      runtime::PhaseResources R{};
       R.party = party;
       runtime::ProtoChanFromNet pch(net);
       R.pfss_backend = &backend;

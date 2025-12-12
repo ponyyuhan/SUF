@@ -3,6 +3,7 @@
 #include <memory>
 #include <random>
 #include <vector>
+#include <limits>
 
 #include "compiler/suf_to_pfss.hpp"
 #include "gates/composite_fss.hpp"
@@ -57,9 +58,24 @@ inline RecipTaskMaterial dealer_make_recip_task_material(proto::PfssBackendBatch
   double nmax = 1024.0;
   auto spec = make_recip_affine_init_spec(frac_bits, nmax);
   auto suf_gate = suf::build_silu_suf_from_piecewise(spec);
+  // eff_bits hint: ignore the +inf sentinel interval end (max int64).
+  uint64_t sentinel = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+  uint64_t max_end = 0;
+  for (const auto& iv : spec.intervals) {
+    if (iv.end == sentinel) continue;
+    max_end = std::max(max_end, iv.end);
+  }
+  auto bits_mag = [](uint64_t v) {
+    int bits = 0;
+    while (v) { v >>= 1; bits++; }
+    return std::max(bits, 1);
+  };
+  int eff_bits = std::min(bits_mag(max_end) + 1, 64);
   std::vector<uint64_t> r_out(static_cast<size_t>(suf_gate.r_out), 0ull);
   auto kp = gates::composite_gen_backend_with_masks(
-      suf_gate, backend, rng, /*r_in=*/0ull, r_out, batch_N, compiler::GateKind::Reciprocal);
+      suf_gate, backend, rng, /*r_in=*/0ull, r_out, batch_N, compiler::GateKind::Reciprocal,
+      /*pred_eff_bits_hint=*/eff_bits,
+      /*coeff_eff_bits_hint=*/eff_bits);
   kp.k0.compiled.gate_kind = compiler::GateKind::Reciprocal;
   kp.k1.compiled.gate_kind = compiler::GateKind::Reciprocal;
   std::fill(kp.k0.r_out_share.begin(), kp.k0.r_out_share.end(), 0ull);

@@ -397,7 +397,7 @@ void attention_forward(const AttentionConfig& cfg,
   auto trunc_qkv_bundle =
       compiler::lower_truncation_gate(ctx->trunc_backend(), rng_qkv, trunc_params_qkv, qkv.size());
   {
-    runtime::PhaseResources truncR;
+    runtime::PhaseResources truncR{};
     runtime::ProtoChanFromNet pch(*pfss_nc);
     truncR.party = party;
     truncR.net_chan = &ch;
@@ -413,8 +413,13 @@ void attention_forward(const AttentionConfig& cfg,
     pfss_lim.max_pending_hatx_words = 1ull << 20;
     pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
     pfss_lim.max_flushes = 1ull << 9;
-    if (ctx && ctx->uses_gpu_backend() && ctx->pfss_gpu_stager) {
-      pfss_lim.max_pending_device_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
+    if (ctx && ctx->uses_gpu_backend()) {
+      pfss_lim.max_pending_jobs = 1ull << 15;
+      pfss_lim.max_pending_hatx_words = 1ull << 22;
+      pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
+      if (ctx->pfss_gpu_stager) {
+        pfss_lim.max_pending_device_bytes = pfss_lim.max_pending_hatx_bytes;
+      }
     }
     pe->pfss_trunc_batch().set_limits(pfss_lim);
     runtime::OpenCollector::Limits open_lim;
@@ -461,7 +466,7 @@ void attention_forward(const AttentionConfig& cfg,
   std::optional<compiler::TruncationLoweringResult> prob_gapars;
   std::optional<compiler::TruncationLoweringResult> prob_faithful;
   runtime::TruncChoice prob_choice{};
-  runtime::PhaseResources phase_R;
+  runtime::PhaseResources phase_R{};
   phase_R.party = party;
   phase_R.net_chan = &ch;
   runtime::ProtoChanFromNet pch(*pfss_nc);
@@ -473,13 +478,23 @@ void attention_forward(const AttentionConfig& cfg,
     pfss_lim.max_pending_hatx_words = 1ull << 20;
     pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
     pfss_lim.max_flushes = 1ull << 9;
-    if (ctx && ctx->uses_gpu_backend() && ctx->pfss_gpu_stager) {
-      pfss_lim.max_pending_device_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
-    }
-    // Slightly larger hatx cap for causal bytes regression to avoid early triple exhaustion.
-    if (ctx && ctx->force_eager_pfss) {
-      pfss_lim.max_pending_hatx_words = 1ull << 21;
+    if (ctx && ctx->uses_gpu_backend()) {
+      pfss_lim.max_pending_jobs = 1ull << 15;
+      pfss_lim.max_pending_hatx_words = 1ull << 22;
       pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
+      if (ctx->pfss_gpu_stager) {
+        pfss_lim.max_pending_device_bytes = pfss_lim.max_pending_hatx_bytes;
+      }
+    }
+    // Slightly larger hatx cap for eager/casual regressions to avoid early triple exhaustion.
+    if (ctx && ctx->force_eager_pfss) {
+      pfss_lim.max_pending_hatx_words =
+          std::max<size_t>(pfss_lim.max_pending_hatx_words,
+                           static_cast<size_t>(1ull << 21));
+      pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
+      if (ctx->uses_gpu_backend() && ctx->pfss_gpu_stager) {
+        pfss_lim.max_pending_device_bytes = pfss_lim.max_pending_hatx_bytes;
+      }
     }
     pe->pfss_coeff_batch().set_limits(pfss_lim);
     pe->pfss_trunc_batch().set_limits(pfss_lim);
@@ -1036,7 +1051,7 @@ void attention_forward(const AttentionConfig& cfg,
   auto trunc_out_bundle =
       compiler::lower_truncation_gate(ctx->trunc_backend(), rng_out, trunc_params_out, Y_share.numel());
   {
-    runtime::PhaseResources truncR;
+    runtime::PhaseResources truncR{};
     runtime::ProtoChanFromNet pch(*pfss_nc);
     truncR.party = party;
     truncR.net_chan = &ch;

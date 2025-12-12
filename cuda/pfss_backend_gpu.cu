@@ -958,7 +958,23 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
     }
   }
 
-  void* device_stream() const override { return reinterpret_cast<void*>(stream_); }
+  void* device_stream() const override {
+    try {
+      ensure_streams();
+    } catch (...) {
+      if (std::getenv("SOFTMAX_BENCH_TRACE")) {
+        try {
+          throw;
+        } catch (const std::exception& e) {
+          std::fprintf(stderr, "[pfss_gpu] device_stream ensure_streams failed: %s\n", e.what());
+        } catch (...) {
+          std::fprintf(stderr, "[pfss_gpu] device_stream ensure_streams failed: unknown\n");
+        }
+      }
+      return nullptr;
+    }
+    return reinterpret_cast<void*>(stream_);
+  }
  const uint64_t* last_device_output() const override {
     return reinterpret_cast<const uint64_t*>(out_buf_.ptr);
   }

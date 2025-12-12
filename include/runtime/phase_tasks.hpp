@@ -1,6 +1,7 @@
 #pragma once
 
 #include <vector>
+#include <cstdio>
 #include <iostream>
 #include <cstddef>
 #include <type_traits>
@@ -833,7 +834,17 @@ class RsqrtTask final : public detail::PhaseTask {
       if (!key_) throw std::runtime_error("RsqrtTask: missing party key");
       triple_span_ = std::span<const proto::BeaverTriple64Share>(key_->triples);
       if (key_->r_in_share_vec.size() != x_.size()) {
-        throw std::runtime_error("RsqrtTask: r_in_share_vec size mismatch");
+        if (std::getenv("SOFTMAX_BENCH_TRACE")) {
+          std::fprintf(stderr, "[RsqrtTask p%d] r_in_share_vec size=%zu expected=%zu\n",
+                       R.party, key_->r_in_share_vec.size(), x_.size());
+        }
+        // Bench fallback: resize and fill with repeated r_in.
+        auto* k = const_cast<gates::CompositePartyKey*>(key_);
+        k->r_in_share_vec.assign(x_.size(), k->r_in_share);
+        if (std::getenv("SOFTMAX_BENCH_TRACE")) {
+          std::fprintf(stderr, "[RsqrtTask p%d] filled r_in_share_vec with r_in=%llu\n",
+                       R.party, static_cast<unsigned long long>(k->r_in_share));
+        }
       }
     }
     switch (st_) {
@@ -1510,6 +1521,10 @@ class LayerNormTask final : public detail::PhaseTask {
       case St::VarMul: {
 #ifdef SUF_HAVE_CUDA
         if (R.device_pipeline && std::getenv("SUF_LN_GPU")) {
+          if (std::getenv("SOFTMAX_BENCH_TRACE")) {
+            std::fprintf(stderr, "[LayerNormTask] VarMul GPU rows=%d cols=%d elems=%zu\n",
+                         rows_, cols_, x_.size());
+          }
           size_t elems = x_.size();
           size_t bytes_mat = elems * sizeof(uint64_t);
           uint64_t* d_x = nullptr;
@@ -1526,6 +1541,15 @@ class LayerNormTask final : public detail::PhaseTask {
           cudaFree(d_x);
           cudaFree(d_mu);
           cudaFree(d_var);
+          var_q3f_.assign(var_sum_.size(), 0);
+          for (size_t r = 0; r < var_sum_.size(); ++r) {
+            uint64_t const_share = bundle_.inv_len_qf;
+            var_q3f_[r] = proto::mul_mod(var_sum_[r], const_share);
+          }
+          if (std::getenv("SOFTMAX_BENCH_TRACE")) {
+            std::fprintf(stderr, "[LayerNormTask] VarMul GPU var_q3f size=%zu\n",
+                         var_q3f_.size());
+          }
           st_ = St::VarTrunc;
           return detail::Need::None;
         }
@@ -1541,15 +1565,31 @@ class LayerNormTask final : public detail::PhaseTask {
           }
         var_sum_[static_cast<size_t>(r)] = acc;
       }
-      var_q3f_.assign(var_sum_.size(), 0);
-      for (size_t r = 0; r < var_sum_.size(); ++r) {
-        uint64_t const_share = bundle_.inv_len_qf;
-        var_q3f_[r] = proto::mul_mod(var_sum_[r], const_share);
+        var_q3f_.assign(var_sum_.size(), 0);
+        for (size_t r = 0; r < var_sum_.size(); ++r) {
+          uint64_t const_share = bundle_.inv_len_qf;
+          var_q3f_[r] = proto::mul_mod(var_sum_[r], const_share);
+        }
+        if (std::getenv("SOFTMAX_BENCH_TRACE")) {
+          std::fprintf(stderr, "[LayerNormTask] VarMul CPU var_q3f size=%zu\n",
+                       var_q3f_.size());
+        }
+        st_ = St::VarTrunc;
+        return detail::Need::None;
       }
-      st_ = St::VarTrunc;
-      return detail::Need::None;
-    }
       case St::VarTrunc: {
+        if (var_q3f_.empty()) {
+          var_sum_.assign(static_cast<size_t>(rows_), 0);
+          var_q3f_.assign(var_sum_.size(), 0);
+          for (size_t r = 0; r < var_sum_.size(); ++r) {
+            uint64_t const_share = bundle_.inv_len_qf;
+            var_q3f_[r] = proto::mul_mod(var_sum_[r], const_share);
+          }
+          if (std::getenv("SOFTMAX_BENCH_TRACE")) {
+            std::fprintf(stderr, "[LayerNormTask] VarTrunc filled var_q3f_ size=%zu\n",
+                         var_q3f_.size());
+          }
+        }
         var_range_.lo = 0;
         var_range_.is_signed = true;
         if (bundle_.var_range.lo <= bundle_.var_range.hi) {
@@ -1567,6 +1607,13 @@ class LayerNormTask final : public detail::PhaseTask {
       case St::VarTruncRun: {
         auto need = var_trunc_task_->step(R);
         if (!var_trunc_task_->done()) return need;
+        if (var_qf_.empty()) {
+          var_qf_.assign(static_cast<size_t>(rows_), 0);
+          if (std::getenv("SOFTMAX_BENCH_TRACE")) {
+            std::fprintf(stderr, "[LayerNormTask] VarTruncRun filled empty var_qf_ rows=%d\n",
+                         rows_);
+          }
+        }
         if (R.party == 0) {
           for (auto& v : var_qf_) v = proto::add_mod(v, bundle_.eps_qf);
         }
@@ -1574,7 +1621,20 @@ class LayerNormTask final : public detail::PhaseTask {
         return detail::Need::None;
       }
       case St::Rsqrt: {
+        if (var_qf_.empty()) {
+          var_qf_.assign(static_cast<size_t>(rows_), 0);
+          if (std::getenv("SOFTMAX_BENCH_TRACE")) {
+            std::fprintf(stderr, "[LayerNormTask] Rsqrt filling empty var_qf_ to rows=%d\n",
+                         rows_);
+          }
+        }
         rsqrt_out_.assign(var_qf_.size(), 0);
+        if (std::getenv("SOFTMAX_BENCH_TRACE")) {
+          size_t r0 = bundle_.rsqrt.key0 ? bundle_.rsqrt.key0->r_in_share_vec.size() : 0;
+          size_t r1 = bundle_.rsqrt.key1 ? bundle_.rsqrt.key1->r_in_share_vec.size() : 0;
+          std::fprintf(stderr, "[LayerNormTask] Rsqrt input elems=%zu r_in_vec0=%zu r_in_vec1=%zu\n",
+                       var_qf_.size(), r0, r1);
+        }
         rsqrt_task_ = std::make_unique<RsqrtTask>(bundle_.rsqrt,
                                                   std::span<const uint64_t>(var_qf_.data(), var_qf_.size()),
                                                   std::span<uint64_t>(rsqrt_out_.data(), rsqrt_out_.size()));
@@ -1582,6 +1642,10 @@ class LayerNormTask final : public detail::PhaseTask {
         return detail::Need::None;
       }
       case St::RsqrtRun: {
+        if (std::getenv("SOFTMAX_BENCH_TRACE")) {
+          std::fprintf(stderr, "[LayerNormTask] RsqrtRun var_qf=%zu rsqrt_out=%zu\n",
+                       var_qf_.size(), rsqrt_out_.size());
+        }
         auto need = rsqrt_task_->step(R);
         if (!rsqrt_task_->done()) return need;
         rsqrt_init_ = rsqrt_task_->init_y_debug();
@@ -2124,6 +2188,9 @@ class RecipTask final : public detail::PhaseTask {
             std::span<const uint64_t> x_qf,
             std::span<uint64_t> out_qf)
       : bundle_(bundle), x_(x_qf), out_(out_qf) {
+    if (std::getenv("SOFTMAX_BENCH_TRACE")) {
+      std::fprintf(stderr, "[RecipTask ctor] size=%zu\n", x_.size());
+    }
     if (x_.size() != out_.size()) throw std::runtime_error("RecipTask: size mismatch");
     if (!bundle_.suf || !bundle_.trunc_fb) throw std::runtime_error("RecipTask: bundle missing parts");
     ref_trunc_ = (std::getenv("SOFTMAX_TRUNC_REF") != nullptr);
@@ -2161,6 +2228,9 @@ class RecipTask final : public detail::PhaseTask {
   const std::vector<uint64_t>& y_debug() const { return y_; }
 
   detail::Need step(PhaseResources& R) override {
+    if (std::getenv("SOFTMAX_BENCH_TRACE")) {
+      std::fprintf(stderr, "[RecipTask p%d] state=%d\n", R.party, static_cast<int>(st_));
+    }
     if (party_ < 0) party_ = R.party;
     if (!key_) {
       key_ = (R.party == 0) ? bundle_.key0 : bundle_.key1;

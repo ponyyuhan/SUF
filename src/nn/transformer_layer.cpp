@@ -318,6 +318,12 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   pfss_lim.max_pending_hatx_words = 1ull << 20;
   pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
   pfss_lim.max_flushes = 1ull << 10;
+  if (ctx && ctx->uses_gpu_backend()) {
+    pfss_lim.max_pending_jobs = 1ull << 15;
+    pfss_lim.max_pending_hatx_words = 1ull << 22;
+    pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
+    pfss_lim.max_pending_device_bytes = pfss_lim.max_pending_hatx_bytes;
+  }
   pe->pfss_coeff_batch().set_limits(pfss_lim);
   pe->pfss_trunc_batch().set_limits(pfss_lim);
   runtime::OpenCollector::Limits open_lim;
@@ -337,7 +343,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   assert(X_share.shape[2] == D);
 
   // Phase resources shared across tasks.
-  runtime::PhaseResources R;
+  runtime::PhaseResources R{};
   runtime::ProtoChanFromNet pch(*pfss_nc);
   R.party = party;
   R.net_chan = &ch;

@@ -91,7 +91,7 @@ int main() {
       }
 
       runtime::ProtoChanFromNet pch(net);
-      runtime::PhaseResources R;
+      runtime::PhaseResources R{};
       R.party = party;
       R.pfss_backend = backend;
       R.pfss_chan = &pch;

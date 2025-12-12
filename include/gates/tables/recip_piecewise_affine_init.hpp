@@ -22,11 +22,12 @@ inline PiecewisePolySpec make_recip_affine_init_spec(
     return static_cast<int64_t>(std::llround(y * std::ldexp(1.0, frac_bits)));
   };
 
-  // x < 1 => clamp to 1
+  // x < 1 => clamp to 1. Callers ensure x is non-negative, so we only cover
+  // [0,1) here (omit negative half to enable eff_bits packing).
   CoeffPack below;
   below.offset = 0;
   below.coeffs = {scale_y(1.0)};
-  append_interval_signed(spec, std::numeric_limits<int64_t>::min(), scale_x(1.0), below);
+  append_interval_signed(spec, /*start=*/0, scale_x(1.0), below);
 
   std::vector<double> bounds;
   bounds.push_back(1.0);

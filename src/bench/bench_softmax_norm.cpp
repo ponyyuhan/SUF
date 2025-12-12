@@ -192,12 +192,16 @@ SoftmaxResult run_softmax_party(int party,
                                 LocalChan& net_ch,
                                 std::span<const uint64_t> t_qf,
                                 bool device_only = false) {
+  if (std::getenv("SOFTMAX_BENCH_TRACE")) {
+    std::fprintf(stderr, "[bench] party %d run_softmax_party rows=%d cols=%d device_only=%d\n",
+                 party, rows, cols, device_only ? 1 : 0);
+  }
   runtime::PhaseExecutor pe;
   if (device_only) {
     pe.set_device_pipeline(true);
     pe.set_device_pipeline_materialize(false);
   }
-  runtime::PhaseResources R;
+  runtime::PhaseResources R{};
   R.party = party;
   R.pfss_backend = &backend;
   runtime::ProtoChanFromNet pch(net_ch);
@@ -217,6 +221,7 @@ SoftmaxResult run_softmax_party(int party,
   plan.cols = cols;
   plan.valid_lens = valid;
   plan.device_only = device_only;
+  plan.materialize_host = !device_only;
   plan.nexp = nexp;
   plan.recip = recip;
   plan.prob_trunc = trunc_choice;
@@ -235,6 +240,9 @@ SoftmaxResult run_softmax_party(int party,
   pe.begin_phase(runtime::PhaseExecutor::Phase::kSoftmax);
   pe.add_task(std::move(task));
   pe.run(R);
+  if (std::getenv("SOFTMAX_BENCH_TRACE")) {
+    std::fprintf(stderr, "[bench] party %d softmax finished\n", party);
+  }
 
   SoftmaxResult res;
   res.probs = std::move(out);
@@ -341,6 +349,17 @@ RsqrtMaterial make_rsqrt_material(int frac_bits,
       suf_gate, backend, rng, rng(), r_out, static_cast<size_t>(rows), compiler::GateKind::Rsqrt);
   kp.k0.compiled.gate_kind = compiler::GateKind::Rsqrt;
   kp.k1.compiled.gate_kind = compiler::GateKind::Rsqrt;
+  // Ensure r_in shares are replicated per element for RsqrtTask.
+  kp.k0.r_in_share_vec.assign(static_cast<size_t>(rows), kp.k0.r_in_share);
+  kp.k1.r_in_share_vec.assign(static_cast<size_t>(rows), kp.k1.r_in_share);
+  if (std::getenv("SOFTMAX_BENCH_TRACE")) {
+    std::fprintf(stderr, "[bench rsqrt material] rows=%d r_in_vec0=%zu r_in_vec1=%zu r_in0=%llu r_in1=%llu\n",
+                 rows,
+                 kp.k0.r_in_share_vec.size(),
+                 kp.k1.r_in_share_vec.size(),
+                 static_cast<unsigned long long>(kp.k0.r_in_share),
+                 static_cast<unsigned long long>(kp.k1.r_in_share));
+  }
 
   compiler::GateParams p;
   p.kind = compiler::GateKind::FaithfulARS;
@@ -426,6 +445,10 @@ BenchResult bench_softmax(int rows, int cols, int fb, int reps, bool device_only
                       const gates::NexpTaskMaterial& nexp_mat,
                       const gates::RecipTaskMaterial& recip_mat,
                       bool device_timing) -> std::pair<double, double> {
+    if (std::getenv("SOFTMAX_BENCH_TRACE")) {
+      std::fprintf(stderr, "[bench] run_pair start device_timing=%d device_only=%d\n",
+                   device_timing ? 1 : 0, device_only ? 1 : 0);
+    }
     LocalChan::Shared sh;
     LocalChan c0(&sh, true), c1(&sh, false);
     auto start = std::chrono::steady_clock::now();
@@ -445,8 +468,13 @@ BenchResult bench_softmax(int rows, int cols, int fb, int reps, bool device_only
     });
     float dev_ms = 0.0f;
     cudaEvent_t ev_start = nullptr, ev_end = nullptr;
-    proto::PfssGpuStagedEval* staged = device_timing ? dynamic_cast<proto::PfssGpuStagedEval*>(&be0) : nullptr;
+    bool want_dev_time = device_timing || device_only;
+    proto::PfssGpuStagedEval* staged = want_dev_time ? dynamic_cast<proto::PfssGpuStagedEval*>(&be0) : nullptr;
     cudaStream_t stream = staged ? reinterpret_cast<cudaStream_t>(staged->device_stream()) : nullptr;
+    if (std::getenv("SOFTMAX_BENCH_TRACE")) {
+      std::fprintf(stderr, "[bench] staged=%p stream=%p want_dev_time=%d\n",
+                   static_cast<void*>(staged), static_cast<void*>(stream), want_dev_time ? 1 : 0);
+    }
     if (staged) {
       if (stream == nullptr) stream = 0;
       cudaEventCreate(&ev_start);
@@ -464,6 +492,11 @@ BenchResult bench_softmax(int rows, int cols, int fb, int reps, bool device_only
       cudaEventDestroy(ev_end);
     }
     auto end = std::chrono::steady_clock::now();
+    if (std::getenv("SOFTMAX_BENCH_TRACE")) {
+      std::fprintf(stderr, "[bench] run_pair finished host_ms=%.3f dev_ms=%.3f\n",
+                   std::chrono::duration<double, std::milli>(end - start).count(),
+                   static_cast<double>(dev_ms));
+    }
     if (!device_only) {
       const char* dbg = std::getenv("SOFTMAX_BENCH_DEBUG");
       for (size_t i = 0; i < r0.probs.size(); ++i) {
@@ -510,7 +543,7 @@ BenchResult bench_softmax(int rows, int cols, int fb, int reps, bool device_only
     auto nexp_mat_gpu = gates::dealer_make_nexp_task_material(*gpu_be0, nexp_params, rng_gpu, cols * rows, cols * rows);
     auto recip_mat_gpu = gates::dealer_make_recip_task_material(*gpu_be0, fb, /*nr_iters=*/1, rng_gpu, cols * rows);
     double gpu_dev_sum = 0.0;
-    bool dev_time = (std::getenv("SUF_BENCH_DEVICE_TIME") != nullptr);
+    bool dev_time = device_only || (std::getenv("SUF_BENCH_DEVICE_TIME") != nullptr);
     setenv("SUF_SOFTMAX_GPU", "1", 0);
     setenv("SUF_LN_GPU", "1", 0);
     for (int i = 0; i < reps; ++i) {
@@ -575,7 +608,8 @@ BenchResult bench_layernorm(int rows, int cols, int fb, int reps, bool device_on
     auto start = std::chrono::steady_clock::now();
     float dev_ms = 0.0f;
     cudaEvent_t ev_start = nullptr, ev_end = nullptr;
-    proto::PfssGpuStagedEval* staged = device_timing ? dynamic_cast<proto::PfssGpuStagedEval*>(&be0) : nullptr;
+    bool want_dev_time = device_timing || device_only;
+    proto::PfssGpuStagedEval* staged = want_dev_time ? dynamic_cast<proto::PfssGpuStagedEval*>(&be0) : nullptr;
     cudaStream_t stream = staged ? reinterpret_cast<cudaStream_t>(staged->device_stream()) : nullptr;
     if (staged) {
       if (stream == nullptr) stream = 0;
@@ -643,7 +677,7 @@ BenchResult bench_layernorm(int rows, int cols, int fb, int reps, bool device_on
   if (gpu_be0 && gpu_be1) {
     auto bundle_gpu = build_layernorm_bundle(*gpu_be0, rows, cols, fb);
     double gpu_dev_sum = 0.0;
-    bool dev_time = (std::getenv("SUF_BENCH_DEVICE_TIME") != nullptr);
+    bool dev_time = device_only || (std::getenv("SUF_BENCH_DEVICE_TIME") != nullptr);
     for (int i = 0; i < reps; ++i) {
       auto [host_ms, dev_ms] = run_pair(*gpu_be0, *gpu_be1, bundle_gpu, bundle_gpu, dev_time);
       gpu_sum += host_ms;

@@ -24,7 +24,7 @@ docs/                   # milestone/设计文档
 - **运行时/状态机**：`PhaseExecutor` 循环任务队列，根据 Need(Open/PfssCoeff/PfssTrunc) flush `OpenCollector` 与 `PfssSuperBatch`（coeff+trunc 同批合并），再 finalize。`PfssPhasePlanner` 支持单次 flush+统计（attention/MLP/softmax 波次已接入）；`PfssLayerPlanner` 聚合多 phase 预算；`PfssAsyncRunner` 可选异步 flush。`StagedExecutor` 演示 softmax 跨任务的一次 PFSS flush。
 - **任务层**（`runtime/phase_tasks.hpp`）：`TruncTask`（faithful/GapARS/AutoTrunc），`CubicPolyTask`（SiLU/nExp/Recip 3 mul + 2 trunc），`RsqrtTask`（仿射初值 + NR），`LayerNormTask`（mean/var trunc + rsqrt + affine），均复用 PhaseExecutor/PfssSuperBatch。
 - **NN 路径**：`nn/attention_block.cpp`（任务化 softmax/recip/nexp + matmul trunc + KV cache），`nn/mlp_block.cpp`（两段 matmul trunc + SiLU），`nn/transformer_layer.cpp`（两次 LayerNorm + attention + MLP + 残差），`nn/layer_context.hpp` 记录 hoist/rescale/trunc 计划、GapCert、PfssSuperBatch/GPU stager。
-- **Packing hints**：`Pred/CoeffProgramDesc` 支持 `eff_bits`（默认 64）和占位 `ragged` 标记，SigmaFast packed keygen 会使用 `eff_bits`；ragged 仍未全链路实现（仅留元数据）。
+- **Packing hints**：`Pred/CoeffProgramDesc` 支持 `eff_bits`（默认 64）和 `ragged` 形状元数据；nExp/Recip keygen 会按 spec 自动给出 `eff_bits` hint，SigmaFast/GPU packed keygen 会使用更小的 `eff_bits`；ragged/causal 的 `row_offsets/valid_lens` 已在 softmax 任务与 planner 端贯穿，但具体 pack/scatter 仍由任务侧完成。
 
 ## PhaseExecutor 状态机与执行路径
 
@@ -70,9 +70,10 @@ docs/                   # milestone/设计文档
 - Milestone 1-8：SUF 语义、掩码重写、PFSS 编译/后端、组合运行时、任务化 softmax/LN/MLP/attention，全套 CPU 测试通过。
 - Milestone 11（GPU PFSS 验证/overlap）  
   - GPU 后端：AES-CTR PRG 修正，packed CDPF/vector-DPF（pred bitmask、interval LUT payload），device key 缓存，staged eval 接口曝光 compute stream。  
-  - Packed/bitmask：GPU 支持 packed predicates/cuts，eff_bits 打包 + ragged/causal 解包（`test_cuda_pack_effbits`）。  
+  - Packed/bitmask：GPU 支持 packed predicates/cuts，eff_bits 打包/解包（`test_cuda_pack_effbits`）；ragged/causal 形状元数据与 bytes 回归（`test_planner_causal_bytes`）已接入，pack/scatter 仍在任务侧。  
 - Overlap：LayerContext 暴露 PFSS compute stream，GPU matmul（BK=32/64 自适应，vec load，可用 `SUF_MATMUL_GPU_TILE=wide|narrow` 强制）走独立非阻塞流，PFSS kernel block 可调 `SUF_PFSS_GPU_BLOCK`，避免与 PFSS 流串行；`bench_gemm_overlap` 同时跑 PFSS+GEMM 并输出 PFSS/GEMM/overlap 三组计时（本机参考：PFSS≈9.99 ms、GEMM≈5.14 ms、overlap≈10.02 ms）。  
   - 软/硬回归：`test_cuda_prg`、`test_cuda_packed_pfss`、`test_cuda_pred_mask`、`test_pfss_gpu`（可开 RUN_GPU_COMPOSITE）、`test_softmax_gpu_smoke`、GapARS/Faithful trunc CUDA 等效。
+- 基准/对比：新增基准脚本与配置（见下）。
 
 ## 测试现状
 
@@ -86,16 +87,18 @@ docs/                   # milestone/设计文档
 - 任务：`runtime/phase_tasks.hpp`（Trunc/CubicPoly/Rsqrt/LayerNorm），`nn/softmax_block_task(_staged).hpp`。
 - 后端：`gates/composite_fss.hpp`（Composite key/eval），`proto/backend_*`（clear/myl7/sigmafast/gpu）。
 - GPU：`cuda/pfss_kernels.cu`（AES-CTR、packed compare/LUT、eff_bits 解包），`cuda/pfss_backend_gpu.cu`（device key + staged eval），`src/nn/matmul_gpu.cu`（流感知 matmul），`src/bench/bench_gemm_overlap.cpp`。
+- Bench/对标：`bench/run_sigma_vs_suf.py`（统一 orchestrator），`bench/configs/sigma_vs_suf.json`（模型/参数预设），`scripts/describe_hardware.py`（记录硬件 JSON），`scripts/build_sigma.sh`（辅助构建 Sigma），`src/demo/bench_suf_transformer.cpp`（单层 transformer forward 基准，输出 Sigma 兼容 JSON 日志）。
 
 ## 当前难点与风险
 
 - GapCert/范围仍保守，限制更激进的 hoist 与 AutoTrunc 选择。
 - Super-plan/packing 仍是 phase/layer 粒度，未做跨 phase 融合或更细的 stall/bytes 驱动 flush，causal/ragged 预算可进一步收紧。
 - GPU 性能：matmul 仍为简化 tiling，未用 WMMA/半精度拆半；PFSS/GEMM overlap 需更稳的 stream/pipeline；Beaver/三元组/GPU 缓存策略尚浅。
-- Ragged packing 尚未全链路打通（仅元数据占位），eff_bits 需要 planner 输入才能生效。
+- Ragged packing 仍主要由任务侧 pack/scatter（PFSS job 只携带元数据）；eff_bits 已在 nExp/Recip 等正域门上自动生效，其它门若需缩 bitwidth 仍要先裁剪不可达区间/提供安全的范围证明。
 
 ## 后续建议
 
 1) 完善 super-plan 与 bytes/packing 预算（含 causal/ragged）、增加 planner 回归。  
 2) 收紧 GapCert/abs 界并贯穿更多算子，提升 GapARS 覆盖面。  
 3) GPU 性能：引入 WMMA/半精度拆半、SoA 打包、Beaver/三元组缓存；精炼 PFSS/GEMM pipeline（事件/双流）与更丰富基准；驱动 eff_bits/ragged packing 到 planner 与 PFSS pack/unpack。  
+4) 完整对标 Sigma：扩展 `bench_suf_transformer` 到多层/真实权重（或加载 HF 权重），补全预处理时间/字节统计与更细的非线性计数，在统一 orchestrator 下产出 CSV/JSONL。

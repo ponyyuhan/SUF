@@ -92,7 +92,7 @@ int main() {
 
   auto run_party = [&](int party, const std::vector<uint64_t>& in, LocalChan& net_ch) {
     runtime::PhaseExecutor pe;
-    runtime::PhaseResources R;
+    runtime::PhaseResources R{};
     R.party = party;
     R.pfss_backend = &backend;
     runtime::ProtoChanFromNet pch(net_ch);

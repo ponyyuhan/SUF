@@ -285,7 +285,7 @@ void mlp_forward(const MLPConfig& cfg,
 
   bool use_phase = (ctx && pe && ctx->trunc_ctx);
   std::vector<uint64_t> hidden_scaled = hidden;
-  runtime::PhaseResources R;
+  runtime::PhaseResources R{};
   runtime::ProtoChanFromNet pch(*pfss_nc);
   runtime::PfssPhasePlanner pfss_phase_planner;
   if (use_phase) {
@@ -301,8 +301,13 @@ void mlp_forward(const MLPConfig& cfg,
     pfss_lim.max_pending_hatx_words = 1ull << 20;
     pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
     pfss_lim.max_flushes = 1ull << 9;
-    if (ctx && ctx->uses_gpu_backend() && ctx->pfss_gpu_stager) {
-      pfss_lim.max_pending_device_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
+    if (ctx && ctx->uses_gpu_backend()) {
+      pfss_lim.max_pending_jobs = 1ull << 15;
+      pfss_lim.max_pending_hatx_words = 1ull << 22;
+      pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
+      if (ctx->pfss_gpu_stager) {
+        pfss_lim.max_pending_device_bytes = pfss_lim.max_pending_hatx_bytes;
+      }
     }
     pe->pfss_coeff_batch().set_limits(pfss_lim);
     pe->pfss_trunc_batch().set_limits(pfss_lim);

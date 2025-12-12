@@ -49,11 +49,9 @@ inline PiecewisePolySpec make_nexp_piecewise_spec(int frac_bits = 16, int segmen
     return static_cast<int64_t>(std::llround(x * std::ldexp(1.0, frac_bits)));
   };
 
-  // t < 0 -> clamp to 0 (exp(0)=1)
-  CoeffPack below;
-  below.offset = 0;
-  below.coeffs = {static_cast<int64_t>(1ll << frac_bits)};
-  append_interval_signed(spec, std::numeric_limits<int64_t>::min(), scale_x(lo), below);
+  // t < 0 -> clamp to 0 (exp(0)=1).
+  // In all current callers, t is already clamped to [0, hi], so we omit the
+  // negative-domain interval to enable eff_bits packing.
 
   for (int i = 0; i < segments; ++i) {
     double start = lo + step * static_cast<double>(i);

@@ -1,0 +1,12 @@
+{
+  "models": ["bert-base", "bert-large", "gpt2", "gpt-neo-1.3b"],
+  "seq_lens": [128],
+  "batch_sizes": [1],
+  "backends": ["cpu", "gpu"],
+  "n_iters": 5,
+  "sigma_root": "external/sigma_ezpc/GPU-MPC",
+  "results_dir": "bench/results",
+  "suf_binary": "build_ninja/bench_suf_transformer",
+  "sigma_binary": "build_gpu/bin/sigma_run_model",
+  "notes": "Adjust paths/backends as needed; this is a starter config generated from bench.md."
+}

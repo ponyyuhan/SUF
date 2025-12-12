@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdio>
 #include <memory>
 #include <vector>
 #include <optional>
@@ -14,7 +15,8 @@ struct SoftmaxPlan {
   int rows = 0;
   int cols = 0;
   std::vector<int> valid_lens;  // optional row-wise lengths; empty => dense
-  bool device_only = false;     // optional: skip host materialization in device-only benches
+  bool device_only = false;     // optional: skip host materialization entirely
+  bool materialize_host = true; // if false and device output exists, keep device only
   runtime::CubicPolyBundle nexp;
   runtime::RecipTaskBundle recip;
   runtime::TruncChoice prob_trunc;
@@ -68,6 +70,17 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
 #endif
 
   runtime::detail::Need step(runtime::PhaseResources& R) override {
+#ifdef SUF_HAVE_CUDA
+    bool trace = (std::getenv("SOFTMAX_BENCH_TRACE") != nullptr);
+#else
+    bool trace = (std::getenv("SOFTMAX_BENCH_TRACE") != nullptr);
+#endif
+    if (trace) {
+      std::fprintf(stderr, "[SoftmaxTask] state=%d device_only=%d pipeline=%d materialize=%d\n",
+                   static_cast<int>(st_), plan_.device_only ? 1 : 0,
+                   R.device_pipeline ? 1 : 0,
+                   plan_.materialize_host ? 1 : 0);
+    }
     switch (st_) {
       case St::ExpInit: {
         build_offsets();
@@ -147,6 +160,11 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
           prob_abs_.is_signed = true;
           prob_abs_.max_abs = static_cast<uint64_t>(1ull << plan_.frac_bits);
           prob_abs_.kind = compiler::RangeKind::Proof;
+          inv_qf_.resize(plan_.rows);
+          recip_task_ = std::make_unique<runtime::RecipTask>(
+              plan_.recip,
+              std::span<const uint64_t>(sum_qf_.data(), sum_qf_.size()),
+              std::span<uint64_t>(inv_qf_.data(), inv_qf_.size()));
           st_ = St::RecipRun;
           return runtime::detail::Need::None;
         }
@@ -168,6 +186,10 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
         return runtime::detail::Need::None;
       }
       case St::RecipRun: {
+        if (trace) {
+          std::fprintf(stderr, "[SoftmaxTask] calling RecipTask step rows=%d cols=%d\n",
+                       plan_.rows, plan_.cols);
+        }
         auto need = recip_task_->step(R);
         if (!recip_task_->done()) return need;
         prod_q2f_.resize(exp_qf_.size());
@@ -235,7 +257,7 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
 #ifdef SUF_HAVE_CUDA
         // If we kept the MulRow output on device and are in device pipeline mode,
         // pass the device pointer into TruncTask so PFSS can skip re-upload.
-        if (plan_.device_only && R.device_pipeline && d_prod_device_) {
+        if (R.device_pipeline && d_prod_device_) {
           trunc_task_->set_device_input(d_prod_device_, d_prod_elems_);
         }
 #endif
@@ -262,12 +284,15 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
         // In device-pipeline mode, pull trunc outputs back to host and free device buffer.
         if (R.device_pipeline) {
           if (auto* dptr = trunc_task_->device_out()) {
-            size_t n = prob_packed_.empty() ? prob_qf_.size() : prob_packed_.size();
             size_t have = trunc_task_->device_out_elems();
-            n = std::min(n, have);
-            uint64_t* dst = prob_packed_.empty() ? prob_qf_.data() : prob_packed_.data();
-            cudaMemcpy(dst, dptr, n * sizeof(uint64_t), cudaMemcpyDeviceToHost);
-            trunc_task_->release_device_out();
+            // Always keep device buffer for optional downstream consumers.
+            d_prob_device_ = trunc_task_->take_device_out(&d_prob_elems_);
+            if (plan_.materialize_host) {
+              size_t n = prob_packed_.empty() ? prob_qf_.size() : prob_packed_.size();
+              n = std::min(n, have);
+              uint64_t* dst = prob_packed_.empty() ? prob_qf_.data() : prob_packed_.data();
+              cudaMemcpy(dst, d_prob_device_, n * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+            }
           }
         }
 #endif

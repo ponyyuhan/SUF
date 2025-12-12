@@ -406,7 +406,7 @@ auto run_party = [&](int party, const runtime::RsqrtTaskBundle& rsqrt_bundle,
   b.row_triples = rb;
 
   runtime::PhaseExecutor pe;
-  runtime::PhaseResources R;
+  runtime::PhaseResources R{};
   R.party = party;
   R.pfss_backend = &backend;
   runtime::ProtoChanFromNet pch(party == 0 ? c0 : c1);

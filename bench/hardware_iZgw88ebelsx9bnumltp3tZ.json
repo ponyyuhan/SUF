@@ -1,0 +1,18 @@
+{
+  "hostname": "iZgw88ebelsx9bnumltp3tZ",
+  "cpu": {
+    "model": "Intel(R) Xeon(R) Platinum 8369B CPU @ 2.90GHz",
+    "cores": 4,
+    "ram_gb": 7.38
+  },
+  "gpus": [
+    {
+      "name": "NVIDIA A10-2Q",
+      "memory_gb": 1.8447265625,
+      "cuda_driver": "470.256.03"
+    }
+  ],
+  "network": {
+    "ping_ms": 0.015
+  }
+}

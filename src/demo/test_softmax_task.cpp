@@ -141,7 +141,7 @@ PartyResult run_party(int party,
                       net::Chan& chan,
                       const std::vector<int>& valid_lens) {
   runtime::PhaseExecutor pe;
-  runtime::PhaseResources R;
+  runtime::PhaseResources R{};
   R.party = party;
   runtime::ProtoChanFromNet pch(chan);
   R.pfss_backend = &backend;
@@ -476,7 +476,7 @@ int main() {
     std::vector<uint64_t> probs_a(rows * cols, 0);
     std::vector<uint64_t> probs_b(rows * cols, 0);
     runtime::PhaseExecutor pe;
-    runtime::PhaseResources R;
+    runtime::PhaseResources R{};
     R.party = 0;
     runtime::ProtoChanFromNet pch(c0);
     R.pfss_backend = &backend;

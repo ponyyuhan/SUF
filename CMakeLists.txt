@@ -241,6 +241,7 @@ add_library(nn_ops STATIC
   src/nn/attention_block.cpp
   src/nn/mlp_block.cpp
   src/nn/transformer_layer.cpp
+  src/nn/model_specs.cpp
   src/gates/postproc_hooks.cpp
   src/runtime/pfss_superbatch.cpp
   src/runtime/open_collector.cpp
@@ -312,6 +313,7 @@ target_link_libraries(test_planner_causal PRIVATE nn_ops compiler_passes suf_fss
 add_executable(test_planner_causal_bytes src/demo/test_planner_causal_bytes.cpp)
 target_include_directories(test_planner_causal_bytes PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_planner_causal_bytes PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
+add_test(NAME test_planner_causal_bytes COMMAND test_planner_causal_bytes)
 
 if(HAVE_SUF_CUDA)
 add_executable(test_pfss_gpu src/demo/test_pfss_gpu.cpp)
@@ -383,6 +385,10 @@ endif()
 add_executable(bench_truncation src/bench/bench_truncation.cpp)
 target_include_directories(bench_truncation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(bench_truncation PRIVATE suf_fss ${MYL7_LINK_LIBS})
+
+add_executable(bench_suf_transformer src/demo/bench_suf_transformer.cpp)
+target_include_directories(bench_suf_transformer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(bench_suf_transformer PRIVATE nn_ops)
 
 if(HAVE_MYL7_FSS)
 add_executable(test_myl7_bit_order src/demo/test_myl7_bit_order.cpp)

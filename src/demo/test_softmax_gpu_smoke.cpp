@@ -201,7 +201,7 @@ SoftmaxResult run_party(int party,
                         net::Chan& chan,
                         const std::vector<int>& valid_lens) {
   runtime::PhaseExecutor pe;
-  runtime::PhaseResources R;
+  runtime::PhaseResources R{};
   R.party = party;
   runtime::ProtoChanFromNet pch(chan);
   R.pfss_backend = &backend;

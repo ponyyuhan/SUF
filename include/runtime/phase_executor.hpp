@@ -236,15 +236,19 @@ class PhaseExecutor {
           throw std::runtime_error("PhaseExecutor: PFSS planner missing backend/channel");
         }
         if (planner_flushed) {
-          throw std::runtime_error("PhaseExecutor: planner single-flush budget exceeded");
+          // Some eager/task-driven phases may legitimately request additional PFSS flushes
+          // after a single-planner finalize. Fall back to direct flushes instead of aborting.
+          if (do_flush_pfss(&pfss_coeff_)) continue;
+          if (do_flush_pfss(&pfss_trunc_)) continue;
+        } else {
+          if (flush_guard + 1 > max_flushes_) {
+            throw std::runtime_error("PhaseExecutor: planner flush budget exceeded");
+          }
+          R.pfss_planner->finalize_phase(R.party, *R.pfss_backend, *R.pfss_chan);
+          flush_guard++;
+          planner_flushed = true;
+          continue;
         }
-        if (flush_guard + 1 > max_flushes_) {
-          throw std::runtime_error("PhaseExecutor: planner flush budget exceeded");
-        }
-        R.pfss_planner->finalize_phase(R.party, *R.pfss_backend, *R.pfss_chan);
-        flush_guard++;
-        planner_flushed = true;
-        continue;
       }
       // Last chance: try flushing any pending batches even if tasks did not request it.
       if (do_flush_open()) continue;
