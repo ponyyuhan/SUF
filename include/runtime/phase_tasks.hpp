@@ -138,18 +138,60 @@ class MulTask final : public detail::PhaseTask {
 #endif
         if (use_gpu) {
 #ifdef SUF_HAVE_CUDA
+          cudaStream_t stream = nullptr;
+          if (R.pfss_backend) {
+            if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend)) {
+              stream = reinterpret_cast<cudaStream_t>(staged->device_stream());
+            }
+          }
           size_t n = x_.size();
           size_t bytes = n * sizeof(uint64_t);
           uint64_t *d_d = nullptr, *d_e = nullptr, *d_a = nullptr, *d_b = nullptr, *d_c = nullptr, *d_out = nullptr;
-          cudaMalloc(&d_d, bytes);
-          cudaMalloc(&d_e, bytes);
-          cudaMalloc(&d_a, bytes);
-          cudaMalloc(&d_b, bytes);
-          cudaMalloc(&d_c, bytes);
-          cudaMalloc(&d_out, bytes);
+          auto do_malloc = [&](uint64_t** p, size_t sz) {
+            cudaError_t st = cudaSuccess;
+#if defined(CUDART_VERSION) && (CUDART_VERSION >= 11020)
+            st = cudaMallocAsync(reinterpret_cast<void**>(p), sz, stream ? stream : 0);
+            if (st == cudaErrorNotSupported) {
+              // Some runtimes (or vGPU configurations) may not support async alloc.
+              (void)cudaGetLastError();  // clear sticky "not supported" for later cudaGetLastError() checks
+              st = cudaMalloc(reinterpret_cast<void**>(p), sz);
+            }
+#else
+            (void)stream;
+            st = cudaMalloc(reinterpret_cast<void**>(p), sz);
+#endif
+            if (st != cudaSuccess) {
+              throw std::runtime_error(std::string("MulTask cudaMalloc failed: ") +
+                                       cudaGetErrorString(st));
+            }
+          };
+          auto do_free = [&](uint64_t* p) {
+            if (!p) return;
+            cudaError_t st = cudaSuccess;
+#if defined(CUDART_VERSION) && (CUDART_VERSION >= 11020)
+            st = cudaFreeAsync(p, stream ? stream : 0);
+            if (st == cudaErrorNotSupported) {
+              (void)cudaGetLastError();  // clear sticky "not supported"
+              st = cudaFree(p);
+            }
+#else
+            (void)stream;
+            st = cudaFree(p);
+#endif
+            if (st != cudaSuccess) {
+              throw std::runtime_error(std::string("MulTask cudaFree failed: ") +
+                                       cudaGetErrorString(st));
+            }
+          };
+          do_malloc(&d_d, bytes);
+          do_malloc(&d_e, bytes);
+          do_malloc(&d_a, bytes);
+          do_malloc(&d_b, bytes);
+          do_malloc(&d_c, bytes);
+          do_malloc(&d_out, bytes);
           // d and e are the opened diffs.
-          cudaMemcpy(d_d, opened_.data(), bytes, cudaMemcpyHostToDevice);
-          cudaMemcpy(d_e, opened_.data() + n, bytes, cudaMemcpyHostToDevice);
+          cudaMemcpyAsync(d_d, opened_.data(), bytes, cudaMemcpyHostToDevice, stream);
+          cudaMemcpyAsync(d_e, opened_.data() + n, bytes, cudaMemcpyHostToDevice, stream);
           // Flatten triples to device.
           std::vector<uint64_t> a_host(n), b_host(n), c_host(n);
           for (size_t i = 0; i < n; ++i) {
@@ -157,9 +199,9 @@ class MulTask final : public detail::PhaseTask {
             b_host[i] = triples_[i].b;
             c_host[i] = triples_[i].c;
           }
-          cudaMemcpy(d_a, a_host.data(), bytes, cudaMemcpyHostToDevice);
-          cudaMemcpy(d_b, b_host.data(), bytes, cudaMemcpyHostToDevice);
-          cudaMemcpy(d_c, c_host.data(), bytes, cudaMemcpyHostToDevice);
+          cudaMemcpyAsync(d_a, a_host.data(), bytes, cudaMemcpyHostToDevice, stream);
+          cudaMemcpyAsync(d_b, b_host.data(), bytes, cudaMemcpyHostToDevice, stream);
+          cudaMemcpyAsync(d_c, c_host.data(), bytes, cudaMemcpyHostToDevice, stream);
           launch_beaver_mul_kernel(R.party,
                                    /*x_unused=*/d_d,
                                    /*y_unused=*/d_e,
@@ -170,9 +212,15 @@ class MulTask final : public detail::PhaseTask {
                                    d_e,
                                    d_out,
                                    n,
-                                   nullptr);
-          cudaMemcpy(out_.data(), d_out, bytes, cudaMemcpyDeviceToHost);
-          cudaFree(d_d); cudaFree(d_e); cudaFree(d_a); cudaFree(d_b); cudaFree(d_c); cudaFree(d_out);
+                                   stream);
+          cudaMemcpyAsync(out_.data(), d_out, bytes, cudaMemcpyDeviceToHost, stream);
+          cudaStreamSynchronize(stream);
+          do_free(d_d);
+          do_free(d_e);
+          do_free(d_a);
+          do_free(d_b);
+          do_free(d_c);
+          do_free(d_out);
 #else
           (void)use_gpu;
 #endif
@@ -489,9 +537,44 @@ class TruncTask final : public detail::PhaseTask {
             if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend)) {
               trunc_stream = reinterpret_cast<cudaStream_t>(staged->device_stream());
               gpu_direct = true;
+	              auto do_malloc = [&](uint64_t** p, size_t sz) {
+	                cudaError_t st = cudaSuccess;
+	#if defined(CUDART_VERSION) && (CUDART_VERSION >= 11020)
+	                st = cudaMallocAsync(reinterpret_cast<void**>(p), sz, trunc_stream ? trunc_stream : 0);
+	                if (st == cudaErrorNotSupported) {
+	                  (void)cudaGetLastError();  // clear sticky "not supported"
+	                  st = cudaMalloc(reinterpret_cast<void**>(p), sz);
+	                }
+	#else
+	                (void)trunc_stream;
+	                st = cudaMalloc(reinterpret_cast<void**>(p), sz);
+	#endif
+                if (st != cudaSuccess) {
+                  throw std::runtime_error(std::string("TruncTask cudaMalloc failed: ") +
+                                           cudaGetErrorString(st));
+                }
+              };
+	              auto do_free = [&](uint64_t* p) {
+	                if (!p) return;
+	                cudaError_t st = cudaSuccess;
+	#if defined(CUDART_VERSION) && (CUDART_VERSION >= 11020)
+	                st = cudaFreeAsync(p, trunc_stream ? trunc_stream : 0);
+	                if (st == cudaErrorNotSupported) {
+	                  (void)cudaGetLastError();  // clear sticky "not supported"
+	                  st = cudaFree(p);
+	                }
+	#else
+	                (void)trunc_stream;
+	                st = cudaFree(p);
+	#endif
+                if (st != cudaSuccess) {
+                  throw std::runtime_error(std::string("TruncTask cudaFree failed: ") +
+                                           cudaGetErrorString(st));
+                }
+              };
               // Stage hatx_public to device.
               uint64_t* d_hatx = nullptr;
-              cudaMalloc(&d_hatx, elems * sizeof(uint64_t));
+              do_malloc(&d_hatx, elems * sizeof(uint64_t));
               cudaMemcpyAsync(d_hatx, hatx_public_.data(), elems * sizeof(uint64_t),
                               cudaMemcpyHostToDevice, trunc_stream);
               // Stage bools to device if needed.
@@ -499,11 +582,21 @@ class TruncTask final : public detail::PhaseTask {
               if (v.bools_device) {
                 d_bools = const_cast<uint64_t*>(v.bools_device);
               } else if (v.bool_words >= elems * v.ell && v.ell > 0) {
-                cudaMalloc(&d_bools, v.bool_words * sizeof(uint64_t));
+                do_malloc(&d_bools, v.bool_words * sizeof(uint64_t));
                 cudaMemcpyAsync(d_bools, v.bools, v.bool_words * sizeof(uint64_t),
                                 cudaMemcpyHostToDevice, trunc_stream);
               }
-              cudaMalloc(&d_tmp_out, elems * sizeof(uint64_t));
+              // IMPORTANT: d_tmp_out may escape the task in device-pipeline mode (via
+              // d_out_device_/take_device_out). Allocate it with cudaMalloc so it can be
+              // safely freed with cudaFree by downstream owners/destructors.
+              {
+                cudaError_t st = cudaMalloc(reinterpret_cast<void**>(&d_tmp_out),
+                                            elems * sizeof(uint64_t));
+                if (st != cudaSuccess) {
+                  throw std::runtime_error(std::string("TruncTask cudaMalloc(d_tmp_out) failed: ") +
+                                           cudaGetErrorString(st));
+                }
+              }
               int f_bits = 0;
               if (key_ && !key_->compiled.extra_u64.empty()) {
                 f_bits = static_cast<int>(key_->compiled.extra_u64[0] & 0xFFFFu);
@@ -547,6 +640,8 @@ class TruncTask final : public detail::PhaseTask {
                 cudaMemcpyAsync(out_.data(), d_tmp_out, elems * sizeof(uint64_t),
                                 cudaMemcpyDeviceToHost, trunc_stream);
                 cudaStreamSynchronize(trunc_stream);
+                cudaFree(d_tmp_out);
+                d_tmp_out = nullptr;
                 d_out_elems_ = 0;
               } else {
                 // Device-pipeline mode: keep the device buffer for downstream kernels.
@@ -611,8 +706,8 @@ class TruncTask final : public detail::PhaseTask {
                   }
                 }
               }
-              if (d_hatx) cudaFree(d_hatx);
-              if (d_bools && d_bools != v.bools_device) cudaFree(d_bools);
+              if (d_hatx) do_free(d_hatx);
+              if (d_bools && d_bools != v.bools_device) do_free(d_bools);
             }
           }
         }
@@ -624,7 +719,15 @@ class TruncTask final : public detail::PhaseTask {
             }
           }
 #ifdef SUF_HAVE_CUDA
-          if (d_tmp_out) cudaFree(d_tmp_out);
+          if (d_tmp_out) {
+#if defined(CUDART_VERSION) && (CUDART_VERSION >= 11020)
+            if (cudaFreeAsync(d_tmp_out, trunc_stream ? trunc_stream : 0) == cudaErrorNotSupported) {
+              cudaFree(d_tmp_out);
+            }
+#else
+            cudaFree(d_tmp_out);
+#endif
+          }
 #endif
           st_ = St::Done;
           return detail::Need::None;
@@ -1221,67 +1324,66 @@ class MulRowBroadcastTask final : public detail::PhaseTask {
 #endif
         if (gpu_mul) {
 #ifdef SUF_HAVE_CUDA
+          cudaStream_t stream = nullptr;
+          if (R.pfss_backend) {
+            if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend)) {
+              stream = reinterpret_cast<cudaStream_t>(staged->device_stream());
+            }
+          }
           size_t elems = mat_.size();
           size_t bytes_mat = elems * sizeof(uint64_t);
-          std::vector<uint64_t> e_exp(elems, 0), b_exp(elems, 0);
+          std::vector<uint64_t> e_rows(static_cast<size_t>(rows_), 0);
           for (int r = 0; r < rows_; ++r) {
-            int L = (valid_lens_.size() == 0) ? cols_ : valid_lens_[r];
-            for (int c = 0; c < cols_; ++c) {
-              size_t idx = static_cast<size_t>(r * cols_ + c);
-              e_exp[idx] = static_cast<uint64_t>(opened[off_e + r]);
-              b_exp[idx] = triple_.B[r];
-              if (c >= L) {
-                // will zero after compute
-              }
-            }
+            e_rows[static_cast<size_t>(r)] = static_cast<uint64_t>(opened[off_e + static_cast<size_t>(r)]);
           }
-          uint64_t *d_d = nullptr, *d_e = nullptr, *d_a = nullptr, *d_b = nullptr, *d_c = nullptr, *d_out = nullptr;
+          const size_t bytes_rows = static_cast<size_t>(rows_) * sizeof(uint64_t);
+          uint64_t *d_d = nullptr, *d_a = nullptr, *d_b_rows = nullptr, *d_c = nullptr, *d_e_rows = nullptr, *d_out = nullptr;
+          int* d_valid = nullptr;
           cudaMalloc(&d_d, bytes_mat);
-          cudaMalloc(&d_e, bytes_mat);
           cudaMalloc(&d_a, bytes_mat);
-          cudaMalloc(&d_b, bytes_mat);
+          cudaMalloc(&d_b_rows, bytes_rows);
           cudaMalloc(&d_c, bytes_mat);
+          cudaMalloc(&d_e_rows, bytes_rows);
           cudaMalloc(&d_out, bytes_mat);
-          cudaMemcpy(d_d, opened.data(), bytes_mat, cudaMemcpyHostToDevice);
-          cudaMemcpy(d_e, e_exp.data(), bytes_mat, cudaMemcpyHostToDevice);
-          cudaMemcpy(d_a, triple_.A.data(), bytes_mat, cudaMemcpyHostToDevice);
-          cudaMemcpy(d_b, b_exp.data(), bytes_mat, cudaMemcpyHostToDevice);
-          cudaMemcpy(d_c, triple_.C.data(), bytes_mat, cudaMemcpyHostToDevice);
+          if (valid_lens_.size() != 0) {
+            cudaMalloc(&d_valid, static_cast<size_t>(rows_) * sizeof(int));
+            cudaMemcpyAsync(d_valid, valid_lens_.data(),
+                            static_cast<size_t>(rows_) * sizeof(int),
+                            cudaMemcpyHostToDevice, stream);
+          }
+          cudaMemcpyAsync(d_d, opened.data(), bytes_mat, cudaMemcpyHostToDevice, stream);
+          cudaMemcpyAsync(d_a, triple_.A.data(), bytes_mat, cudaMemcpyHostToDevice, stream);
+          cudaMemcpyAsync(d_c, triple_.C.data(), bytes_mat, cudaMemcpyHostToDevice, stream);
+          cudaMemcpyAsync(d_b_rows, triple_.B.data(), bytes_rows, cudaMemcpyHostToDevice, stream);
+          cudaMemcpyAsync(d_e_rows, e_rows.data(), bytes_rows, cudaMemcpyHostToDevice, stream);
           launch_row_broadcast_mul_kernel(R.party,
-                                          nullptr,  // mat share not needed in Beaver eval
-                                          nullptr,
                                           d_a,
-                                          d_b,
+                                          d_b_rows,
                                           d_c,
                                           d_d,
-                                          d_e,
+                                          d_e_rows,
+                                          rows_,
+                                          cols_,
+                                          d_valid,
                                           d_out,
                                           elems,
-                                          nullptr);
-          if (R.device_pipeline) {
+                                          stream);
+          const bool keep_device_out = (R.device_pipeline && device_only_);
+          if (!keep_device_out) {
+            cudaMemcpyAsync(out_.data(), d_out, bytes_mat, cudaMemcpyDeviceToHost, stream);
+            cudaStreamSynchronize(stream);
+          } else {
             d_out_device_ = d_out;
             d_out_elems_ = elems;
-            if (!device_only_) {
-              cudaMemcpy(out_.data(), d_out, bytes_mat, cudaMemcpyDeviceToHost);
-            } else {
-              d_out = nullptr;
-            }
-          } else {
-            cudaMemcpy(out_.data(), d_out, bytes_mat, cudaMemcpyDeviceToHost);
+            d_out = nullptr;
           }
           if (d_d) cudaFree(d_d);
-          if (d_e) cudaFree(d_e);
           if (d_a) cudaFree(d_a);
-          if (d_b) cudaFree(d_b);
+          if (d_b_rows) cudaFree(d_b_rows);
           if (d_c) cudaFree(d_c);
+          if (d_e_rows) cudaFree(d_e_rows);
+          if (d_valid) cudaFree(d_valid);
           if (d_out) cudaFree(d_out);
-          for (int r = 0; r < rows_; ++r) {
-            int L = (valid_lens_.size() == 0) ? cols_ : valid_lens_[r];
-            for (int c = L; c < cols_; ++c) {
-              size_t idx = static_cast<size_t>(r * cols_ + c);
-              out_[idx] = 0;
-            }
-          }
           st_ = St::Done;
           return detail::Need::None;
 #endif
@@ -1443,16 +1545,24 @@ class LayerNormTask final : public detail::PhaseTask {
       case St::Mean: {
 #ifdef SUF_HAVE_CUDA
         if (R.device_pipeline && std::getenv("SUF_LN_GPU")) {
+          cudaStream_t stream = nullptr;
+          if (R.pfss_backend) {
+            if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend)) {
+              stream = reinterpret_cast<cudaStream_t>(staged->device_stream());
+            }
+          }
           size_t elems = x_.size();
           size_t bytes = elems * sizeof(uint64_t);
           uint64_t* d_x = nullptr;
           uint64_t* d_sum = nullptr;
           cudaMalloc(&d_x, bytes);
           cudaMalloc(&d_sum, static_cast<size_t>(rows_) * sizeof(uint64_t));
-          cudaMemcpy(d_x, x_.data(), bytes, cudaMemcpyHostToDevice);
-          launch_row_sum_kernel(d_x, rows_, cols_, /*valid_lens=*/nullptr, d_sum, nullptr);
+          cudaMemcpyAsync(d_x, x_.data(), bytes, cudaMemcpyHostToDevice, stream);
+          launch_row_sum_kernel(d_x, rows_, cols_, /*valid_lens=*/nullptr, d_sum, stream);
           sum_.assign(static_cast<size_t>(rows_), 0);
-          cudaMemcpy(sum_.data(), d_sum, static_cast<size_t>(rows_) * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+          cudaMemcpyAsync(sum_.data(), d_sum, static_cast<size_t>(rows_) * sizeof(uint64_t),
+                          cudaMemcpyDeviceToHost, stream);
+          cudaStreamSynchronize(stream);
           cudaFree(d_x);
           cudaFree(d_sum);
         } else {
@@ -1525,6 +1635,12 @@ class LayerNormTask final : public detail::PhaseTask {
             std::fprintf(stderr, "[LayerNormTask] VarMul GPU rows=%d cols=%d elems=%zu\n",
                          rows_, cols_, x_.size());
           }
+          cudaStream_t stream = nullptr;
+          if (R.pfss_backend) {
+            if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend)) {
+              stream = reinterpret_cast<cudaStream_t>(staged->device_stream());
+            }
+          }
           size_t elems = x_.size();
           size_t bytes_mat = elems * sizeof(uint64_t);
           uint64_t* d_x = nullptr;
@@ -1533,11 +1649,14 @@ class LayerNormTask final : public detail::PhaseTask {
           cudaMalloc(&d_x, bytes_mat);
           cudaMalloc(&d_mu, static_cast<size_t>(rows_) * sizeof(uint64_t));
           cudaMalloc(&d_var, static_cast<size_t>(rows_) * sizeof(uint64_t));
-          cudaMemcpy(d_x, x_.data(), bytes_mat, cudaMemcpyHostToDevice);
-          cudaMemcpy(d_mu, mu_qf_.data(), static_cast<size_t>(rows_) * sizeof(uint64_t), cudaMemcpyHostToDevice);
-          launch_row_variance_kernel(d_x, d_mu, rows_, cols_, /*valid_lens=*/nullptr, d_var, nullptr);
+          cudaMemcpyAsync(d_x, x_.data(), bytes_mat, cudaMemcpyHostToDevice, stream);
+          cudaMemcpyAsync(d_mu, mu_qf_.data(), static_cast<size_t>(rows_) * sizeof(uint64_t),
+                          cudaMemcpyHostToDevice, stream);
+          launch_row_variance_kernel(d_x, d_mu, rows_, cols_, /*valid_lens=*/nullptr, d_var, stream);
           var_sum_.assign(static_cast<size_t>(rows_), 0);
-          cudaMemcpy(var_sum_.data(), d_var, static_cast<size_t>(rows_) * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+          cudaMemcpyAsync(var_sum_.data(), d_var, static_cast<size_t>(rows_) * sizeof(uint64_t),
+                          cudaMemcpyDeviceToHost, stream);
+          cudaStreamSynchronize(stream);
           cudaFree(d_x);
           cudaFree(d_mu);
           cudaFree(d_var);

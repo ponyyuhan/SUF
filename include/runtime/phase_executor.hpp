@@ -297,6 +297,7 @@ class PhaseExecutor {
  private:
   void run_lazy(PhaseResources& R) {
     size_t flush_guard = 0;
+    bool planner_flushed = false;
     for (;;) {
       bool any_not_done = false;
       bool want_open = false;
@@ -369,6 +370,18 @@ class PhaseExecutor {
       }
 
       if (want_open && do_flush_open()) continue;
+      if (R.pfss_planner && (want_pfss_coeff || want_pfss_trunc) && !planner_flushed) {
+        if (!R.pfss_backend || !R.pfss_chan) {
+          throw std::runtime_error("PhaseExecutor: PFSS planner missing backend/channel");
+        }
+        if (flush_guard + 1 > max_flushes_) {
+          throw std::runtime_error("PhaseExecutor: planner flush budget exceeded");
+        }
+        R.pfss_planner->finalize_phase(R.party, *R.pfss_backend, *R.pfss_chan);
+        flush_guard++;
+        planner_flushed = true;
+        continue;
+      }
       if (want_pfss_coeff && do_flush_pfss(&pfss_coeff_)) continue;
       if (want_pfss_trunc && do_flush_pfss(&pfss_trunc_)) continue;
       if (do_flush_open()) continue;

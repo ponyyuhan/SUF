@@ -25,6 +25,21 @@ int LayerGraph::add_tensor(const Scale& scale, const RangeInterval& r) {
   return static_cast<int>(tensors_.size() - 1);
 }
 
+int LayerGraph::add_public_tensor(const Scale& scale, const RangeInterval& r) {
+  TensorFacts t;
+  t.scale = scale;
+  t.range = r;
+  t.abs = abs_from_range(r, scale.is_signed);
+  t.abs.kind = RangeKind::Proof;
+  // Public values are not masked. Keep a minimal non-zero mask bound so downstream
+  // mask propagation (`max`) is dominated by secret inputs, while preserving the
+  // existing "mask_abs==0 => default" sentinel behavior.
+  t.mask_abs = 1;
+  t.gap.reset();
+  tensors_.push_back(t);
+  return static_cast<int>(tensors_.size() - 1);
+}
+
 int LayerGraph::add_matmul_beaver(int x_tensor,
                                   const MatmulAttrs& attrs,
                                   const Scale& out_scale,

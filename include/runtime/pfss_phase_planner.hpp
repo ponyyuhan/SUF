@@ -127,7 +127,9 @@ class PfssLayerPlanner {
                     const PfssSuperBatch& trunc_batch) {
     if (planner.stats().coeff_jobs == 0 && planner.stats().trunc_jobs == 0 &&
         coeff_batch.stats().hatx_words == 0 && trunc_batch.stats().hatx_words == 0 &&
-        planner.stats().coeff_flushes == 0 && planner.stats().trunc_flushes == 0) {
+        planner.stats().coeff_flushes == 0 && planner.stats().trunc_flushes == 0 &&
+        coeff_batch.stats().active_elems == 0 && trunc_batch.stats().active_elems == 0 &&
+        coeff_batch.stats().cost_effbits == 0 && trunc_batch.stats().cost_effbits == 0) {
       return;
     }
     const auto& ps = planner.stats();
@@ -139,6 +141,10 @@ class PfssLayerPlanner {
     totals_.trunc_hatx_bytes += trunc_batch.stats().hatx_bytes;
     totals_.coeff_flushes += ps.coeff_flushes;
     totals_.trunc_flushes += ps.trunc_flushes;
+    totals_.coeff_active_elems += coeff_batch.stats().active_elems;
+    totals_.trunc_active_elems += trunc_batch.stats().active_elems;
+    totals_.coeff_cost_effbits += coeff_batch.stats().cost_effbits;
+    totals_.trunc_cost_effbits += trunc_batch.stats().cost_effbits;
     enforce_limits();
   }
 
@@ -270,10 +276,6 @@ class PfssLayerPlanner {
         flush_once(trunc_batch, totals_.trunc_flushes, totals_.trunc_jobs, totals_.trunc_hatx_words, totals_.trunc_hatx_bytes, totals_.trunc_active_elems, totals_.trunc_cost_effbits);
       }
     }
-    totals_.coeff_active_elems += coeff_batch.stats().active_elems;
-    totals_.trunc_active_elems += trunc_batch.stats().active_elems;
-    totals_.coeff_cost_effbits += coeff_batch.stats().cost_effbits;
-    totals_.trunc_cost_effbits += trunc_batch.stats().cost_effbits;
     enforce_limits();
   }
 

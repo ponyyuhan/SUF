@@ -107,7 +107,17 @@ inline TruncationLoweringResult lower_truncation_gate(proto::PfssBackend& backen
         h1->r_in = pe.keys.k1.compiled.r_in;
         pe.hook0 = std::move(h0);
         pe.hook1 = std::move(h1);
-      } else {
+      } else if (kind == GateKind::GapARS) {
+        auto h0 = std::make_unique<gates::GapArsPostProc>();
+        auto h1 = std::make_unique<gates::GapArsPostProc>();
+        h0->f = h1->f = params.frac_bits;
+        h0->r_hi_share = pe.keys.k0.r_hi_share;
+        h1->r_hi_share = pe.keys.k1.r_hi_share;
+        h0->r_in = pe.keys.k0.compiled.r_in;
+        h1->r_in = pe.keys.k1.compiled.r_in;
+        pe.hook0 = std::move(h0);
+        pe.hook1 = std::move(h1);
+      } else {  // FaithfulARS
         auto h0 = std::make_unique<gates::FaithfulArsPostProc>();
         auto h1 = std::make_unique<gates::FaithfulArsPostProc>();
         h0->f = h1->f = params.frac_bits;

@@ -4,8 +4,51 @@
 #include <unordered_map>
 #include <random>
 #include <algorithm>
+#include <cstdlib>
+
+#ifdef SUF_HAVE_CUDA
+#include <cuda_runtime.h>
+#include "runtime/cuda_primitives.hpp"
+#endif
 
 namespace runtime {
+
+namespace {
+
+inline uint64_t mask_bits_host(int bits) {
+  if (bits <= 0) return 0;
+  if (bits >= 64) return ~uint64_t(0);
+  return (uint64_t(1) << bits) - 1ull;
+}
+
+inline size_t packed_words_host(size_t elems, int eff_bits) {
+  if (eff_bits <= 0 || eff_bits > 64) return elems;
+  if (eff_bits == 64) return elems;
+  uint64_t bits = static_cast<uint64_t>(elems) * static_cast<uint64_t>(eff_bits);
+  return static_cast<size_t>((bits + 63) >> 6);
+}
+
+std::vector<uint64_t> pack_eff_bits_host(const std::vector<uint64_t>& xs, int eff_bits) {
+  if (eff_bits <= 0 || eff_bits > 64) throw std::runtime_error("pack_eff_bits_host: eff_bits out of range");
+  if (eff_bits == 64) return xs;
+  size_t words = packed_words_host(xs.size(), eff_bits);
+  std::vector<uint64_t> packed(words, 0);
+  uint64_t mask = mask_bits_host(eff_bits);
+  for (size_t i = 0; i < xs.size(); i++) {
+    uint64_t v = xs[i] & mask;
+    size_t bit_idx = i * static_cast<size_t>(eff_bits);
+    size_t w = bit_idx >> 6;
+    int off = static_cast<int>(bit_idx & 63);
+    packed[w] |= (v << off);
+    int spill = off + eff_bits - 64;
+    if (spill > 0 && w + 1 < packed.size()) {
+      packed[w + 1] |= (v >> (eff_bits - spill));
+    }
+  }
+  return packed;
+}
+
+}  // namespace
 
 PfssHandle PfssSuperBatch::enqueue_composite(PreparedCompositeJob job) {
   if (job.token == static_cast<size_t>(-1)) {
@@ -178,6 +221,9 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
     std::vector<int> row_offsets;
     std::vector<int> row_lengths;
     DeviceBufferRef dev_hatx;
+    bool own_dev_hatx = false;
+    DeviceBufferRef dev_hatx_packed;
+    uint16_t eff_bits = 64;
     size_t r = 0;
     size_t ell = 0;
   };
@@ -249,6 +295,9 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
         bidx = it->second;
       }
       Bucket& b = buckets[bidx];
+      if (job.shape.eff_bits > 0 && job.shape.eff_bits <= 64) {
+        b.eff_bits = std::max<uint16_t>(b.eff_bits, job.shape.eff_bits);
+      }
       BucketJob bj;
       bj.job_idx = job_idx;
       bj.start = b.hatx.size();
@@ -262,6 +311,7 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
           b.jobs.size() == 1) {
         b.dev_hatx.ptr = const_cast<uint64_t*>(job.hatx_device);
         b.dev_hatx.bytes = job.hatx_device_words * sizeof(uint64_t);
+        b.own_dev_hatx = false;
       }
       if (!job.row_offsets.empty()) {
         int base = b.row_offsets.empty() ? 0 : b.row_offsets.back();
@@ -278,14 +328,70 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
       stats_.max_bucket_hatx = std::max(stats_.max_bucket_hatx, b.hatx.size());
       stats_.max_bucket_jobs = std::max(stats_.max_bucket_jobs, b.jobs.size());
       bool dev_capable = gpu_stager_ && (dynamic_cast<runtime::CpuPassthroughStager*>(gpu_stager_) == nullptr);
-      if (gpu_stager_ && !b.dev_hatx.ptr) {
-        HostBufferRef host{b.hatx.data(), b.hatx.size() * sizeof(uint64_t)};
-        b.dev_hatx = gpu_stager_->stage_to_device(host);
-      }
-      gates::CompositeBatchInput in{b.hatx.data(), b.hatx.size(),
-                                    dev_capable ? reinterpret_cast<const uint64_t*>(b.dev_hatx.ptr) : nullptr};
-      in.device_outputs = device_outputs_ && dev_capable;
-      auto out = gates::composite_eval_batch_backend(party, backend, ch, *b.key, *b.suf, in);
+      auto free_bucket_hatx = [&]() {
+        if (!gpu_stager_ || !dev_capable) return;
+        if (b.dev_hatx_packed.ptr) {
+          gpu_stager_->free_bytes(b.dev_hatx_packed);
+          b.dev_hatx_packed = DeviceBufferRef{};
+        }
+        if (b.own_dev_hatx && b.dev_hatx.ptr) {
+          gpu_stager_->free_bytes(b.dev_hatx);
+          b.dev_hatx = DeviceBufferRef{};
+          b.own_dev_hatx = false;
+        }
+      };
+
+      try {
+        if (gpu_stager_ && dev_capable && !b.dev_hatx.ptr) {
+#ifdef SUF_HAVE_CUDA
+          int eff_bits = static_cast<int>(b.eff_bits);
+          void* st_stream = gpu_stager_->stream();
+          // Only pack when eff_bits is meaningfully smaller than 64 to avoid
+          // doubling device memory for near-64-bit values.
+          const int max_pack_bits = []() {
+            const char* env = std::getenv("SUF_PFSS_STAGE_PACK_MAX_BITS");
+            if (!env) return 48;
+            int v = std::atoi(env);
+            if (v <= 0 || v > 64) return 48;
+            return v;
+          }();
+          if (st_stream && !b.hatx.empty() && eff_bits > 0 && eff_bits < 64 && eff_bits <= max_pack_bits) {
+            if (std::getenv("SUF_VALIDATE_EFFBITS")) {
+              uint64_t mask = mask_bits_host(eff_bits);
+              for (size_t i = 0; i < b.hatx.size(); i++) {
+                if ((b.hatx[i] & ~mask) != 0) {
+                  throw std::runtime_error("PfssSuperBatch: eff_bits pack overflow (hatx has high bits)");
+                }
+              }
+            }
+            auto packed = pack_eff_bits_host(b.hatx, eff_bits);
+            HostBufferRef host_packed{packed.data(), packed.size() * sizeof(uint64_t)};
+            b.dev_hatx_packed = gpu_stager_->stage_to_device(host_packed);
+            b.dev_hatx = gpu_stager_->alloc_bytes(b.hatx.size() * sizeof(uint64_t));
+            b.own_dev_hatx = true;
+            launch_unpack_eff_bits_kernel(reinterpret_cast<const uint64_t*>(b.dev_hatx_packed.ptr),
+                                          eff_bits,
+                                          reinterpret_cast<uint64_t*>(b.dev_hatx.ptr),
+                                          b.hatx.size(),
+                                          st_stream);
+            cudaStreamSynchronize(reinterpret_cast<cudaStream_t>(st_stream));
+            gpu_stager_->free_bytes(b.dev_hatx_packed);
+            b.dev_hatx_packed = DeviceBufferRef{};
+          } else
+#endif
+          {
+            HostBufferRef host{b.hatx.data(), b.hatx.size() * sizeof(uint64_t)};
+            b.dev_hatx = gpu_stager_->stage_to_device(host);
+            b.own_dev_hatx = true;
+          }
+        }
+
+        gates::CompositeBatchInput in{b.hatx.data(), b.hatx.size(),
+                                      (dev_capable && b.dev_hatx.ptr)
+                                          ? reinterpret_cast<const uint64_t*>(b.dev_hatx.ptr)
+                                          : nullptr};
+        in.device_outputs = device_outputs_ && dev_capable;
+        auto out = gates::composite_eval_batch_backend(party, backend, ch, *b.key, *b.suf, in);
       size_t gr_idx = group_results_.size();
       GroupResult gr;
       gr.suf = b.suf;
@@ -319,6 +425,11 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
         slices_[bj.job_idx].len = bj.len;
       }
       group_results_.push_back(std::move(gr));
+        free_bucket_hatx();
+      } catch (...) {
+        free_bucket_hatx();
+        throw;
+      }
     }
   }
   flushed_ = true;

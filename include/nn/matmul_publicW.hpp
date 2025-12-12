@@ -14,6 +14,12 @@ struct MatmulParams {
   bool allow_legacy_shift = false;  // must be opt-in for legacy/debug paths.
   // Optional: GPU overlap stream to chain with PFSS kernels when using a GPU backend.
   void* overlap_stream = nullptr;
+  // Optional: skip device->host copy and synchronization (bench/device-pipeline).
+  bool device_only = false;
+  // Optional: cache host->device uploads when host pointers are stable.
+  bool cache_input = false;
+  bool cache_weights = false;
+  bool cache_bias = false;
 };
 
 // Optional: obtain the default CUDA stream used by the GPU matmul

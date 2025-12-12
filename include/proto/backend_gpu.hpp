@@ -21,6 +21,16 @@ struct PfssGpuStagedEval {
                                         size_t N,
                                         int out_bytes,
                                         uint8_t* outs_flat) const = 0;
+  // Broadcast-key variants: `key` points to a single key blob (key_bytes),
+  // reused for all N inputs. This avoids O(N*key_bytes) host replication and
+  // H2D traffic when the same key is applied to many elements.
+  virtual void eval_dcf_many_u64_device_broadcast(int in_bits,
+                                                  size_t key_bytes,
+                                                  const uint8_t* key,
+                                                  const uint64_t* xs_device,
+                                                  size_t N,
+                                                  int out_bytes,
+                                                  uint8_t* outs_flat) const = 0;
   virtual void eval_packed_lt_many_device(size_t key_bytes,
                                           const uint8_t* keys_flat,
                                           const uint64_t* xs_device,
@@ -28,12 +38,25 @@ struct PfssGpuStagedEval {
                                           int in_bits,
                                           int out_words,
                                           uint64_t* outs_bitmask) const = 0;
+  virtual void eval_packed_lt_many_device_broadcast(size_t key_bytes,
+                                                    const uint8_t* key,
+                                                    const uint64_t* xs_device,
+                                                    size_t N,
+                                                    int in_bits,
+                                                    int out_words,
+                                                    uint64_t* outs_bitmask) const = 0;
   virtual void eval_interval_lut_many_device(size_t key_bytes,
                                              const uint8_t* keys_flat,
                                              const uint64_t* xs_device,
                                              size_t N,
                                              int out_words,
                                              uint64_t* outs_flat) const = 0;
+  virtual void eval_interval_lut_many_device_broadcast(size_t key_bytes,
+                                                       const uint8_t* key,
+                                                       const uint64_t* xs_device,
+                                                       size_t N,
+                                                       int out_words,
+                                                       uint64_t* outs_flat) const = 0;
   // Expose underlying compute stream handle for overlap (opaque to callers).
   virtual void* device_stream() const = 0;
   // Optional scratch/device outputs for callers that want to keep results on device.

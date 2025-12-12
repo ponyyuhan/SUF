@@ -279,6 +279,11 @@ target_link_libraries(test_softmax_task PRIVATE nn_ops compiler_passes suf_fss $
 add_executable(test_trunc_task src/demo/test_trunc_task.cpp)
 target_include_directories(test_trunc_task PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_trunc_task PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
+
+add_executable(test_trunc_effbits src/demo/test_trunc_effbits.cpp)
+target_include_directories(test_trunc_effbits PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_trunc_effbits PRIVATE compiler_passes suf_fss ${MYL7_LINK_LIBS})
+
 add_executable(test_staged_trunc src/demo/test_staged_trunc.cpp)
 target_include_directories(test_staged_trunc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_staged_trunc PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
@@ -314,6 +319,16 @@ add_executable(test_planner_causal_bytes src/demo/test_planner_causal_bytes.cpp)
 target_include_directories(test_planner_causal_bytes PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_planner_causal_bytes PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
 add_test(NAME test_planner_causal_bytes COMMAND test_planner_causal_bytes)
+
+add_executable(test_planner_ragged_bytes src/demo/test_planner_ragged_bytes.cpp)
+target_include_directories(test_planner_ragged_bytes PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_planner_ragged_bytes PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
+add_test(NAME test_planner_ragged_bytes COMMAND test_planner_ragged_bytes)
+
+add_executable(test_planner_effbits_budget src/demo/test_planner_effbits_budget.cpp)
+target_include_directories(test_planner_effbits_budget PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_planner_effbits_budget PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
+add_test(NAME test_planner_effbits_budget COMMAND test_planner_effbits_budget)
 
 if(HAVE_SUF_CUDA)
 add_executable(test_pfss_gpu src/demo/test_pfss_gpu.cpp)
@@ -397,6 +412,7 @@ add_executable(test_myl7_bit_order src/demo/test_myl7_bit_order.cpp)
 endif()
 
 add_test(NAME test_trunc_task COMMAND test_trunc_task)
+add_test(NAME test_trunc_effbits COMMAND test_trunc_effbits)
 add_test(NAME test_layernorm_task COMMAND test_layernorm_task)
 add_test(NAME test_staged_softmax COMMAND test_staged_softmax)
 add_test(NAME test_pfss_planner COMMAND test_pfss_planner)

@@ -87,6 +87,10 @@ class LayerGraph {
  public:
   // Graph builder convenience: create an initial tensor with known scale/range.
   int add_tensor(const Scale& scale, const RangeInterval& r);
+  // Create a tensor representing a public (unmasked) value with proof-grade bounds.
+  // Used for public weights (e.g., LayerNorm gamma/beta) to avoid inflating mask bounds
+  // and to enable tighter proof propagation/GapCert reasoning.
+  int add_public_tensor(const Scale& scale, const RangeInterval& r);
 
   // Matmul that produces an unscaled accumulator. Returns output tensor id.
   int add_matmul_beaver(int x_tensor,

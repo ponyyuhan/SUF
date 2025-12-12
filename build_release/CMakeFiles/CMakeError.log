@@ -1,0 +1,12 @@
+Performing C++ SOURCE FILE Test HAS_GNU_20 failed with the following output:
+Change Dir: /home/yuhan/new/SUF/build_release/CMakeFiles/CMakeTmp
+
+Run Build Command(s):/usr/bin/ninja cmTC_26367 && [1/2] Building CXX object CMakeFiles/cmTC_26367.dir/src.cxx.o
+FAILED: CMakeFiles/cmTC_26367.dir/src.cxx.o 
+/usr/bin/c++ -DHAS_GNU_20  -std=gnu++20 -o CMakeFiles/cmTC_26367.dir/src.cxx.o -c /home/yuhan/new/SUF/build_release/CMakeFiles/CMakeTmp/src.cxx
+c++: error: unrecognized command line option '-std=gnu++20'; did you mean '-std=gnu++2a'?
+ninja: build stopped: subcommand failed.
+
+
+Source file was:
+int main() { return 0; }

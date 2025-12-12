@@ -85,8 +85,19 @@ class CpuPassthroughStager final : public PfssGpuStager {
   void* stream() const override { return stream_; }
 
  private:
+  struct CachedBuf {
+    void* ptr = nullptr;
+    size_t cap = 0;
+    void* ready = nullptr;  // cudaEvent_t (opaque), recorded on stream_ at free time
+  };
+
   void* stream_ = nullptr;
   bool own_stream_ = false;
+  bool cache_enabled_ = false;
+  size_t max_cached_bytes_ = 0;
+  size_t max_single_cached_bytes_ = 0;
+  size_t cached_bytes_ = 0;
+  std::vector<CachedBuf> cache_;
 };
 #endif
 

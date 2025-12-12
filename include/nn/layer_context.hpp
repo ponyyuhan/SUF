@@ -199,6 +199,21 @@ inline SecretTensor make_secret_tensor(LayerContext* ctx,
   return t;
 }
 
+// Public (unmasked) tensor: used for public weights/constants in the compiler graph
+// (e.g., LayerNorm gamma/beta) so mask bounds don't get inflated.
+inline SecretTensor make_public_tensor(LayerContext* ctx,
+                                       const compiler::Scale& scale,
+                                       const compiler::RangeInterval& range) {
+  SecretTensor t;
+  t.share = TensorView<uint64_t>();  // no backing buffer
+  t.scale = scale;
+  t.range = range;
+  t.ctx = ctx;
+  if (!ctx) return t;
+  t.tid = ctx->graph.add_public_tensor(scale, range);
+  return t;
+}
+
 inline SecretTensor record_matmul(LayerContext* ctx,
                                   const SecretTensor& x,
                                   compiler::MatmulAttrs attrs,

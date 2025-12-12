@@ -27,18 +27,12 @@ SecretTensor build_layernorm_graph(LayerContext& ctx,
   compiler::RangeInterval beta_range = compiler::RangeInterval::whole(true);
   if (gamma_public) {
     gamma_range = range_from_public_weights(*gamma_public);
-    SecretTensor g = make_secret_tensor(&ctx,
-                                        TensorView<uint64_t>(nullptr, gamma_public->shape[0]),
-                                        qf,
-                                        gamma_range);
+    SecretTensor g = make_public_tensor(&ctx, qf, gamma_range);
     gamma_tid = g.tid;
   }
   if (beta_public) {
     beta_range = range_from_public_weights(*beta_public);
-    SecretTensor b = make_secret_tensor(&ctx,
-                                        TensorView<uint64_t>(nullptr, beta_public->shape[0]),
-                                        qf,
-                                        beta_range);
+    SecretTensor b = make_public_tensor(&ctx, qf, beta_range);
     beta_tid = b.tid;
   }
   int affine_tid = ctx.graph.add_affine(rsqrt_tid, gamma_tid, beta_tid, frac_bits, qf);

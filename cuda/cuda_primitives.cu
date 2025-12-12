@@ -1,6 +1,12 @@
 #include "runtime/cuda_primitives.hpp"
 #include <cuda_runtime.h>
 
+// Provided by cuda/pfss_kernels.cu (compiled into cuda_pfss library).
+extern "C" __global__ void unpack_eff_bits_kernel(const uint64_t* packed,
+                                                  int eff_bits,
+                                                  uint64_t* out,
+                                                  size_t N);
+
 namespace {
 
 __device__ inline uint64_t add_mod(uint64_t a, uint64_t b) { return a + b; }
@@ -110,21 +116,33 @@ __global__ void horner_cubic_kernel(const uint64_t* __restrict__ x,
 }
 
 __global__ void row_broadcast_mul_kernel(int party,
-                                         const uint64_t* __restrict__ mat,
-                                         const uint64_t* __restrict__ vec_bcast,
                                          const uint64_t* __restrict__ A,
-                                         const uint64_t* __restrict__ B_bcast,
+                                         const uint64_t* __restrict__ B_rows,
                                          const uint64_t* __restrict__ C,
                                          const uint64_t* __restrict__ d_open,
-                                         const uint64_t* __restrict__ e_open_bcast,
+                                         const uint64_t* __restrict__ e_open_rows,
+                                         int rows,
+                                         int cols,
+                                         const int* __restrict__ valid_lens,
                                          uint64_t* __restrict__ out,
                                          size_t n) {
   size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (idx >= n) return;
+  if (cols <= 0) return;
+  int r = static_cast<int>(idx / static_cast<size_t>(cols));
+  int c = static_cast<int>(idx - static_cast<size_t>(r) * static_cast<size_t>(cols));
+  if (r < 0 || r >= rows) return;
+  if (valid_lens) {
+    int L = valid_lens[r];
+    if (c >= L) {
+      out[idx] = 0;
+      return;
+    }
+  }
   uint64_t d = d_open[idx];
-  uint64_t e = e_open_bcast[idx];
+  uint64_t e = e_open_rows[r];
   uint64_t z = C[idx];
-  z = add_mod(z, mul_mod(d, B_bcast[idx]));
+  z = add_mod(z, mul_mod(d, B_rows[r]));
   z = add_mod(z, mul_mod(e, A[idx]));
   if (party == 0) {
     z = add_mod(z, mul_mod(d, e));
@@ -231,15 +249,9 @@ __global__ void row_variance_kernel(const uint64_t* __restrict__ mat,
       out_rows[r] = 0;
       return;
     }
-    uint64_t sumsq = buf[0];
-    if ((L & (L - 1)) == 0) {
-      int shift = 0;
-      while ((1 << shift) != L && shift < 63) ++shift;
-      out_rows[r] = (shift >= 64) ? 0ull : (sumsq >> shift);
-    } else {
-      unsigned __int128 num = static_cast<unsigned __int128>(sumsq);
-      out_rows[r] = static_cast<uint64_t>(num / static_cast<unsigned>(L));
-    }
+    // Return the row sum of squared diffs; caller applies any scaling (e.g., inv_len)
+    // using ring multiplication to preserve mod 2^64 semantics.
+    out_rows[r] = buf[0];
   }
 }
 
@@ -335,25 +347,28 @@ extern "C" void launch_horner_cubic_kernel(const uint64_t* d_x,
 }
 
 extern "C" void launch_row_broadcast_mul_kernel(int party,
-                                                const uint64_t* d_mat,
-                                                const uint64_t* d_vec_bcast,
                                                 const uint64_t* d_A,
-                                                const uint64_t* d_B_bcast,
+                                                const uint64_t* d_B_rows,
                                                 const uint64_t* d_C,
                                                 const uint64_t* d_d_open,
-                                                const uint64_t* d_e_open_bcast,
+                                                const uint64_t* d_e_open_rows,
+                                                int rows,
+                                                int cols,
+                                                const int* d_valid_lens,
                                                 uint64_t* d_out,
                                                 size_t n,
                                                 void* stream) {
 #ifndef SUF_HAVE_CUDA
-  (void)party; (void)d_mat; (void)d_vec_bcast; (void)d_A; (void)d_B_bcast; (void)d_C;
-  (void)d_d_open; (void)d_e_open_bcast; (void)d_out; (void)n; (void)stream;
+  (void)party; (void)d_A; (void)d_B_rows; (void)d_C;
+  (void)d_d_open; (void)d_e_open_rows; (void)rows; (void)cols; (void)d_valid_lens;
+  (void)d_out; (void)n; (void)stream;
 #else
   if (n == 0) return;
   constexpr int kBlock = 256;
   int grid = static_cast<int>((n + kBlock - 1) / kBlock);
   row_broadcast_mul_kernel<<<grid, kBlock, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
-      party, d_mat, d_vec_bcast, d_A, d_B_bcast, d_C, d_d_open, d_e_open_bcast, d_out, n);
+      party, d_A, d_B_rows, d_C, d_d_open, d_e_open_rows,
+      rows, cols, d_valid_lens, d_out, n);
 #endif
 }
 
@@ -403,5 +418,21 @@ extern "C" void launch_row_variance_kernel(const uint64_t* d_mat,
   dim3 grid(rows);
   dim3 block(256);
   row_variance_kernel<<<grid, block, 0, reinterpret_cast<cudaStream_t>(stream)>>>(d_mat, d_mean, rows, cols, d_valid_lens, d_out_rows);
+#endif
+}
+
+extern "C" void launch_unpack_eff_bits_kernel(const uint64_t* d_packed,
+                                              int eff_bits,
+                                              uint64_t* d_out,
+                                              size_t n,
+                                              void* stream) {
+#ifndef SUF_HAVE_CUDA
+  (void)d_packed; (void)eff_bits; (void)d_out; (void)n; (void)stream;
+#else
+  if (n == 0) return;
+  constexpr int kBlock = 256;
+  int grid = static_cast<int>((n + kBlock - 1) / kBlock);
+  unpack_eff_bits_kernel<<<grid, kBlock, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+      d_packed, eff_bits, d_out, n);
 #endif
 }

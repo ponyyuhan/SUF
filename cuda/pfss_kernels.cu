@@ -1,5 +1,6 @@
 #include "pfss_cuda_api.hpp"
 #include <cuda_runtime.h>
+#include <cstddef>
 #include <cstdint>
 
 // AES-128 (one block) for CUDA PRG / PFSS masking.
@@ -210,7 +211,7 @@ struct __attribute__((packed)) PackedCmpKeyDev {
   uint8_t round_keys[176];
 };
 
-struct __attribute__((packed)) IntervalKeyDev {
+struct alignas(8) IntervalKeyDev {
   uint16_t in_bits;
   uint16_t out_words;
   uint32_t intervals;
@@ -220,6 +221,9 @@ struct __attribute__((packed)) IntervalKeyDev {
   uint8_t seed[16];
   uint8_t round_keys[176];
 };
+
+static_assert(offsetof(IntervalKeyDev, nonce) % 8 == 0, "IntervalKeyDev.nonce must be 8-byte aligned");
+static_assert(sizeof(IntervalKeyDev) % 8 == 0, "IntervalKeyDev size must be 8-byte aligned");
 
 __device__ inline uint64_t mask_bits_dev(int bits) {
   if (bits <= 0) return 0;
@@ -240,31 +244,170 @@ extern "C" __global__ void packed_cmp_kernel_keyed(const uint8_t* keys_flat,
   int out_words = (static_cast<int>(hdr->num_thr) + 63) / 64;
   uint64_t mask = mask_bits_dev(hdr->in_bits);
   uint64_t x = xs[idx] & mask;
+  const bool sorted = (hdr->reserved[0] & 1u) != 0u;
+  int pos = 0;  // first threshold index with thr > x (upper_bound)
+  if (sorted) {
+    int lo = 0;
+    int hi = static_cast<int>(hdr->num_thr);
+    while (lo < hi) {
+      int mid = (lo + hi) >> 1;
+      uint64_t thr = thresholds[mid] & mask;
+      if (x < thr) {
+        hi = mid;
+      } else {
+        lo = mid + 1;
+      }
+    }
+    pos = lo;
+  }
   // Process two mask words per AES block (low/high 64 bits) to reduce AES calls.
   for (int w = 0; w < out_words; w += 2) {
     int base0 = w * 64;
     int limit0 = (base0 + 64 < static_cast<int>(hdr->num_thr)) ? (base0 + 64) : static_cast<int>(hdr->num_thr);
     uint64_t word0 = 0;
-    for (int b = base0; b < limit0; b++) {
-      uint64_t thr = thresholds[b] & mask;
-      if (x < thr) word0 |= (1ull << (b - base0));
+    if (sorted) {
+      int len0 = limit0 - base0;
+      if (len0 > 0) {
+        uint64_t bits0 = (len0 >= 64) ? ~0ull : ((1ull << len0) - 1ull);
+        if (pos <= base0) {
+          word0 = bits0;
+        } else if (pos >= limit0) {
+          word0 = 0;
+        } else {
+          int off = pos - base0;
+          word0 = bits0 ^ ((1ull << off) - 1ull);
+        }
+      }
+    } else {
+      for (int b = base0; b < limit0; b++) {
+        uint64_t thr = thresholds[b] & mask;
+        if (x < thr) word0 |= (1ull << (b - base0));
+      }
     }
     uint64_t word1 = 0;
     if (w + 1 < out_words) {
       int base1 = (w + 1) * 64;
       int limit1 = (base1 + 64 < static_cast<int>(hdr->num_thr)) ? (base1 + 64) : static_cast<int>(hdr->num_thr);
-      for (int b = base1; b < limit1; b++) {
-        uint64_t thr = thresholds[b] & mask;
-        if (x < thr) word1 |= (1ull << (b - base1));
+      if (sorted) {
+        int len1 = limit1 - base1;
+        if (len1 > 0) {
+          uint64_t bits1 = (len1 >= 64) ? ~0ull : ((1ull << len1) - 1ull);
+          if (pos <= base1) {
+            word1 = bits1;
+          } else if (pos >= limit1) {
+            word1 = 0;
+          } else {
+            int off = pos - base1;
+            word1 = bits1 ^ ((1ull << off) - 1ull);
+          }
+        }
+      } else {
+        for (int b = base1; b < limit1; b++) {
+          uint64_t thr = thresholds[b] & mask;
+          if (x < thr) word1 |= (1ull << (b - base1));
+        }
       }
     }
-    uint8_t ctr_block[16] = {0};
+    alignas(16) uint64_t ctr_words[2];
     uint64_t ctr = hdr->nonce ^ (static_cast<uint64_t>(idx) << 32) ^ static_cast<uint64_t>(w / 2);
-    reinterpret_cast<uint64_t*>(ctr_block)[0] = ctr;
-    reinterpret_cast<uint64_t*>(ctr_block)[1] = 0;
-    aes128_encrypt_block(ctr_block, hdr->round_keys);
-    uint64_t ks0 = reinterpret_cast<uint64_t*>(ctr_block)[0];
-    uint64_t ks1 = reinterpret_cast<uint64_t*>(ctr_block)[1];
+    ctr_words[0] = ctr;
+    ctr_words[1] = 0;
+    aes128_encrypt_block(reinterpret_cast<uint8_t*>(ctr_words), hdr->round_keys);
+    uint64_t ks0 = ctr_words[0];
+    uint64_t ks1 = ctr_words[1];
+    uint64_t share0 = (hdr->party == 0) ? ks0 : (word0 ^ ks0);
+    out_masks[idx * static_cast<size_t>(out_words) + static_cast<size_t>(w)] = share0;
+    if (w + 1 < out_words) {
+      uint64_t share1 = (hdr->party == 0) ? ks1 : (word1 ^ ks1);
+      out_masks[idx * static_cast<size_t>(out_words) + static_cast<size_t>(w + 1)] = share1;
+    }
+  }
+}
+
+// Broadcast-key packed compare: apply one key blob to all xs (key derived masks still depend on idx).
+extern "C" __global__ void packed_cmp_kernel_keyed_broadcast(const uint8_t* key_blob,
+                                                             size_t key_bytes,
+                                                             const uint64_t* xs,
+                                                             uint64_t* out_masks,
+                                                             size_t N) {
+  (void)key_bytes;
+  size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= N) return;
+  auto* hdr = reinterpret_cast<const PackedCmpKeyDev*>(key_blob);
+  const uint64_t* thresholds = reinterpret_cast<const uint64_t*>(key_blob + sizeof(PackedCmpKeyDev));
+  int out_words = (static_cast<int>(hdr->num_thr) + 63) / 64;
+  uint64_t mask = mask_bits_dev(hdr->in_bits);
+  uint64_t x = xs[idx] & mask;
+  const bool sorted = (hdr->reserved[0] & 1u) != 0u;
+  int pos = 0;
+  if (sorted) {
+    int lo = 0;
+    int hi = static_cast<int>(hdr->num_thr);
+    while (lo < hi) {
+      int mid = (lo + hi) >> 1;
+      uint64_t thr = thresholds[mid] & mask;
+      if (x < thr) {
+        hi = mid;
+      } else {
+        lo = mid + 1;
+      }
+    }
+    pos = lo;
+  }
+  for (int w = 0; w < out_words; w += 2) {
+    int base0 = w * 64;
+    int limit0 = (base0 + 64 < static_cast<int>(hdr->num_thr)) ? (base0 + 64) : static_cast<int>(hdr->num_thr);
+    uint64_t word0 = 0;
+    if (sorted) {
+      int len0 = limit0 - base0;
+      if (len0 > 0) {
+        uint64_t bits0 = (len0 >= 64) ? ~0ull : ((1ull << len0) - 1ull);
+        if (pos <= base0) {
+          word0 = bits0;
+        } else if (pos >= limit0) {
+          word0 = 0;
+        } else {
+          int off = pos - base0;
+          word0 = bits0 ^ ((1ull << off) - 1ull);
+        }
+      }
+    } else {
+      for (int b = base0; b < limit0; b++) {
+        uint64_t thr = thresholds[b] & mask;
+        if (x < thr) word0 |= (1ull << (b - base0));
+      }
+    }
+    uint64_t word1 = 0;
+    if (w + 1 < out_words) {
+      int base1 = (w + 1) * 64;
+      int limit1 = (base1 + 64 < static_cast<int>(hdr->num_thr)) ? (base1 + 64) : static_cast<int>(hdr->num_thr);
+      if (sorted) {
+        int len1 = limit1 - base1;
+        if (len1 > 0) {
+          uint64_t bits1 = (len1 >= 64) ? ~0ull : ((1ull << len1) - 1ull);
+          if (pos <= base1) {
+            word1 = bits1;
+          } else if (pos >= limit1) {
+            word1 = 0;
+          } else {
+            int off = pos - base1;
+            word1 = bits1 ^ ((1ull << off) - 1ull);
+          }
+        }
+      } else {
+        for (int b = base1; b < limit1; b++) {
+          uint64_t thr = thresholds[b] & mask;
+          if (x < thr) word1 |= (1ull << (b - base1));
+        }
+      }
+    }
+    alignas(16) uint64_t ctr_words[2];
+    uint64_t ctr = hdr->nonce ^ (static_cast<uint64_t>(idx) << 32) ^ static_cast<uint64_t>(w / 2);
+    ctr_words[0] = ctr;
+    ctr_words[1] = 0;
+    aes128_encrypt_block(reinterpret_cast<uint8_t*>(ctr_words), hdr->round_keys);
+    uint64_t ks0 = ctr_words[0];
+    uint64_t ks1 = ctr_words[1];
     uint64_t share0 = (hdr->party == 0) ? ks0 : (word0 ^ ks0);
     out_masks[idx * static_cast<size_t>(out_words) + static_cast<size_t>(w)] = share0;
     if (w + 1 < out_words) {
@@ -288,21 +431,83 @@ extern "C" __global__ void vector_lut_kernel_keyed(const uint8_t* keys_flat,
   uint64_t mask = mask_bits_dev(hdr->in_bits);
   uint64_t x = xs[idx] & mask;
   int iv = static_cast<int>(hdr->intervals) - 1;
-  for (uint32_t j = 0; j < hdr->intervals; j++) {
-    uint64_t c0 = cuts[j] & mask;
-    uint64_t c1 = cuts[j + 1] & mask;
-    if (x >= c0 && x < c1) { iv = static_cast<int>(j); break; }
+  if (hdr->intervals > 1) {
+    // cuts[0..intervals-1] are interval starts (sorted); cuts[intervals] is end sentinel.
+    int lo = 0;
+    int hi = static_cast<int>(hdr->intervals);
+    while (lo < hi) {
+      int mid = (lo + hi) >> 1;
+      uint64_t c = cuts[mid] & mask;
+      if (c <= x) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    iv = lo - 1;
+    if (iv < 0) iv = 0;
+    if (iv >= static_cast<int>(hdr->intervals)) iv = static_cast<int>(hdr->intervals) - 1;
   }
   const uint64_t* row = payload + static_cast<size_t>(iv) * hdr->out_words;
   for (int w = 0; w < hdr->out_words; w += 2) {
-    uint8_t ctr_block[16] = {0};
     uint64_t base_ctr = static_cast<uint64_t>(iv) * hdr->out_words + static_cast<uint64_t>(w);
     uint64_t ctr = hdr->nonce ^ (static_cast<uint64_t>(idx) << 32) ^ base_ctr;
-    reinterpret_cast<uint64_t*>(ctr_block)[0] = ctr;
-    reinterpret_cast<uint64_t*>(ctr_block)[1] = 0;
-    aes128_encrypt_block(ctr_block, hdr->round_keys);
-    uint64_t ks0 = reinterpret_cast<uint64_t*>(ctr_block)[0];
-    uint64_t ks1 = reinterpret_cast<uint64_t*>(ctr_block)[1];
+    alignas(16) uint64_t ctr_words[2];
+    ctr_words[0] = ctr;
+    ctr_words[1] = 0;
+    aes128_encrypt_block(reinterpret_cast<uint8_t*>(ctr_words), hdr->round_keys);
+    uint64_t ks0 = ctr_words[0];
+    uint64_t ks1 = ctr_words[1];
+    uint64_t share0 = (hdr->party == 0) ? ks0 : (row[w] - ks0);
+    out[idx * static_cast<size_t>(hdr->out_words) + static_cast<size_t>(w)] = share0;
+    if (w + 1 < hdr->out_words) {
+      uint64_t share1 = (hdr->party == 0) ? ks1 : (row[w + 1] - ks1);
+      out[idx * static_cast<size_t>(hdr->out_words) + static_cast<size_t>(w + 1)] = share1;
+    }
+  }
+}
+
+// Broadcast-key vector LUT: apply one key blob to all xs (keystream still depends on idx and interval).
+extern "C" __global__ void vector_lut_kernel_keyed_broadcast(const uint8_t* key_blob,
+                                                             size_t key_bytes,
+                                                             const uint64_t* xs,
+                                                             uint64_t* out,
+                                                             size_t N) {
+  (void)key_bytes;
+  size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= N) return;
+  auto* hdr = reinterpret_cast<const IntervalKeyDev*>(key_blob);
+  const uint64_t* cuts = reinterpret_cast<const uint64_t*>(key_blob + sizeof(IntervalKeyDev));
+  const uint64_t* payload = cuts + (static_cast<size_t>(hdr->intervals) + 1);
+  uint64_t mask = mask_bits_dev(hdr->in_bits);
+  uint64_t x = xs[idx] & mask;
+  int iv = static_cast<int>(hdr->intervals) - 1;
+  if (hdr->intervals > 1) {
+    int lo = 0;
+    int hi = static_cast<int>(hdr->intervals);
+    while (lo < hi) {
+      int mid = (lo + hi) >> 1;
+      uint64_t c = cuts[mid] & mask;
+      if (c <= x) {
+        lo = mid + 1;
+      } else {
+        hi = mid;
+      }
+    }
+    iv = lo - 1;
+    if (iv < 0) iv = 0;
+    if (iv >= static_cast<int>(hdr->intervals)) iv = static_cast<int>(hdr->intervals) - 1;
+  }
+  const uint64_t* row = payload + static_cast<size_t>(iv) * hdr->out_words;
+  for (int w = 0; w < hdr->out_words; w += 2) {
+    uint64_t base_ctr = static_cast<uint64_t>(iv) * hdr->out_words + static_cast<uint64_t>(w);
+    uint64_t ctr = hdr->nonce ^ (static_cast<uint64_t>(idx) << 32) ^ base_ctr;
+    alignas(16) uint64_t ctr_words[2];
+    ctr_words[0] = ctr;
+    ctr_words[1] = 0;
+    aes128_encrypt_block(reinterpret_cast<uint8_t*>(ctr_words), hdr->round_keys);
+    uint64_t ks0 = ctr_words[0];
+    uint64_t ks1 = ctr_words[1];
     uint64_t share0 = (hdr->party == 0) ? ks0 : (row[w] - ks0);
     out[idx * static_cast<size_t>(hdr->out_words) + static_cast<size_t>(w)] = share0;
     if (w + 1 < hdr->out_words) {

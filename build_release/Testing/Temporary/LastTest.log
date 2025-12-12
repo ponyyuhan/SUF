@@ -1,0 +1,481 @@
+Start testing: Dec 12 21:39 CST
+----------------------------------------------------------
+1/26 Testing: test_planner_causal_bytes
+1/26 Test: test_planner_causal_bytes
+Command: "/home/yuhan/new/SUF/build_release/test_planner_causal_bytes"
+Directory: /home/yuhan/new/SUF/build_release
+"test_planner_causal_bytes" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+CubicPolyTask coeffs: c0=256 c1=18446744073709551360 c2=121 c3=18446744073709551589 r=4
+CubicPolyTask ref eval x=0 out=256 gate=0
+[pfss-layer] phases=21 coeff_jobs=4 trunc_jobs=0 coeff_flushes=4 trunc_flushes=0 coeff_hatx=4 trunc_hatx=0
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"test_planner_causal_bytes" end time: Dec 12 21:39 CST
+"test_planner_causal_bytes" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/26 Testing: test_planner_ragged_bytes
+2/26 Test: test_planner_ragged_bytes
+Command: "/home/yuhan/new/SUF/build_release/test_planner_ragged_bytes"
+Directory: /home/yuhan/new/SUF/build_release
+"test_planner_ragged_bytes" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+CubicPolyTask coeffs: c0=256 c1=18446744073709551360 c2=121 c3=18446744073709551589 r=4
+CubicPolyTask ref eval x=64 out=199 gate=0
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_planner_ragged_bytes" end time: Dec 12 21:39 CST
+"test_planner_ragged_bytes" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/26 Testing: test_planner_effbits_budget
+3/26 Test: test_planner_effbits_budget
+Command: "/home/yuhan/new/SUF/build_release/test_planner_effbits_budget"
+Directory: /home/yuhan/new/SUF/build_release
+"test_planner_effbits_budget" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+CubicPolyTask coeffs: c0=256 c1=18446744073709551360 c2=121 c3=18446744073709551589 r=4
+CubicPolyTask ref eval x=64 out=199 gate=0
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_planner_effbits_budget" end time: Dec 12 21:39 CST
+"test_planner_effbits_budget" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/26 Testing: test_cuda_pack_effbits
+4/26 Test: test_cuda_pack_effbits
+Command: "/home/yuhan/new/SUF/build_release/test_cuda_pack_effbits"
+Directory: /home/yuhan/new/SUF/build_release
+"test_cuda_pack_effbits" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+CUDA eff_bits pack/unpack tests passed.
+<end of output>
+Test time =   0.28 sec
+----------------------------------------------------------
+Test Passed.
+"test_cuda_pack_effbits" end time: Dec 12 21:39 CST
+"test_cuda_pack_effbits" time elapsed: 00:00:00
+----------------------------------------------------------
+
+5/26 Testing: test_softmax_gpu_smoke
+5/26 Test: test_softmax_gpu_smoke
+Command: "/home/yuhan/new/SUF/build_release/test_softmax_gpu_smoke"
+Directory: /home/yuhan/new/SUF/build_release
+"test_softmax_gpu_smoke" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+Softmax GPU smoke running in reference-only fallback; set SOFTMAX_GPU_STRICT=1 to exercise CUDA path.
+Softmax GPU smoke passed.
+<end of output>
+Test time =   0.02 sec
+----------------------------------------------------------
+Test Passed.
+"test_softmax_gpu_smoke" end time: Dec 12 21:39 CST
+"test_softmax_gpu_smoke" time elapsed: 00:00:00
+----------------------------------------------------------
+
+6/26 Testing: bench_gemm_overlap
+6/26 Test: bench_gemm_overlap
+Command: "/home/yuhan/new/SUF/build_release/bench_gemm_overlap"
+Directory: /home/yuhan/new/SUF/build_release
+"bench_gemm_overlap" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+Starting GEMM/PFSS overlap bench...
+CUDA devices found: 1
+Warmup...
+Timing PFSS only (auto)...
+Timing GEMM only (auto)...
+Timing overlap (auto)...
+[auto] PFSS_only_ms=4.88448 (pfss=4.86892) GEMM_only_ms=4.71777 (gemm=4.71559) overlap_ms=10.5144 (pfss=10.4884, gemm=4.93499)
+<end of output>
+Test time =   0.42 sec
+----------------------------------------------------------
+Test Passed.
+"bench_gemm_overlap" end time: Dec 12 21:39 CST
+"bench_gemm_overlap" time elapsed: 00:00:00
+----------------------------------------------------------
+
+7/26 Testing: test_trunc_task
+7/26 Test: test_trunc_task
+Command: "/home/yuhan/new/SUF/build_release/test_trunc_task"
+Directory: /home/yuhan/new/SUF/build_release
+"test_trunc_task" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+trunc task ok
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_trunc_task" end time: Dec 12 21:39 CST
+"test_trunc_task" time elapsed: 00:00:00
+----------------------------------------------------------
+
+8/26 Testing: test_layernorm_task
+8/26 Test: test_layernorm_task
+Command: "/home/yuhan/new/SUF/build_release/test_layernorm_task"
+Directory: /home/yuhan/new/SUF/build_release
+"test_layernorm_task" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+compile_suf_to_pfss_two_programs SiLU ptr=0x7ffcbc996960 size=17 monotonic=yes first=0 last=18446744073709551615 vals=0,4,8,16,32,64,128,256,512,1024,2048,4096,8192,16384,32768,65536,18446744073709551615
+LayerNormTask test passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_layernorm_task" end time: Dec 12 21:39 CST
+"test_layernorm_task" time elapsed: 00:00:00
+----------------------------------------------------------
+
+9/26 Testing: test_staged_softmax
+9/26 Test: test_staged_softmax
+Command: "/home/yuhan/new/SUF/build_release/test_staged_softmax"
+Directory: /home/yuhan/new/SUF/build_release
+"test_staged_softmax" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+CubicPolyTask coeffs: c0=50687 c1=18446744073709514991 c2=9696 c3=18446744073709550697 r=4
+CubicPolyTask ref eval x=131072 out=8869 gate=0
+Staged softmax test passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_staged_softmax" end time: Dec 12 21:39 CST
+"test_staged_softmax" time elapsed: 00:00:00
+----------------------------------------------------------
+
+10/26 Testing: test_pfss_planner
+10/26 Test: test_pfss_planner
+Command: "/home/yuhan/new/SUF/build_release/test_pfss_planner"
+Directory: /home/yuhan/new/SUF/build_release
+"test_pfss_planner" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+planner totals phases=2 ok
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_pfss_planner" end time: Dec 12 21:39 CST
+"test_pfss_planner" time elapsed: 00:00:00
+----------------------------------------------------------
+
+11/26 Testing: test_pfss_async
+11/26 Test: test_pfss_async
+Command: "/home/yuhan/new/SUF/build_release/test_pfss_async"
+Directory: /home/yuhan/new/SUF/build_release
+"test_pfss_async" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_pfss_async" end time: Dec 12 21:39 CST
+"test_pfss_async" time elapsed: 00:00:00
+----------------------------------------------------------
+
+12/26 Testing: test_pfss_async_stress
+12/26 Test: test_pfss_async_stress
+Command: "/home/yuhan/new/SUF/build_release/test_pfss_async_stress"
+Directory: /home/yuhan/new/SUF/build_release
+"test_pfss_async_stress" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_pfss_async_stress" end time: Dec 12 21:39 CST
+"test_pfss_async_stress" time elapsed: 00:00:00
+----------------------------------------------------------
+
+13/26 Testing: test_transformer_async
+13/26 Test: test_transformer_async
+Command: "/home/yuhan/new/SUF/build_release/test_transformer_async"
+Directory: /home/yuhan/new/SUF/build_release
+"test_transformer_async" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+CubicPolyTask coeffs: c0=65536 c1=18446744073709486080 c2=30901 c3=18446744073709544824 r=4
+CubicPolyTask ref eval x=0 out=65536 gate=0
+[pfss-phase][attn] coeff_jobs=1 trunc_jobs=0 coeff_flushes=1 trunc_flushes=0 coeff_hatx=1 trunc_hatx=0
+[pfss-layer] phases=9 coeff_jobs=1 trunc_jobs=0 coeff_flushes=1 trunc_flushes=0 coeff_hatx=1 trunc_hatx=0
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"test_transformer_async" end time: Dec 12 21:39 CST
+"test_transformer_async" time elapsed: 00:00:00
+----------------------------------------------------------
+
+14/26 Testing: test_planner_causal
+14/26 Test: test_planner_causal
+Command: "/home/yuhan/new/SUF/build_release/test_planner_causal"
+Directory: /home/yuhan/new/SUF/build_release
+"test_planner_causal" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+CubicPolyTask coeffs: c0=256 c1=18446744073709551360 c2=121 c3=18446744073709551589 r=4
+CubicPolyTask ref eval x=0 out=256 gate=0
+[pfss-phase][attn] coeff_jobs=1 trunc_jobs=0 coeff_flushes=1 trunc_flushes=0 coeff_hatx=1 trunc_hatx=0
+[pfss-phase][attn] coeff_jobs=1 trunc_jobs=0 coeff_flushes=1 trunc_flushes=0 coeff_hatx=0 trunc_hatx=0
+[pfss-phase][attn] coeff_jobs=1 trunc_jobs=0 coeff_flushes=1 trunc_flushes=0 coeff_hatx=0 trunc_hatx=0
+[pfss-phase][attn] coeff_jobs=1 trunc_jobs=0 coeff_flushes=1 trunc_flushes=0 coeff_hatx=0 trunc_hatx=0
+[pfss-phase][attn] coeff_jobs=1 trunc_jobs=0 coeff_flushes=1 trunc_flushes=0 coeff_hatx=2 trunc_hatx=0
+[pfss-phase][attn] coeff_jobs=1 trunc_jobs=0 coeff_flushes=1 trunc_flushes=0 coeff_hatx=0 trunc_hatx=0
+[pfss-phase][attn] coeff_jobs=1 trunc_jobs=0 coeff_flushes=1 trunc_flushes=0 coeff_hatx=0 trunc_hatx=0
+[pfss-phase][attn] coeff_jobs=1 trunc_jobs=0 coeff_flushes=1 trunc_flushes=0 coeff_hatx=0 trunc_hatx=0
+[pfss-phase][attn] coeff_jobs=1 trunc_jobs=0 coeff_flushes=1 trunc_flushes=0 coeff_hatx=3 trunc_hatx=0
+[pfss-phase][attn] coeff_jobs=1 trunc_jobs=0 coeff_flushes=1 trunc_flushes=0 coeff_hatx=0 trunc_hatx=0
+[pfss-phase][attn] coeff_jobs=1 trunc_jobs=0 coeff_flushes=1 trunc_flushes=0 coeff_hatx=0 trunc_hatx=0
+[pfss-phase][attn] coeff_jobs=1 trunc_jobs=0 coeff_flushes=1 trunc_flushes=0 coeff_hatx=0 trunc_hatx=0
+[pfss-phase][attn] coeff_jobs=1 trunc_jobs=0 coeff_flushes=1 trunc_flushes=0 coeff_hatx=4 trunc_hatx=0
+[pfss-layer] phases=21 coeff_jobs=13 trunc_jobs=0 coeff_flushes=13 trunc_flushes=0 coeff_hatx=10 trunc_hatx=0
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"test_planner_causal" end time: Dec 12 21:39 CST
+"test_planner_causal" time elapsed: 00:00:00
+----------------------------------------------------------
+
+15/26 Testing: test_gapars_selector
+15/26 Test: test_gapars_selector
+Command: "/home/yuhan/new/SUF/build_release/test_gapars_selector"
+Directory: /home/yuhan/new/SUF/build_release
+"test_gapars_selector" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_gapars_selector" end time: Dec 12 21:39 CST
+"test_gapars_selector" time elapsed: 00:00:00
+----------------------------------------------------------
+
+16/26 Testing: test_pfss_gpu
+16/26 Test: test_pfss_gpu
+Command: "/home/yuhan/new/SUF/build_release/test_pfss_gpu"
+Directory: /home/yuhan/new/SUF/build_release
+"test_pfss_gpu" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+GPU DCF/LUT checks passed
+Composite keys generated
+CPU composite done
+GPU composite skipped (set RUN_GPU_COMPOSITE=1 to enable)
+<end of output>
+Test time =   0.28 sec
+----------------------------------------------------------
+Test Passed.
+"test_pfss_gpu" end time: Dec 12 21:39 CST
+"test_pfss_gpu" time elapsed: 00:00:00
+----------------------------------------------------------
+
+17/26 Testing: test_cuda_trunc_gapars
+17/26 Test: test_cuda_trunc_gapars
+Command: "/home/yuhan/new/SUF/build_release/test_cuda_trunc_gapars"
+Directory: /home/yuhan/new/SUF/build_release
+"test_cuda_trunc_gapars" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+[trunc-gpu] starting
+[trunc-gpu] p0 eval GapARS start
+[trunc-gpu] p1 eval GapARS start
+[trunc-gpu] p0 eval GapARS done
+[trunc-gpu] p0 eval FaithfulTR start
+[trunc-gpu] p1 eval GapARS done
+[trunc-gpu] p1 eval FaithfulTR start
+[trunc-gpu] p0 eval FaithfulTR done
+[trunc-gpu] p1 eval FaithfulTR done
+[trunc-gpu] CPU eval start
+[trunc-gpu] CPU eval done
+CUDA GapARS/Faithful truncation tests passed.
+<end of output>
+Test time =   0.24 sec
+----------------------------------------------------------
+Test Passed.
+"test_cuda_trunc_gapars" end time: Dec 12 21:39 CST
+"test_cuda_trunc_gapars" time elapsed: 00:00:00
+----------------------------------------------------------
+
+18/26 Testing: test_cuda_prg
+18/26 Test: test_cuda_prg
+Command: "/home/yuhan/new/SUF/build_release/test_cuda_prg"
+Directory: /home/yuhan/new/SUF/build_release
+"test_cuda_prg" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+AES-CTR CUDA test passed
+<end of output>
+Test time =   0.27 sec
+----------------------------------------------------------
+Test Passed.
+"test_cuda_prg" end time: Dec 12 21:39 CST
+"test_cuda_prg" time elapsed: 00:00:00
+----------------------------------------------------------
+
+19/26 Testing: test_cuda_pred_mask
+19/26 Test: test_cuda_pred_mask
+Command: "/home/yuhan/new/SUF/build_release/test_cuda_pred_mask"
+Directory: /home/yuhan/new/SUF/build_release
+"test_cuda_pred_mask" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+CUDA pred mask test passed
+<end of output>
+Test time =   0.29 sec
+----------------------------------------------------------
+Test Passed.
+"test_cuda_pred_mask" end time: Dec 12 21:39 CST
+"test_cuda_pred_mask" time elapsed: 00:00:00
+----------------------------------------------------------
+
+20/26 Testing: test_cuda_packed_pfss
+20/26 Test: test_cuda_packed_pfss
+Command: "/home/yuhan/new/SUF/build_release/test_cuda_packed_pfss"
+Directory: /home/yuhan/new/SUF/build_release
+"test_cuda_packed_pfss" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+CUDA packed PFSS tests passed.
+<end of output>
+Test time =   0.27 sec
+----------------------------------------------------------
+Test Passed.
+"test_cuda_packed_pfss" end time: Dec 12 21:39 CST
+"test_cuda_packed_pfss" time elapsed: 00:00:00
+----------------------------------------------------------
+
+21/26 Testing: test_cuda_beaver_mul
+21/26 Test: test_cuda_beaver_mul
+Command: "/home/yuhan/new/SUF/build_release/test_cuda_beaver_mul"
+Directory: /home/yuhan/new/SUF/build_release
+"test_cuda_beaver_mul" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+CUDA beaver mul test passed
+<end of output>
+Test time =   0.30 sec
+----------------------------------------------------------
+Test Passed.
+"test_cuda_beaver_mul" end time: Dec 12 21:39 CST
+"test_cuda_beaver_mul" time elapsed: 00:00:00
+----------------------------------------------------------
+
+22/26 Testing: test_cuda_trunc_postproc
+22/26 Test: test_cuda_trunc_postproc
+Command: "/home/yuhan/new/SUF/build_release/test_cuda_trunc_postproc"
+Directory: /home/yuhan/new/SUF/build_release
+"test_cuda_trunc_postproc" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+CUDA trunc postproc test passed
+<end of output>
+Test time =   0.30 sec
+----------------------------------------------------------
+Test Passed.
+"test_cuda_trunc_postproc" end time: Dec 12 21:39 CST
+"test_cuda_trunc_postproc" time elapsed: 00:00:00
+----------------------------------------------------------
+
+23/26 Testing: test_cuda_horner_cubic
+23/26 Test: test_cuda_horner_cubic
+Command: "/home/yuhan/new/SUF/build_release/test_cuda_horner_cubic"
+Directory: /home/yuhan/new/SUF/build_release
+"test_cuda_horner_cubic" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+CUDA Horner cubic test passed
+<end of output>
+Test time =   0.29 sec
+----------------------------------------------------------
+Test Passed.
+"test_cuda_horner_cubic" end time: Dec 12 21:39 CST
+"test_cuda_horner_cubic" time elapsed: 00:00:00
+----------------------------------------------------------
+
+24/26 Testing: test_cuda_recip_task
+24/26 Test: test_cuda_recip_task
+Command: "/home/yuhan/new/SUF/build_release/test_cuda_recip_task"
+Directory: /home/yuhan/new/SUF/build_release
+"test_cuda_recip_task" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+cuda recip task ok
+<end of output>
+Test time =   0.32 sec
+----------------------------------------------------------
+Test Passed.
+"test_cuda_recip_task" end time: Dec 12 21:39 CST
+"test_cuda_recip_task" time elapsed: 00:00:00
+----------------------------------------------------------
+
+25/26 Testing: test_matmul_and_attention_executor
+25/26 Test: test_matmul_and_attention_executor
+Command: "/home/yuhan/new/SUF/build_release/test_matmul_and_attention"
+Directory: /home/yuhan/new/SUF/build_release
+"test_matmul_and_attention_executor" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+[run] test_attention_correctness
+CubicPolyTask coeffs: c0=256 c1=18446744073709551360 c2=121 c3=18446744073709551589 r=4
+CubicPolyTask ref eval x=0 out=256 gate=0
+[run] test_attention_step_vs_batch
+attention planner stats p0 coeff_jobs=3 trunc_jobs=0 coeff_flushes=3 trunc_flushes=0
+attention planner stats p1 coeff_jobs=3 trunc_jobs=0 coeff_flushes=3 trunc_flushes=0
+[run] test_mlp_only
+[run] test_transformer_layer
+[pfss-phase][attn] coeff_jobs=1 trunc_jobs=0 coeff_flushes=1 trunc_flushes=0 coeff_hatx=1 trunc_hatx=0
+[pfss-phase][attn] coeff_jobs=1 trunc_jobs=0 coeff_flushes=1 trunc_flushes=0 coeff_hatx=0 trunc_hatx=0
+[pfss-phase][attn] coeff_jobs=1 trunc_jobs=0 coeff_flushes=1 trunc_flushes=0 coeff_hatx=0 trunc_hatx=0
+[pfss-phase][attn] coeff_jobs=1 trunc_jobs=0 coeff_flushes=1 trunc_flushes=0 coeff_hatx=0 trunc_hatx=0
+[pfss-phase][attn] coeff_jobs=1 trunc_jobs=0 coeff_flushes=1 trunc_flushes=0 coeff_hatx=2 trunc_hatx=0
+[pfss-layer] phases=13 coeff_jobs=5 trunc_jobs=0 coeff_flushes=5 trunc_flushes=0 coeff_hatx=3 trunc_hatx=0
+[skip] test_transformer_numeric_regression (set RUN_TRANSFORMER_NUMERIC=1 to run)
+Attention/Transformer tests passed
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"test_matmul_and_attention_executor" end time: Dec 12 21:39 CST
+"test_matmul_and_attention_executor" time elapsed: 00:00:00
+----------------------------------------------------------
+
+26/26 Testing: test_matmul_executor
+26/26 Test: test_matmul_executor
+Command: "/home/yuhan/new/SUF/build_release/test_matmul"
+Directory: /home/yuhan/new/SUF/build_release
+"test_matmul_executor" start time: Dec 12 21:39 CST
+Output:
+----------------------------------------------------------
+beaver max diff 0
+beaver max diff 0
+beaver max diff 0
+beaver max diff 0
+Matmul public/private tests passed
+<end of output>
+Test time =   0.00 sec
+----------------------------------------------------------
+Test Passed.
+"test_matmul_executor" end time: Dec 12 21:39 CST
+"test_matmul_executor" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Dec 12 21:39 CST

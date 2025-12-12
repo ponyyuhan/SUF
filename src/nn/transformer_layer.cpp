@@ -597,6 +597,11 @@ void transformer_layer_forward(const TransformerConfig& cfg,
     Y_share.data[i] = proto::add_mod(Y_share.data[i], attn_out[i]);
   }
 
+  // Finalize compiler-driven range/hoist and enqueue any remaining truncation
+  // gates into the shared PFSS batch. Flushing is handled by the layer planner
+  // below (optionally async when a dedicated PFSS channel is provided).
+  finalize_layer(*ctx, party, ch, backend, /*flush_pfss=*/false);
+
   // Final safety flush and layer-level accounting for PFSS.
   if (layer_planner_ptr) {
     runtime::ProtoChanFromNet pch_layer(*pfss_nc);
@@ -635,8 +640,6 @@ void transformer_layer_forward(const TransformerConfig& cfg,
       pe->open_collector().flush(party, ch);
     }
   }
-  bool flush_pfss = !(ctx && ctx->allow_async_pfss);
-  finalize_layer(*ctx, party, ch, backend, flush_pfss);
   if (ctx && restore_disable) ctx->disable_inner_barriers = false;
   ctx->pfss_layer_planner = prev_layer_planner;
 }

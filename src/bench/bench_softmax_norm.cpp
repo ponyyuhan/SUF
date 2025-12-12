@@ -29,6 +29,7 @@
 #include "runtime/phase_executor.hpp"
 #include "runtime/phase_tasks.hpp"
 #include "runtime/pfss_phase_planner.hpp"
+#include "runtime/pfss_gpu_staging.hpp"
 #include "runtime/pfss_superbatch.hpp"
 
 namespace {
@@ -214,6 +215,17 @@ SoftmaxResult run_softmax_party(int party,
     pe.pfss_coeff_batch().set_device_outputs(true);
     pe.pfss_trunc_batch().set_device_outputs(true);
   }
+
+#ifdef SUF_HAVE_CUDA
+  std::unique_ptr<runtime::CudaPfssStager> cuda_stager;
+  if (device_only) {
+    if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(&backend)) {
+      cuda_stager = std::make_unique<runtime::CudaPfssStager>(staged->device_stream());
+      pe.pfss_coeff_batch().set_gpu_stager(cuda_stager.get());
+      pe.pfss_trunc_batch().set_gpu_stager(cuda_stager.get());
+    }
+  }
+#endif
 
   nn::SoftmaxPlan plan;
   plan.frac_bits = fb;
@@ -453,7 +465,8 @@ BenchResult bench_softmax(int rows, int cols, int fb, int reps, bool device_only
     LocalChan c0(&sh, true), c1(&sh, false);
     auto start = std::chrono::steady_clock::now();
     SoftmaxResult r0, r1;
-    std::exception_ptr exc;
+    std::exception_ptr exc0;
+    std::exception_ptr exc1;
     auto nexp_bundle0 = gates::make_nexp_cubic_bundle(nexp_mat, fb);
     auto recip_bundle0 = gates::make_recip_bundle(recip_mat);
     runtime::TruncChoice prob_choice;
@@ -464,7 +477,7 @@ BenchResult bench_softmax(int rows, int cols, int fb, int reps, bool device_only
     std::thread t([&]() {
       try {
         r1 = run_softmax_party(1, rows, cols, fb, valid, nexp_bundle0, recip_bundle0, prob_choice, &rb1, be1, c1, std::span<const uint64_t>(t1.data(), t1.size()), device_timing || device_only);
-      } catch (...) { exc = std::current_exception(); }
+      } catch (...) { exc1 = std::current_exception(); }
     });
     float dev_ms = 0.0f;
     cudaEvent_t ev_start = nullptr, ev_end = nullptr;
@@ -481,9 +494,12 @@ BenchResult bench_softmax(int rows, int cols, int fb, int reps, bool device_only
       cudaEventCreate(&ev_end);
       cudaEventRecord(ev_start, stream);
     }
-    r0 = run_softmax_party(0, rows, cols, fb, valid, nexp_bundle0, recip_bundle0, prob_choice, &rb0, be0, c0, std::span<const uint64_t>(t0.data(), t0.size()), device_timing || device_only);
+    try {
+      r0 = run_softmax_party(0, rows, cols, fb, valid, nexp_bundle0, recip_bundle0, prob_choice, &rb0, be0, c0, std::span<const uint64_t>(t0.data(), t0.size()), device_timing || device_only);
+    } catch (...) {
+      exc0 = std::current_exception();
+    }
     t.join();
-    if (exc) std::rethrow_exception(exc);
     if (staged) {
       cudaEventRecord(ev_end, stream);
       cudaEventSynchronize(ev_end);
@@ -491,6 +507,8 @@ BenchResult bench_softmax(int rows, int cols, int fb, int reps, bool device_only
       cudaEventDestroy(ev_start);
       cudaEventDestroy(ev_end);
     }
+    if (exc0) std::rethrow_exception(exc0);
+    if (exc1) std::rethrow_exception(exc1);
     auto end = std::chrono::steady_clock::now();
     if (std::getenv("SOFTMAX_BENCH_TRACE")) {
       std::fprintf(stderr, "[bench] run_pair finished host_ms=%.3f dev_ms=%.3f\n",
@@ -596,6 +614,22 @@ BenchResult bench_layernorm(int rows, int cols, int fb, int reps, bool device_on
       pe1.pfss_coeff_batch().set_device_outputs(true);
       pe1.pfss_trunc_batch().set_device_outputs(true);
     }
+#ifdef SUF_HAVE_CUDA
+    std::unique_ptr<runtime::CudaPfssStager> cuda_stager0;
+    std::unique_ptr<runtime::CudaPfssStager> cuda_stager1;
+    if (device_timing || device_only) {
+      if (auto* staged0 = dynamic_cast<proto::PfssGpuStagedEval*>(&be0)) {
+        cuda_stager0 = std::make_unique<runtime::CudaPfssStager>(staged0->device_stream());
+        pe0.pfss_coeff_batch().set_gpu_stager(cuda_stager0.get());
+        pe0.pfss_trunc_batch().set_gpu_stager(cuda_stager0.get());
+      }
+      if (auto* staged1 = dynamic_cast<proto::PfssGpuStagedEval*>(&be1)) {
+        cuda_stager1 = std::make_unique<runtime::CudaPfssStager>(staged1->device_stream());
+        pe1.pfss_coeff_batch().set_gpu_stager(cuda_stager1.get());
+        pe1.pfss_trunc_batch().set_gpu_stager(cuda_stager1.get());
+      }
+    }
+#endif
 
     std::vector<uint64_t> y0(x0.size(), 0ull), y1(x1.size(), 0ull);
     auto bundle0 = b0.bundle;
@@ -617,7 +651,8 @@ BenchResult bench_layernorm(int rows, int cols, int fb, int reps, bool device_on
       cudaEventCreate(&ev_end);
       cudaEventRecord(ev_start, stream);
     }
-    std::exception_ptr exc;
+    std::exception_ptr exc0;
+    std::exception_ptr exc1;
     std::thread t([&]() {
       try {
         auto task = std::make_unique<runtime::LayerNormTask>(
@@ -628,7 +663,7 @@ BenchResult bench_layernorm(int rows, int cols, int fb, int reps, bool device_on
             cols);
         pe1.add_task(std::move(task));
         pe1.run(R1);
-      } catch (...) { exc = std::current_exception(); }
+      } catch (...) { exc1 = std::current_exception(); }
     });
     auto task0 = std::make_unique<runtime::LayerNormTask>(
         bundle0,
@@ -636,10 +671,13 @@ BenchResult bench_layernorm(int rows, int cols, int fb, int reps, bool device_on
         std::span<uint64_t>(y0.data(), y0.size()),
         rows,
         cols);
-    pe0.add_task(std::move(task0));
-    pe0.run(R0);
+    try {
+      pe0.add_task(std::move(task0));
+      pe0.run(R0);
+    } catch (...) {
+      exc0 = std::current_exception();
+    }
     t.join();
-    if (exc) std::rethrow_exception(exc);
     if (staged) {
       cudaEventRecord(ev_end, stream);
       cudaEventSynchronize(ev_end);
@@ -647,6 +685,8 @@ BenchResult bench_layernorm(int rows, int cols, int fb, int reps, bool device_on
       cudaEventDestroy(ev_start);
       cudaEventDestroy(ev_end);
     }
+    if (exc0) std::rethrow_exception(exc0);
+    if (exc1) std::rethrow_exception(exc1);
     auto end = std::chrono::steady_clock::now();
     if (!device_only) {
       for (size_t i = 0; i < y0.size(); ++i) {
@@ -759,9 +799,25 @@ int main(int argc, char** argv) {
   };
 
   if (!sweep_blocks.empty()) {
-    for (int blk : sweep_blocks) run_once(blk);
+    try {
+      for (int blk : sweep_blocks) run_once(blk);
+    } catch (const std::exception& e) {
+      std::cerr << "bench_softmax_norm failed: " << e.what() << "\n";
+      return 1;
+    } catch (...) {
+      std::cerr << "bench_softmax_norm failed: unknown\n";
+      return 1;
+    }
   } else {
-    run_once(gpu_block);
+    try {
+      run_once(gpu_block);
+    } catch (const std::exception& e) {
+      std::cerr << "bench_softmax_norm failed: " << e.what() << "\n";
+      return 1;
+    } catch (...) {
+      std::cerr << "bench_softmax_norm failed: unknown\n";
+      return 1;
+    }
   }
   return 0;
 }

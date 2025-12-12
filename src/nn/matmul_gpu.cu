@@ -2,6 +2,7 @@
 
 #ifdef SUF_HAVE_CUDA
 #include <cuda_runtime.h>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <stdexcept>
@@ -118,6 +119,14 @@ struct MatmulScratch {
   size_t w_cap = 0;
   size_t b_cap = 0;
   size_t y_cap = 0;
+  const void* last_x_host = nullptr;
+  size_t last_x_bytes = 0;
+  const void* last_w_host = nullptr;
+  size_t last_w_bytes = 0;
+  const void* last_b_host = nullptr;
+  size_t last_b_bytes = 0;
+  cudaEvent_t ready = nullptr;  // signals when scratch buffers are safe to reuse
+  bool ready_recorded = false;
   std::mutex mu;
 
   bool ensure_alloc(size_t bytes, void** ptr, size_t& cap) {
@@ -140,6 +149,13 @@ struct MatmulScratch {
     if (dY) cudaFree(dY);
     dX = nullptr; dW = nullptr; dB = nullptr; dY = nullptr;
     x_cap = w_cap = b_cap = y_cap = 0;
+    last_x_host = last_w_host = last_b_host = nullptr;
+    last_x_bytes = last_w_bytes = last_b_bytes = 0;
+    if (ready) {
+      cudaEventDestroy(ready);
+      ready = nullptr;
+    }
+    ready_recorded = false;
   }
 };
 
@@ -231,6 +247,16 @@ bool matmul_publicW_gpu(const TensorView<uint64_t>& X_share,
   auto& sc = scratch();
   std::unique_lock<std::mutex> lock(sc.mu);
 
+  // Ensure any prior async use of the scratch buffers has completed before
+  // reusing/freeing them. Use a lightweight event dependency rather than a
+  // global device sync so different streams stay overlap-friendly.
+  if (!sc.ready) {
+    cudaEventCreateWithFlags(&sc.ready, cudaEventDisableTiming);
+  }
+  if (sc.ready && sc.ready_recorded) {
+    cudaStreamWaitEvent(stream, sc.ready, 0);
+  }
+
   bool ok = true;
   ok &= sc.ensure_alloc(sizeof(uint64_t) * batch * M * K, reinterpret_cast<void**>(&sc.dX), sc.x_cap);
   ok &= sc.ensure_alloc(sizeof(int64_t) * W_public.shape[0] * W_public.shape[1], reinterpret_cast<void**>(&sc.dW), sc.w_cap);
@@ -244,13 +270,31 @@ bool matmul_publicW_gpu(const TensorView<uint64_t>& X_share,
   }
   size_t X_bytes = sizeof(uint64_t) * batch * M * K;
   size_t W_bytes = sizeof(int64_t) * W_public.shape[0] * W_public.shape[1];
-  ok &= check(cudaMemcpyAsync(sc.dX, X_share.data, X_bytes, cudaMemcpyHostToDevice, stream));
-  ok &= check(cudaMemcpyAsync(sc.dW, W_public.data, W_bytes, cudaMemcpyHostToDevice, stream));
+  const bool cache_x = params.cache_input || (std::getenv("SUF_MATMUL_GPU_CACHE_X") != nullptr);
+  const bool cache_w = params.cache_weights || (std::getenv("SUF_MATMUL_GPU_CACHE_W") != nullptr);
+  const bool cache_b = params.cache_bias || (std::getenv("SUF_MATMUL_GPU_CACHE_B") != nullptr);
+  if (!cache_x || X_share.data != sc.last_x_host || X_bytes != sc.last_x_bytes) {
+    ok &= check(cudaMemcpyAsync(sc.dX, X_share.data, X_bytes, cudaMemcpyHostToDevice, stream));
+    sc.last_x_host = X_share.data;
+    sc.last_x_bytes = X_bytes;
+  }
+  if (!cache_w || W_public.data != sc.last_w_host || W_bytes != sc.last_w_bytes) {
+    ok &= check(cudaMemcpyAsync(sc.dW, W_public.data, W_bytes, cudaMemcpyHostToDevice, stream));
+    sc.last_w_host = W_public.data;
+    sc.last_w_bytes = W_bytes;
+  }
   if (params.bias) {
-    ok &= check(cudaMemcpyAsync(sc.dB, params.bias->data(), sizeof(int64_t) * params.bias->size(),
-                                cudaMemcpyHostToDevice, stream));
+    size_t B_bytes = sizeof(int64_t) * params.bias->size();
+    if (!cache_b || params.bias->data() != sc.last_b_host || B_bytes != sc.last_b_bytes) {
+      ok &= check(cudaMemcpyAsync(sc.dB, params.bias->data(), B_bytes,
+                                  cudaMemcpyHostToDevice, stream));
+      sc.last_b_host = params.bias->data();
+      sc.last_b_bytes = B_bytes;
+    }
   } else {
     sc.dB = nullptr;
+    sc.last_b_host = nullptr;
+    sc.last_b_bytes = 0;
   }
   if (!ok) {
     sc.release();
@@ -276,10 +320,18 @@ bool matmul_publicW_gpu(const TensorView<uint64_t>& X_share,
     sc.release();
     return false;
   }
-  ok &= check(cudaMemcpyAsync(Y_share.data, sc.dY, sizeof(uint64_t) * total_out,
-                              cudaMemcpyDeviceToHost, stream));
-  ok &= check(cudaStreamSynchronize(stream));
-  // Keep device buffers for reuse; lock held for lifetime of this call to avoid races.
+  if (!params.device_only) {
+    ok &= check(cudaMemcpyAsync(Y_share.data, sc.dY, sizeof(uint64_t) * total_out,
+                                cudaMemcpyDeviceToHost, stream));
+  }
+  if (sc.ready) {
+    cudaEventRecord(sc.ready, stream);
+    sc.ready_recorded = true;
+  }
+  if (!params.device_only) {
+    ok &= check(cudaStreamSynchronize(stream));
+  }
+  // Keep device buffers for reuse; scratch access is serialized via mutex.
   lock.unlock();
   return ok;
 #endif

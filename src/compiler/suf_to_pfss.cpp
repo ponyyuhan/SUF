@@ -1,6 +1,8 @@
 #include "compiler/suf_to_pfss.hpp"
 
 #include <algorithm>
+#include <numeric>
+#include <tuple>
 #include <unordered_map>
 #include <iostream>
 #include "suf/mask_rewrite.hpp"
@@ -119,6 +121,38 @@ static suf::BoolExpr rewrite_bool_expr(const suf::BoolExpr& e,
   }, e.node);
 }
 
+static suf::BoolExpr remap_bool_expr_pred_indices(const suf::BoolExpr& e,
+                                                  const std::vector<int>& new_of_old) {
+  return std::visit([&](auto&& n) -> suf::BoolExpr {
+    using T = std::decay_t<decltype(n)>;
+    if constexpr (std::is_same_v<T, suf::BConst>) {
+      return suf::BoolExpr{n};
+    } else if constexpr (std::is_same_v<T, suf::BVar>) {
+      int idx = n.pred_idx;
+      if (idx >= 0 && static_cast<size_t>(idx) < new_of_old.size()) {
+        return suf::BoolExpr{suf::BVar{new_of_old[static_cast<size_t>(idx)]}};
+      }
+      // Negative indices refer to wrap bits; leave untouched.
+      return suf::BoolExpr{n};
+    } else if constexpr (std::is_same_v<T, suf::BNot>) {
+      return suf::BoolExpr{suf::BNot{
+          std::make_unique<suf::BoolExpr>(remap_bool_expr_pred_indices(*n.a, new_of_old))}};
+    } else if constexpr (std::is_same_v<T, suf::BXor>) {
+      return suf::BoolExpr{suf::BXor{
+          std::make_unique<suf::BoolExpr>(remap_bool_expr_pred_indices(*n.a, new_of_old)),
+          std::make_unique<suf::BoolExpr>(remap_bool_expr_pred_indices(*n.b, new_of_old))}};
+    } else if constexpr (std::is_same_v<T, suf::BAnd>) {
+      return suf::BoolExpr{suf::BAnd{
+          std::make_unique<suf::BoolExpr>(remap_bool_expr_pred_indices(*n.a, new_of_old)),
+          std::make_unique<suf::BoolExpr>(remap_bool_expr_pred_indices(*n.b, new_of_old))}};
+    } else {  // BOr
+      return suf::BoolExpr{suf::BOr{
+          std::make_unique<suf::BoolExpr>(remap_bool_expr_pred_indices(*n.a, new_of_old)),
+          std::make_unique<suf::BoolExpr>(remap_bool_expr_pred_indices(*n.b, new_of_old))}};
+    }
+  }, e.node);
+}
+
 static std::vector<uint64_t> flatten_coeffs(const suf::SufPiece<uint64_t>& piece, int degree, int r) {
   std::vector<uint64_t> flat(static_cast<size_t>(r * (degree + 1)), 0);
   for (int i = 0; i < r; i++) {
@@ -150,13 +184,22 @@ static void build_coeff_step(const suf::SUF<uint64_t>& F, uint64_t r_in, CoeffPr
   std::sort(segs.begin(), segs.end(), [](const Seg& x, const Seg& y) { return x.start < y.start; });
   if (segs.empty()) return;
   out.base_payload_words = segs[0].payload;
+  const std::vector<uint64_t>* prev = &segs[0].payload;
   for (size_t i = 1; i < segs.size(); i++) {
-    out.cutpoints_ge.push_back(segs[i].start);
-    std::vector<uint64_t> delta(out.out_words, 0);
+    std::vector<uint64_t> delta(static_cast<size_t>(out.out_words), 0);
+    bool all_zero = true;
     for (int j = 0; j < out.out_words; j++) {
-      delta[static_cast<size_t>(j)] = segs[i].payload[static_cast<size_t>(j)] - segs[i - 1].payload[static_cast<size_t>(j)];
+      uint64_t d = segs[i].payload[static_cast<size_t>(j)] - (*prev)[static_cast<size_t>(j)];
+      delta[static_cast<size_t>(j)] = d;
+      all_zero = all_zero && (d == 0);
     }
+    // Drop redundant cutpoints when the payload does not change. This happens
+    // for predicate-only SUFs (e.g., truncation carry/sign), where wrap-splitting
+    // introduces a synthetic boundary but coefficients remain constant.
+    if (all_zero) continue;
+    out.cutpoints_ge.push_back(segs[i].start);
     out.deltas_words.push_back(std::move(delta));
+    prev = &segs[i].payload;
   }
 }
 
@@ -310,6 +353,44 @@ CompiledSUFGate compile_suf_to_pfss_two_programs(
   out.pred = std::move(pd);
   out.wrap_bits = wrap_bits;
 
+  // Canonicalize raw predicate query ordering to help packed backends and GPU kernels:
+  // group by (kind, bits_in) and sort by theta. This is semantics-preserving as long as
+  // we remap the BoolExpr indices accordingly.
+  if (!out.pred.queries.empty()) {
+    std::vector<int> order(out.pred.queries.size());
+    std::iota(order.begin(), order.end(), 0);
+    auto sort_key = [&](int i) {
+      const auto& q = out.pred.queries[static_cast<size_t>(i)];
+      int kind = static_cast<int>(q.kind);
+      int bits_in = (q.kind == RawPredKind::kLtLow) ? static_cast<int>(q.f) : 64;
+      return std::tuple<int, int, uint64_t>(kind, bits_in, q.theta);
+    };
+    std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
+      return sort_key(a) < sort_key(b);
+    });
+    bool already_sorted = true;
+    for (size_t i = 0; i < order.size(); ++i) {
+      if (order[i] != static_cast<int>(i)) { already_sorted = false; break; }
+    }
+    if (!already_sorted) {
+      std::vector<RawPredQuery> sorted;
+      sorted.reserve(out.pred.queries.size());
+      std::vector<int> new_of_old(out.pred.queries.size(), -1);
+      for (size_t new_idx = 0; new_idx < order.size(); ++new_idx) {
+        int old_idx = order[new_idx];
+        sorted.push_back(out.pred.queries[static_cast<size_t>(old_idx)]);
+        new_of_old[static_cast<size_t>(old_idx)] = static_cast<int>(new_idx);
+      }
+      // Remap BoolExpr indices to refer to the new query order.
+      for (auto& piece : out.bool_per_piece) {
+        for (auto& expr : piece) {
+          expr = remap_bool_expr_pred_indices(expr, new_of_old);
+        }
+      }
+      out.pred.queries = std::move(sorted);
+    }
+  }
+
   CoeffProgramDesc cd;
   cd.n = Fn.n_bits;
   cd.mode = coeff_mode;
@@ -334,6 +415,33 @@ CompiledSUFGate compile_suf_to_pfss_two_programs(
     std::sort(cd.intervals.begin(), cd.intervals.end(), [](const IntervalPayload& x, const IntervalPayload& y){ return x.lo < y.lo; });
   }
   out.coeff = std::move(cd);
+
+  // Infer a safe eff_bits hint for hatx staging/packing when the coefficient
+  // program does not depend on x (no cutpoints / single interval). In that
+  // case, the only x-dependence comes from low-bit predicates.
+  bool coeff_depends_on_x = false;
+  if (out.coeff.mode == CoeffMode::kStepDcf) {
+    coeff_depends_on_x = !out.coeff.cutpoints_ge.empty();
+  } else {  // Interval LUT
+    coeff_depends_on_x = out.coeff.intervals.size() > 1;
+  }
+  if (!coeff_depends_on_x) {
+    bool has_full_compare = false;
+    int max_low_bits = 0;
+    for (const auto& q : out.pred.queries) {
+      if (q.kind == RawPredKind::kLtU64) {
+        has_full_compare = true;
+        break;
+      }
+      if (q.kind == RawPredKind::kLtLow) {
+        max_low_bits = std::max<int>(max_low_bits, static_cast<int>(q.f));
+      }
+    }
+    if (!has_full_compare && max_low_bits > 0 && max_low_bits < out.pred.n) {
+      out.pred.eff_bits = max_low_bits;
+      out.coeff.eff_bits = max_low_bits;
+    }
+  }
   return out;
 }
 

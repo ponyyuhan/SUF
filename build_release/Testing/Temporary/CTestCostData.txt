@@ -1,0 +1,27 @@
+test_planner_causal_bytes 2 0.00382129
+test_planner_ragged_bytes 2 0.0015214
+test_planner_effbits_budget 2 0.0019478
+test_cuda_pack_effbits 2 0.139383
+test_softmax_gpu_smoke 2 0.00771604
+bench_gemm_overlap 2 0.212334
+test_trunc_task 2 0.00109228
+test_layernorm_task 2 0.00123775
+test_staged_softmax 2 0.00101189
+test_pfss_planner 2 0.000733575
+test_pfss_async 2 0.00085832
+test_pfss_async_stress 2 0.00132098
+test_transformer_async 2 0.00323176
+test_planner_causal 2 0.00404094
+test_gapars_selector 2 0.000478211
+test_pfss_gpu 2 0.13926
+test_cuda_trunc_gapars 2 0.118409
+test_cuda_prg 2 0.134762
+test_cuda_pred_mask 2 0.143454
+test_cuda_packed_pfss 2 0.136716
+test_cuda_beaver_mul 2 0.149722
+test_cuda_trunc_postproc 2 0.14854
+test_cuda_horner_cubic 2 0.147204
+test_cuda_recip_task 2 0.158013
+test_matmul_and_attention_executor 2 0.01312
+test_matmul_executor 2 0.00175287
+---

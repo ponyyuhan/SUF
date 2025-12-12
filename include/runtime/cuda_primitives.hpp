@@ -64,17 +64,19 @@ void launch_horner_cubic_kernel(const uint64_t* d_x,
                                 void* stream /* cudaStream_t */);
 
 // Row-broadcast Beaver mul: mat is rows*cols, vec is rows (broadcast per row).
-// A,B,C are Beaver triple shares shaped like mat (A,C) and vec (B expanded per row).
-// d_open is opened mat - A, e_open is opened vec - B (broadcast).
-// All pointers are device, output is mat-sized.
+// A,C are Beaver triple shares shaped like mat (rows*cols); B is per-row (rows).
+// d_open is opened (mat - A) per element; e_open is opened (vec - B) per row.
+// All pointers are device, output is mat-sized. Optional valid_lens can zero
+// columns >= valid_lens[row] (ragged).
 void launch_row_broadcast_mul_kernel(int party,
-                                     const uint64_t* d_mat,
-                                     const uint64_t* d_vec_bcast,
                                      const uint64_t* d_A,
-                                     const uint64_t* d_B_bcast,
+                                     const uint64_t* d_B_rows,
                                      const uint64_t* d_C,
                                      const uint64_t* d_d_open,
-                                     const uint64_t* d_e_open_bcast,
+                                     const uint64_t* d_e_open_rows,
+                                     int rows,
+                                     int cols,
+                                     const int* d_valid_lens,  // optional, can be nullptr
                                      uint64_t* d_out,
                                      size_t n,  // rows*cols
                                      void* stream /* cudaStream_t */);
@@ -96,8 +98,9 @@ void launch_row_mean_kernel(const uint64_t* d_mat,
                             uint64_t* d_out_rows,
                             void* stream /* cudaStream_t */);
 
-// Row variance: var = sum((x - mean)^2) / len. mean provided per row (device).
-// Expects mat in Qf, mean in Qf, outputs var in Q2f (mod 2^64).
+// Row variance helper: out_rows[r] = sum((x - mean)^2) over the active columns.
+// mean provided per row (device). Expects mat in Qf, mean in Qf, outputs sumsq
+// in Q2f (mod 2^64). Caller is responsible for any scaling by 1/len.
 void launch_row_variance_kernel(const uint64_t* d_mat,
                                 const uint64_t* d_mean,
                                 int rows,
@@ -105,6 +108,14 @@ void launch_row_variance_kernel(const uint64_t* d_mat,
                                 const int* d_valid_lens,  // optional, can be nullptr
                                 uint64_t* d_out_rows,
                                 void* stream /* cudaStream_t */);
+
+// Unpack a dense bitstream of fixed-width integers into u64 values on device.
+// d_packed holds packed words (little-endian within each word). Output length n.
+void launch_unpack_eff_bits_kernel(const uint64_t* d_packed,
+                                   int eff_bits,
+                                   uint64_t* d_out,
+                                   size_t n,
+                                   void* stream /* cudaStream_t */);
 
 #ifdef __cplusplus
 }  // extern "C"

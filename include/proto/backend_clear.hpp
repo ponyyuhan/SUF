@@ -138,9 +138,10 @@ class ClearBackend final : public PfssIntervalLutExt {
     if (it == interval_.end()) throw std::runtime_error("eval_interval: unknown key");
     const auto& desc = it->second.desc;
     const auto& cp = desc.cutpoints;
-    size_t intervals = cp.size();
+    if (cp.size() < 2) return std::vector<u64>(static_cast<size_t>(out_words), 0);
+    const size_t intervals = cp.size() - 1;
     size_t idx = intervals - 1;
-    for (size_t i = 0; i + 1 < cp.size(); i++) {
+    for (size_t i = 0; i < intervals; i++) {
       if (x >= cp[i] && x < cp[i + 1]) { idx = i; break; }
     }
     if (idx >= intervals) idx = intervals - 1;

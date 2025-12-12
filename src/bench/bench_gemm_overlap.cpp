@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <algorithm>
 #include <random>
 #include <vector>
 #include <thread>
@@ -67,18 +68,22 @@ int main() {
   mp.w_transposed = false;
   mp.local_rescale = false;
   mp.allow_legacy_shift = false;
+  mp.device_only = true;     // bench device-side overlap
+  mp.cache_input = true;     // X is stable across iters
+  mp.cache_weights = true;   // W is stable across iters
+  mp.cache_bias = true;
 
   // PFSS workload: one packed compare batch on GPU
   size_t num_thr = 256;
   std::vector<uint64_t> thr(num_thr);
-  for (size_t i = 0; i < num_thr; ++i) thr[i] = rng();
+  // Use sorted thresholds to exercise the fast-path (binary-search) packed kernel,
+  // which matches how compiled predicate buckets are typically generated.
+  const uint64_t thr_mask = (32 == 64) ? ~0ull : ((uint64_t(1) << 32) - 1ull);
+  for (size_t i = 0; i < num_thr; ++i) thr[i] = rng() & thr_mask;
+  std::sort(thr.begin(), thr.end());
   auto kp = packed->gen_packed_lt(32, thr);
   size_t key_bytes = kp.k0.bytes.size();
   size_t Npfss = 4096;
-  std::vector<uint8_t> keys_flat(Npfss * key_bytes);
-  for (size_t i = 0; i < Npfss; ++i) {
-    std::memcpy(keys_flat.data() + i * key_bytes, kp.k0.bytes.data(), key_bytes);
-  }
   std::vector<uint64_t> xs_host(Npfss);
   for (auto& x : xs_host) x = rng();
   int out_words = static_cast<int>((num_thr + 63) / 64);
@@ -105,11 +110,11 @@ int main() {
     }
     if (run_pfss && !pfss_stream) {
       // Ensure the backend has created its streams before we start timing.
-      staged->eval_packed_lt_many_device(key_bytes,
-                                         keys_flat.data(),
+      staged->eval_packed_lt_many_device_broadcast(key_bytes,
+                                         kp.k0.bytes.data(),
                                          xs_dev,
                                          Npfss,
-                                         64,
+                                         32,
                                          out_words,
                                          nullptr);
       if (auto s = staged->device_stream()) {
@@ -131,11 +136,11 @@ int main() {
           cudaSetDevice(0);
           if (pfss_stream) cudaEventRecord(pfss_start, pfss_stream);
           for (int i = 0; i < iters; ++i) {
-            staged->eval_packed_lt_many_device(key_bytes,
-                                               keys_flat.data(),
+            staged->eval_packed_lt_many_device_broadcast(key_bytes,
+                                               kp.k0.bytes.data(),
                                                xs_dev,
                                                Npfss,
-                                               64,
+                                               32,
                                                out_words,
                                                nullptr /*device-only*/);
           }

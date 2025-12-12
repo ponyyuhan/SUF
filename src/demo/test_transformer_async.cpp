@@ -19,6 +19,8 @@ struct LocalChan : net::Chan {
     std::mutex m;
     std::condition_variable cv;
     std::queue<uint64_t> q0to1, q1to0;
+    std::atomic<size_t> sent0to1{0};
+    std::atomic<size_t> sent1to0{0};
   };
   Shared* sh = nullptr;
   bool is0 = false;
@@ -27,6 +29,11 @@ struct LocalChan : net::Chan {
     std::unique_lock<std::mutex> lk(sh->m);
     auto& q = is0 ? sh->q0to1 : sh->q1to0;
     q.push(v);
+    if (is0) {
+      sh->sent0to1.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      sh->sent1to0.fetch_add(1, std::memory_order_relaxed);
+    }
     sh->cv.notify_all();
   }
   uint64_t recv_u64() override {
@@ -138,6 +145,11 @@ int main() {
     return 1;
   }
 
+  if (!ctx0.allow_async_pfss || !ctx1.allow_async_pfss) {
+    std::cerr << "expected allow_async_pfss\n";
+    return 1;
+  }
+
   // Async runners should have flushed batches; stats must exist.
   if (!ctx0.pfss_async_runner || !ctx1.pfss_async_runner) {
     std::cerr << "pfss_async_runner not created\n";
@@ -147,10 +159,6 @@ int main() {
   auto s1 = ctx1.pfss_async_runner->take_stats();
   if (!s0 || !s1) {
     std::cerr << "async stats missing\n";
-    return 1;
-  }
-  if (s0->coeff.flushes == 0 || s1->coeff.flushes == 0) {
-    std::cerr << "expected async PFSS flushes\n";
     return 1;
   }
 

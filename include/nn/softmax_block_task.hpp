@@ -132,6 +132,12 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
 #ifdef SUF_HAVE_CUDA
         if (std::getenv("SUF_SOFTMAX_GPU") && R.device_pipeline) {
           // GPU row-sum of exp_packed_. valid_lens optional.
+          cudaStream_t stream = nullptr;
+          if (R.pfss_backend) {
+            if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend)) {
+              stream = reinterpret_cast<cudaStream_t>(staged->device_stream());
+            }
+          }
           uint64_t* d_exp = d_exp_device_;
           uint64_t* d_sum = nullptr;
           int* d_valid = nullptr;
@@ -139,20 +145,21 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
           size_t bytes_exp = elems * sizeof(uint64_t);
           if (!d_exp) {
             cudaMalloc(&d_exp, bytes_exp);
-            cudaMemcpy(d_exp, exp_packed_.data(), bytes_exp, cudaMemcpyHostToDevice);
+            cudaMemcpyAsync(d_exp, exp_packed_.data(), bytes_exp, cudaMemcpyHostToDevice, stream);
           }
           cudaMalloc(&d_sum, static_cast<size_t>(plan_.rows) * sizeof(uint64_t));
           if (!plan_.valid_lens.empty()) {
             cudaMalloc(&d_valid, static_cast<size_t>(plan_.rows) * sizeof(int));
-            cudaMemcpy(d_valid, plan_.valid_lens.data(),
-                       static_cast<size_t>(plan_.rows) * sizeof(int),
-                       cudaMemcpyHostToDevice);
+            cudaMemcpyAsync(d_valid, plan_.valid_lens.data(),
+                            static_cast<size_t>(plan_.rows) * sizeof(int),
+                            cudaMemcpyHostToDevice, stream);
           }
-          launch_row_sum_kernel(d_exp, plan_.rows, plan_.cols, d_valid, d_sum, /*stream=*/nullptr);
+          launch_row_sum_kernel(d_exp, plan_.rows, plan_.cols, d_valid, d_sum, stream);
           sum_qf_.assign(static_cast<size_t>(plan_.rows), 0);
-          cudaMemcpy(sum_qf_.data(), d_sum,
-                     static_cast<size_t>(plan_.rows) * sizeof(uint64_t),
-                     cudaMemcpyDeviceToHost);
+          cudaMemcpyAsync(sum_qf_.data(), d_sum,
+                          static_cast<size_t>(plan_.rows) * sizeof(uint64_t),
+                          cudaMemcpyDeviceToHost, stream);
+          cudaStreamSynchronize(stream);
           // Only free if we allocated; borrowed pointer stays alive with nexp_task_.
           if (d_exp && d_exp != d_exp_device_) cudaFree(d_exp);
           if (d_sum) cudaFree(d_sum);
@@ -256,10 +263,11 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
         }
 #ifdef SUF_HAVE_CUDA
         // If we kept the MulRow output on device and are in device pipeline mode,
-        // pass the device pointer into TruncTask so PFSS can skip re-upload.
-        if (R.device_pipeline && d_prod_device_) {
-          trunc_task_->set_device_input(d_prod_device_, d_prod_elems_);
-        }
+        // do NOT forward the secret-share device pointer as hatx_device.
+        // hatx_device is reserved for the opened masked value (public hatx),
+        // which is produced inside TruncTask after the Open step.
+        (void)d_prod_device_;
+        (void)d_prod_elems_;
 #endif
         if (!plan_.valid_lens.empty()) {
           trunc_task_->set_shape_hint(&row_offsets_, &plan_.valid_lens);

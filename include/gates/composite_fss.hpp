@@ -396,8 +396,11 @@ inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t
   for (size_t i = 0; i < compiled.coeff.cutpoints_ge.size(); i++) {
     auto& delta = compiled.coeff.deltas_words[i];
     auto payload0 = core::pack_u64_vec_le(delta);
-    auto thr_bits = backend.u64_to_bits_msb(compiled.coeff.cutpoints_ge[i], compiled.coeff.n);
-    auto kp = backend.gen_dcf(compiled.coeff.n, thr_bits, payload0);
+    int bits = (compiled.coeff.eff_bits > 0 && compiled.coeff.eff_bits <= compiled.coeff.n)
+                   ? compiled.coeff.eff_bits
+                   : compiled.coeff.n;
+    auto thr_bits = backend.u64_to_bits_msb(compiled.coeff.cutpoints_ge[i], bits);
+    auto kp = backend.gen_dcf(bits, thr_bits, payload0);
     out.k0.coeff_keys.push_back(kp.k0);
     out.k1.coeff_keys.push_back(kp.k1);
   }
@@ -484,7 +487,11 @@ inline CompositeKeyPair composite_gen_trunc_gate(proto::PfssBackend& backend,
     F = suf::build_gapars_suf(frac_bits, r_low);
   }
   if (F_out) *F_out = F;
-  std::vector<uint64_t> r_out = {rng()};
+  // Use a zero-sum output mask for trunc/ARS gates. Individual shares are still
+  // randomized by split_add(), but the reconstructed mask is 0 so device-pipeline
+  // callers can safely consume raw PFSS arithmetic payloads without requiring a
+  // host unmasking pass.
+  std::vector<uint64_t> r_out = {0ull};
   auto compiled = compiler::compile_suf_to_pfss_two_programs(F, r, r_out, compiler::CoeffMode::kStepDcf, kind);
   compiled.layout.arith_ports = {"y"};
   compiled.layout.bool_ports.clear();
@@ -612,13 +619,23 @@ inline CompositeKeyPair composite_gen_trunc_gate(proto::PfssBackend& backend,
   out.k0.total_delta_share = total_delta;
   out.k1.total_delta_share.assign(total_delta.size(), 0ull);
 
-  // Beaver triples for Bool DAG (selectors/b2a). Count multiplicative nodes.
-  size_t bit_mul = 0;
-  for (const auto& piece : compiled.bool_per_piece) {
-    for (const auto& b : piece) bit_mul += count_bool_mul(b);
-  }
-  bit_mul = std::max(bit_mul, static_cast<size_t>(compiled.ell)); // at least one per bool output
-  size_t triple_need = bit_mul * std::max<size_t>(1, batch_N);
+  // Triples: selectors + bool DAG + coeff selection + Horner.
+  //
+  // Note: trunc/ARS gates still run through the generic composite evaluator
+  // (selector-weighted coeff/bool + Horner). So triple provisioning must
+  // cover *all* Beaver multiplies in that path, not only the bool DAG.
+  size_t cut_count = compiled.coeff.cutpoints_ge.size();
+  size_t piece_count = cut_count + 1;
+  size_t cut_b2a_mul = cut_count;                       // b2a for cut bits
+  size_t selector_chain_mul = (cut_count > 0) ? (cut_count - 1) : 0;  // (1-cut_{k-1})*cut_k
+  size_t coeff_select_mul = piece_count * static_cast<size_t>(compiled.coeff.out_words);
+  // For each piece and bool output: b2a(bit) + selector*bit
+  size_t bool_b2a_mul = piece_count * static_cast<size_t>(compiled.ell);
+  size_t bool_select_mul = piece_count * static_cast<size_t>(compiled.ell);
+  size_t horner_mul = static_cast<size_t>(compiled.r) * static_cast<size_t>(compiled.degree);
+  size_t triple_need =
+      (cut_b2a_mul + selector_chain_mul + coeff_select_mul + bool_b2a_mul + bool_select_mul + horner_mul) *
+      std::max<size_t>(1, batch_N);
 
   // selectors_from_cutbits uses (cuts + 1) multiplications when cuts>0; here cuts==0.
   out.k0.triples.resize(triple_need);
@@ -1035,16 +1052,16 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     pred_masks.assign(N * static_cast<size_t>(k.packed_pred_words), 0);
     for (const auto& grp : k.packed_pred_groups) {
       size_t key_bytes = grp.key.bytes.size();
-      std::vector<uint8_t> keys_flat(N * key_bytes);
-      for (size_t i = 0; i < N; i++) {
-        std::memcpy(keys_flat.data() + i * key_bytes, grp.key.bytes.data(), key_bytes);
-      }
       std::vector<uint64_t> masks(N * static_cast<size_t>(grp.out_words), 0);
       if (staged && in.hatx_device) {
-        staged->eval_packed_lt_many_device(key_bytes, keys_flat.data(),
+        staged->eval_packed_lt_many_device_broadcast(key_bytes, grp.key.bytes.data(),
                                            reinterpret_cast<const uint64_t*>(in.hatx_device),
                                            N, grp.in_bits, grp.out_words, masks.data());
       } else {
+        std::vector<uint8_t> keys_flat(N * key_bytes);
+        for (size_t i = 0; i < N; i++) {
+          std::memcpy(keys_flat.data() + i * key_bytes, grp.key.bytes.data(), key_bytes);
+        }
         packed->eval_packed_lt_many(key_bytes, keys_flat.data(), xs_vec,
                                     grp.in_bits, grp.out_words, masks.data());
       }
@@ -1071,20 +1088,20 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
                                ? compiled.pred.eff_bits
                                : compiled.pred.n)
                         : compiled.pred.queries[qi].f;
-      // pack keys_flat [N][key_bytes]
       size_t key_bytes = k.pred_keys[qi].bytes.size();
-      std::vector<uint8_t> keys_flat(N * key_bytes);
-      for (size_t i = 0; i < N; i++) {
-        std::memcpy(keys_flat.data() + i * key_bytes, k.pred_keys[qi].bytes.data(), key_bytes);
-      }
       size_t out_bytes = static_cast<size_t>(k.pred_meta.out_bytes);
       if (out_bytes == 0) throw std::runtime_error("pred_meta.out_bytes must be >0");
       std::vector<uint8_t> outs_flat(N * out_bytes);
       if (staged && in.hatx_device) {
-        staged->eval_dcf_many_u64_device(bits_in, key_bytes, keys_flat.data(),
+        staged->eval_dcf_many_u64_device_broadcast(bits_in, key_bytes, k.pred_keys[qi].bytes.data(),
                                          reinterpret_cast<const uint64_t*>(in.hatx_device),
                                          N, k.pred_meta.out_bytes, outs_flat.data());
       } else {
+        // pack keys_flat [N][key_bytes]
+        std::vector<uint8_t> keys_flat(N * key_bytes);
+        for (size_t i = 0; i < N; i++) {
+          std::memcpy(keys_flat.data() + i * key_bytes, k.pred_keys[qi].bytes.data(), key_bytes);
+        }
         backend.eval_dcf_many_u64(bits_in, key_bytes, keys_flat.data(), xs_vec, k.pred_meta.out_bytes, outs_flat.data());
       }
       for (size_t i = 0; i < N; i++) {
@@ -1107,16 +1124,16 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     cut_masks.assign(N * static_cast<size_t>(k.packed_cut_words), 0);
     for (const auto& grp : k.packed_cut_groups) {
       size_t key_bytes = grp.key.bytes.size();
-      std::vector<uint8_t> keys_flat(N * key_bytes);
-      for (size_t i = 0; i < N; i++) {
-        std::memcpy(keys_flat.data() + i * key_bytes, grp.key.bytes.data(), key_bytes);
-      }
       std::vector<uint64_t> masks(N * static_cast<size_t>(grp.out_words), 0);
       if (staged && in.hatx_device) {
-        staged->eval_packed_lt_many_device(key_bytes, keys_flat.data(),
+        staged->eval_packed_lt_many_device_broadcast(key_bytes, grp.key.bytes.data(),
                                            reinterpret_cast<const uint64_t*>(in.hatx_device),
                                            N, grp.in_bits, grp.out_words, masks.data());
       } else {
+        std::vector<uint8_t> keys_flat(N * key_bytes);
+        for (size_t i = 0; i < N; i++) {
+          std::memcpy(keys_flat.data() + i * key_bytes, grp.key.bytes.data(), key_bytes);
+        }
         packed->eval_packed_lt_many(key_bytes, keys_flat.data(), xs_vec,
                                     grp.in_bits, grp.out_words, masks.data());
       }
@@ -1143,21 +1160,24 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       }
     }
   } else {
+    int cut_bits_in = (compiled.coeff.eff_bits > 0 && compiled.coeff.eff_bits <= compiled.coeff.n)
+                          ? compiled.coeff.eff_bits
+                          : compiled.coeff.n;
     for (size_t ci = 0; ci < k.cut_pred_keys.size(); ci++) {
       size_t key_bytes = k.cut_pred_keys[ci].bytes.size();
-      std::vector<uint8_t> keys_flat(N * key_bytes);
-      for (size_t i = 0; i < N; i++) {
-        std::memcpy(keys_flat.data() + i * key_bytes, k.cut_pred_keys[ci].bytes.data(), key_bytes);
-      }
       size_t out_bytes = static_cast<size_t>(k.cut_pred_meta.out_bytes);
       if (out_bytes == 0) throw std::runtime_error("cut_pred_meta.out_bytes must be >0");
       std::vector<uint8_t> outs_flat(N * out_bytes);
       if (staged && in.hatx_device) {
-        staged->eval_dcf_many_u64_device(compiled.coeff.n, key_bytes, keys_flat.data(),
+        staged->eval_dcf_many_u64_device_broadcast(cut_bits_in, key_bytes, k.cut_pred_keys[ci].bytes.data(),
                                          reinterpret_cast<const uint64_t*>(in.hatx_device),
                                          N, k.cut_pred_meta.out_bytes, outs_flat.data());
       } else {
-        backend.eval_dcf_many_u64(compiled.coeff.n, key_bytes, keys_flat.data(), xs_vec,
+        std::vector<uint8_t> keys_flat(N * key_bytes);
+        for (size_t i = 0; i < N; i++) {
+          std::memcpy(keys_flat.data() + i * key_bytes, k.cut_pred_keys[ci].bytes.data(), key_bytes);
+        }
+        backend.eval_dcf_many_u64(cut_bits_in, key_bytes, keys_flat.data(), xs_vec,
                                   k.cut_pred_meta.out_bytes, outs_flat.data());
       }
       for (size_t i = 0; i < N; i++) {
