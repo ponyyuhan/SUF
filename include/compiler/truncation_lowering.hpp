@@ -64,8 +64,6 @@ inline TruncationLoweringResult lower_truncation_gate(proto::PfssBackend& backen
     h0->f = h1->f = params.frac_bits;
     h0->r_hi_share = res.keys.k0.r_hi_share;
     h1->r_hi_share = res.keys.k1.r_hi_share;
-    h0->r_in = res.keys.k0.compiled.r_in;
-    h1->r_in = res.keys.k1.compiled.r_in;
     res.hook0 = std::move(h0);
     res.hook1 = std::move(h1);
   } else if (kind == GateKind::FaithfulARS || kind == GateKind::GapARS) {
@@ -75,8 +73,6 @@ inline TruncationLoweringResult lower_truncation_gate(proto::PfssBackend& backen
       h0_gap->f = h1_gap->f = params.frac_bits;
       h0_gap->r_hi_share = res.keys.k0.r_hi_share;
       h1_gap->r_hi_share = res.keys.k1.r_hi_share;
-      h0_gap->r_in = res.keys.k0.compiled.r_in;
-      h1_gap->r_in = res.keys.k1.compiled.r_in;
       res.hook0 = std::move(h0_gap);
       res.hook1 = std::move(h1_gap);
     } else {
@@ -85,8 +81,6 @@ inline TruncationLoweringResult lower_truncation_gate(proto::PfssBackend& backen
       h0_f->f = h1_f->f = params.frac_bits;
       h0_f->r_hi_share = res.keys.k0.r_hi_share;
       h1_f->r_hi_share = res.keys.k1.r_hi_share;
-      h0_f->r_in = res.keys.k0.compiled.r_in;
-      h1_f->r_in = res.keys.k1.compiled.r_in;
       res.hook0 = std::move(h0_f);
       res.hook1 = std::move(h1_f);
     }
@@ -103,8 +97,6 @@ inline TruncationLoweringResult lower_truncation_gate(proto::PfssBackend& backen
         h0->f = h1->f = params.frac_bits;
         h0->r_hi_share = pe.keys.k0.r_hi_share;
         h1->r_hi_share = pe.keys.k1.r_hi_share;
-        h0->r_in = pe.keys.k0.compiled.r_in;
-        h1->r_in = pe.keys.k1.compiled.r_in;
         pe.hook0 = std::move(h0);
         pe.hook1 = std::move(h1);
       } else if (kind == GateKind::GapARS) {
@@ -113,8 +105,6 @@ inline TruncationLoweringResult lower_truncation_gate(proto::PfssBackend& backen
         h0->f = h1->f = params.frac_bits;
         h0->r_hi_share = pe.keys.k0.r_hi_share;
         h1->r_hi_share = pe.keys.k1.r_hi_share;
-        h0->r_in = pe.keys.k0.compiled.r_in;
-        h1->r_in = pe.keys.k1.compiled.r_in;
         pe.hook0 = std::move(h0);
         pe.hook1 = std::move(h1);
       } else {  // FaithfulARS
@@ -123,8 +113,6 @@ inline TruncationLoweringResult lower_truncation_gate(proto::PfssBackend& backen
         h0->f = h1->f = params.frac_bits;
         h0->r_hi_share = pe.keys.k0.r_hi_share;
         h1->r_hi_share = pe.keys.k1.r_hi_share;
-        h0->r_in = pe.keys.k0.compiled.r_in;
-        h1->r_in = pe.keys.k1.compiled.r_in;
         pe.hook0 = std::move(h0);
         pe.hook1 = std::move(h1);
       }

@@ -603,8 +603,9 @@ class TruncTask final : public detail::PhaseTask {
               } else if (bundle_ && !bundle_->keys.k0.compiled.extra_u64.empty()) {
                 f_bits = static_cast<int>(bundle_->keys.k0.compiled.extra_u64[0] & 0xFFFFu);
               }
-              int carry_idx = 0;
-              int sign_idx = 1;
+              int carry_idx = -1;
+              int sign_idx = -1;
+              int wrap_idx = -1;
               if (key_) {
                 auto findb = [&](const std::string& name)->int {
                   for (size_t bi = 0; bi < key_->compiled.layout.bool_ports.size(); ++bi) {
@@ -612,19 +613,16 @@ class TruncTask final : public detail::PhaseTask {
                   }
                   return -1;
                 };
-                int c = findb("carry");
-                int s = findb("sign");
-                if (c >= 0) carry_idx = c;
-                if (s >= 0) sign_idx = s;
+                carry_idx = findb("carry");
+                sign_idx = findb("sign");
+                wrap_idx = findb("wrap");
               }
               int kind_gapars = (key_ && key_->compiled.gate_kind == compiler::GateKind::GapARS) ? 1 : 0;
               uint64_t r_hi_share = key_ ? key_->r_hi_share : 0ull;
-              uint64_t r_in = key_ ? key_->compiled.r_in : 0ull;
               launch_trunc_postproc_kernel(R.party,
                                            kind_gapars,
                                            f_bits,
                                            r_hi_share,
-                                           r_in,
                                            d_hatx,
                                            v.arith_device,
                                            v.r,
@@ -633,6 +631,7 @@ class TruncTask final : public detail::PhaseTask {
                                            v.ell,
                                            carry_idx,
                                            sign_idx,
+                                           wrap_idx,
                                            d_tmp_out,
                                            elems,
                                            trunc_stream);
@@ -687,21 +686,29 @@ class TruncTask final : public detail::PhaseTask {
                                 << " kind=" << (kind_gapars ? "GapARS" : "faithful")
                                 << " r=" << v.r << " ell=" << v.ell << "\n";
                     }
-                    mismatch = true;
-                    if (i < dump_n) {
-                      uint64_t base = v.arith[i * v.r];
-                      uint64_t carry = (v.ell > 0 && v.bools) ? v.bools[i * v.ell + static_cast<size_t>(carry_idx)] : 0ull;
-                      uint64_t sign = (v.ell > static_cast<size_t>(sign_idx) && v.bools) ? v.bools[i * v.ell + static_cast<size_t>(sign_idx)] : 0ull;
-                      uint64_t hx = hatx_public_[i];
-                      std::cerr << "  i=" << i
-                                << " hx=" << hx
-                                << " base=" << base
-                                << " carry=" << carry
-                                << " sign=" << sign
-                                << " gpu=" << gpu
-                                << " hook=" << host_v
-                                << "\n";
-                    }
+	                    mismatch = true;
+	                    if (i < dump_n) {
+	                      uint64_t base = v.arith[i * v.r];
+	                      uint64_t carry = (carry_idx >= 0 && v.bools)
+	                                           ? v.bools[i * v.ell + static_cast<size_t>(carry_idx)]
+	                                           : 0ull;
+	                      uint64_t sign = (sign_idx >= 0 && v.bools)
+	                                          ? v.bools[i * v.ell + static_cast<size_t>(sign_idx)]
+	                                          : 0ull;
+	                      uint64_t wrap = (wrap_idx >= 0 && v.bools)
+	                                          ? v.bools[i * v.ell + static_cast<size_t>(wrap_idx)]
+	                                          : 0ull;
+	                      uint64_t hx = hatx_public_[i];
+	                      std::cerr << "  i=" << i
+	                                << " hx=" << hx
+	                                << " base=" << base
+	                                << " carry=" << carry
+	                                << " sign=" << sign
+	                                << " wrap=" << wrap
+	                                << " gpu=" << gpu
+	                                << " hook=" << host_v
+	                                << "\n";
+	                    }
                     out_[i] = host_v;  // heal for downstream correctness.
                   }
                 }

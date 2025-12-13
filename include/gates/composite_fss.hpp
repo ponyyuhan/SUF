@@ -497,6 +497,7 @@ inline CompositeKeyPair composite_gen_trunc_gate(proto::PfssBackend& backend,
   compiled.layout.bool_ports.clear();
   if (frac_bits > 0) compiled.layout.bool_ports.push_back("carry");
   if (kind != compiler::GateKind::FaithfulTR) compiled.layout.bool_ports.push_back("sign");
+  compiled.layout.bool_ports.push_back("wrap");
   compiled.extra_u64 = {static_cast<uint64_t>(frac_bits), r_low};
 
   auto split_add = [&](uint64_t v) {
@@ -1671,13 +1672,10 @@ inline CompositeBatchOutput composite_eval_batch_with_postproc(int party,
     }
   } else if (auto* tr = dynamic_cast<gates::FaithfulTruncPostProc*>(&hook)) {
     tr->r_hi_share = k.r_hi_share;
-    tr->r_in = k.compiled.r_in;
   } else if (auto* ars = dynamic_cast<gates::FaithfulArsPostProc*>(&hook)) {
     ars->r_hi_share = k.r_hi_share;
-    ars->r_in = k.compiled.r_in;
   } else if (auto* gap = dynamic_cast<gates::GapArsPostProc*>(&hook)) {
     gap->r_hi_share = k.r_hi_share;
-    gap->r_in = k.compiled.r_in;
   }
   hook.run_batch(party, ch, mul, in.hatx, out.haty_share.data(),
                  static_cast<size_t>(k.compiled.r),

@@ -172,10 +172,10 @@ struct ReluARSPostProc final : public PostProcHook {
 // Faithful truncation (unsigned) post-proc: y = (hatx >> f) - r_hi - carry + r_out_mask.
 struct FaithfulTruncPostProc final : public PostProcHook {
   int idx_carry = 0;
+  int idx_wrap = -1;
   int idx_y = 0;
   int f = 0;
   uint64_t r_hi_share = 0;
-  uint64_t r_in = 0;
 
   FaithfulTruncPostProc() = default;
   FaithfulTruncPostProc(int carry_idx, int out_idx, int frac_bits, uint64_t r_hi)
@@ -192,6 +192,8 @@ struct FaithfulTruncPostProc final : public PostProcHook {
     };
     int c = findb("carry");
     if (c >= 0) idx_carry = c;
+    int w = findb("wrap");
+    if (w >= 0) idx_wrap = w;
     int y = finda("y0");
     if (y < 0) y = finda("y");
     if (y >= 0) idx_y = y;
@@ -213,13 +215,12 @@ struct FaithfulTruncPostProc final : public PostProcHook {
       const uint64_t* brow = bool_share_in + i * bool_stride;
       uint64_t base = (idx_y < static_cast<int>(arith_stride)) ? arow[idx_y] : 0ull;
       uint64_t carry = (idx_carry >= 0 && idx_carry < static_cast<int>(bool_stride)) ? brow[idx_carry] : 0ull;
+      uint64_t wrap = (idx_wrap >= 0 && idx_wrap < static_cast<int>(bool_stride)) ? brow[idx_wrap] : 0ull;
       uint64_t top = (hatx_public != nullptr && f < 64 && party == 0) ? (hatx_public[i] >> f) : 0ull;
       uint64_t y = proto::add_mod(base, top);
       y = proto::sub_mod(y, r_hi_share);
       y = proto::sub_mod(y, carry);
-      if (modulus != 0 && hatx_public != nullptr && (hatx_public[i] < r_in) && party == 0) {
-        y = proto::add_mod(y, modulus);
-      }
+      if (modulus != 0) y = proto::add_mod(y, proto::mul_mod(wrap, modulus));
       haty_share_out[i] = y;
     }
   }
@@ -229,10 +230,10 @@ struct FaithfulTruncPostProc final : public PostProcHook {
 struct FaithfulArsPostProc : public PostProcHook {
   int idx_carry = 0;
   int idx_sign = 1;
+  int idx_wrap = -1;
   int idx_y = 0;
   int f = 0;
   uint64_t r_hi_share = 0;
-  uint64_t r_in = 0;
 
   FaithfulArsPostProc() = default;
   FaithfulArsPostProc(int carry_idx, int sign_idx, int out_idx, int frac_bits, uint64_t r_hi)
@@ -251,6 +252,8 @@ struct FaithfulArsPostProc : public PostProcHook {
     if (c >= 0) idx_carry = c;
     int s = findb("sign");
     if (s >= 0) idx_sign = s;
+    int w = findb("wrap");
+    if (w >= 0) idx_wrap = w;
     int y = finda("y0");
     if (y < 0) y = finda("y");
     if (y >= 0) idx_y = y;
@@ -274,13 +277,12 @@ struct FaithfulArsPostProc : public PostProcHook {
       uint64_t base = (idx_y < static_cast<int>(arith_stride)) ? arow[idx_y] : 0ull;
       uint64_t carry = (idx_carry >= 0 && idx_carry < static_cast<int>(bool_stride)) ? brow[idx_carry] : 0ull;
       uint64_t sign = (idx_sign >= 0 && idx_sign < static_cast<int>(bool_stride)) ? brow[idx_sign] : 0ull;
+      uint64_t wrap = (idx_wrap >= 0 && idx_wrap < static_cast<int>(bool_stride)) ? brow[idx_wrap] : 0ull;
       uint64_t top = (hatx_public != nullptr && f < 64 && party == 0) ? (hatx_public[i] >> f) : 0ull;
       uint64_t y = proto::add_mod(base, top);
       y = proto::sub_mod(y, r_hi_share);
       y = proto::sub_mod(y, carry);
-      if (modulus != 0 && hatx_public != nullptr && (hatx_public[i] < r_in) && party == 0) {
-        y = proto::add_mod(y, modulus);
-      }
+      if (modulus != 0) y = proto::add_mod(y, proto::mul_mod(wrap, modulus));
       uint64_t sign_term = proto::mul_mod(sign, sign_mask);
       y = proto::add_mod(y, sign_term);
       haty_share_out[i] = y;
@@ -307,13 +309,12 @@ struct GapArsPostProc : public FaithfulArsPostProc {
       uint64_t base = (idx_y < static_cast<int>(arith_stride)) ? arow[idx_y] : 0ull;
       uint64_t carry = (idx_carry >= 0 && idx_carry < static_cast<int>(bool_stride)) ? brow[idx_carry] : 0ull;
       uint64_t sign = (idx_sign >= 0 && idx_sign < static_cast<int>(bool_stride)) ? brow[idx_sign] : 0ull;
+      uint64_t wrap = (idx_wrap >= 0 && idx_wrap < static_cast<int>(bool_stride)) ? brow[idx_wrap] : 0ull;
       uint64_t top = (hatx_public != nullptr && f < 64 && party == 0) ? (hatx_public[i] >> f) : 0ull;
       uint64_t y = proto::add_mod(base, top);
       y = proto::sub_mod(y, r_hi_share);
       y = proto::sub_mod(y, carry);
-      if (modulus != 0 && hatx_public != nullptr && (hatx_public[i] < r_in) && party == 0) {
-        y = proto::add_mod(y, modulus);
-      }
+      if (modulus != 0) y = proto::add_mod(y, proto::mul_mod(wrap, modulus));
       uint64_t sign_term = proto::mul_mod(sign, sign_mask);
       y = proto::add_mod(y, sign_term);
       haty_share_out[i] = y;

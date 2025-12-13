@@ -19,11 +19,14 @@ int main() {
   int pred_eff = lowered.keys.k0.compiled.pred.eff_bits;
   int coeff_eff = lowered.keys.k0.compiled.coeff.eff_bits;
 
-  if (pred_eff != p.frac_bits || coeff_eff != p.frac_bits) {
-    throw std::runtime_error("trunc eff_bits not propagated: pred_eff=" +
+  // Truncation now exposes an explicit 64-bit wrap predicate (hatx < r_in) for
+  // secure wrap correction, so the predicate program must retain full-width
+  // inputs and cannot be safely packed down to frac_bits.
+  if (pred_eff != 64 || coeff_eff != 64) {
+    throw std::runtime_error("trunc eff_bits unexpected: pred_eff=" +
                              std::to_string(pred_eff) +
                              " coeff_eff=" + std::to_string(coeff_eff) +
-                             " expected=" + std::to_string(p.frac_bits));
+                             " expected=64");
   }
   if (!lowered.keys.k0.compiled.coeff.cutpoints_ge.empty() ||
       !lowered.keys.k0.compiled.coeff.deltas_words.empty()) {
@@ -31,4 +34,3 @@ int main() {
   }
   return 0;
 }
-

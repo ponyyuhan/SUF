@@ -48,7 +48,6 @@ int main() {
                                /*kind_gapars=*/0,
                                frac_bits,
                                /*r_hi_share=*/0,
-                               /*r_in=*/0,
                                d_in,
                                d_zero,
                                /*arith_stride=*/1,
@@ -57,6 +56,7 @@ int main() {
                                /*bool_stride=*/0,
                                /*carry_idx=*/-1,
                                /*sign_idx=*/-1,
+                               /*wrap_idx=*/-1,
                                d_out,
                                N,
                                stream);

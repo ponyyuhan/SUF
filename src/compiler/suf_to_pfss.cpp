@@ -346,6 +346,21 @@ CompiledSUFGate compile_suf_to_pfss_two_programs(
     out.bool_per_piece.push_back(std::move(rewritten));
   }
 
+  // Truncation/ARS post-processing needs the 64-bit wrap bit:
+  //   wrap = 1[(x + r_in) mod 2^64 < r_in] = 1[hatx < r_in] (unsigned).
+  // Expose it explicitly as an additional boolean output so postproc can apply
+  // the correction without revealing r_in.
+  if (gate_kind == GateKind::FaithfulTR ||
+      gate_kind == GateKind::FaithfulARS ||
+      gate_kind == GateKind::GapARS) {
+    int wrap_qid = add_query(RawPredQuery{RawPredKind::kLtU64, 64, r_in}, queries, qmap);
+    for (auto& piece : out.bool_per_piece) {
+      piece.push_back(suf::BoolExpr{suf::BVar{wrap_qid}});
+    }
+    out.layout.bool_ports.push_back("wrap");
+    out.ell += 1;
+  }
+
   PredProgramDesc pd;
   pd.n = Fn.n_bits;
   pd.out_mode = PredOutMode::kU64PerBit;
