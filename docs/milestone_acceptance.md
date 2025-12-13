@@ -27,7 +27,7 @@ Status legend: `Done` = implemented + test/bench in place; `Partial` = implement
 | --- | --- | --- | --- | --- |
 | Predicate XOR semantics path | include/proto/pfss_utils.hpp, include/proto/myl7_fss_backend.hpp | test_pred_semantics, test_myl7_bit_order | Done | 1-byte payload + XOR recon wired; bit-order probe passes for real myl7. |
 | Packed pred masks (SigmaFast) | include/gates/pred_view.hpp, include/proto/sigma_fast_backend_ext.hpp | test_composite_equiv_proto_sigmafast | Done | Packed XOR masks consumed via PredView. |
-| Port layout metadata | include/compiler/compiled_suf_gate.hpp, src/compiler/suf_to_pfss.cpp | test_compile_pfss (implicit) | Done | Default names y0.. / b0..; runtime not yet using names. |
+| Port layout metadata | include/compiler/compiled_suf_gate.hpp, src/compiler/suf_to_pfss.cpp | test_compile_pfss (implicit) | Done | Default names y0.. / b0..; runtime uses names for postproc hooks/tasks (e.g. carry/sign/wrap). |
 | ReluARS/GeLU post-proc hooks | include/gates/postproc_hooks.hpp | test_postproc_hooks | Done | Hooks implement ARS trunc/delta and GeLU sum using layout names; tested against proto logic. |
 | Composite tape I/O | include/gates/composite_fss.hpp | — | Done | write/read tape helpers; eval_from_tape wrappers. |
 | Equivalence vs proto (Clear/myl7 stub/SigmaFast) | src/demo/test_composite_equiv_proto*.cpp | tests run | Done | All pass under current backends. |
@@ -67,10 +67,10 @@ Status legend: `Done` = implemented + test/bench in place; `Partial` = implement
 
 | Item | Code | Tests/Bench | Status | Notes |
 | --- | --- | --- | --- | --- |
-| Faithful truncation gate | include/gates/trunc_faithful_gate.hpp | test_truncation, bench_truncation | Done | Exact split-mask (carry-correct) semantics; composite FSS path and overflow-aware postproc validated. |
-| Faithful ARS gate | include/gates/ars_faithful_gate.hpp | test_truncation, bench_truncation | Partial | Signed extension applied after exact trunc; GapARS/range selection still pending. Composite postproc now propagates r_in overflow fixups. |
+| Faithful truncation gate | include/gates/trunc_faithful_gate.hpp | test_truncation, bench_truncation | Done | Exact split-mask (carry-correct) semantics; wrap correction uses PFSS-derived `wrap=1[hatx<r_in]` share (no public `r_in` compare). |
+| Faithful ARS gate | include/gates/ars_faithful_gate.hpp | test_truncation, bench_truncation | Done | Signed extension applied after exact trunc; wrap correction uses PFSS-derived `wrap` share (selection/GapARS remains separate). |
 | GapARS placeholder gate | include/gates/gapars_gate.hpp | test_truncation (gap path), bench_truncation | Partial | Currently aliases faithful ARS until range certificates + cheaper eval path land. |
-| GateKind + trunc SUF builders | include/compiler/pfss_program_desc.hpp, include/suf/trunc_suf_builders.hpp, include/compiler/truncation_lowering.hpp | test_truncation (composite) | Partial | GateKind entries for TR/ARS/GapARS plus predicate-only SUF builders; composite keygen + overflow/sign postproc fixed and exercised end-to-end. Lowering helper emits keys+hooks from GateParams; compiler pass/range-selection still TODO. |
+| GateKind + trunc SUF builders | include/compiler/pfss_program_desc.hpp, include/suf/trunc_suf_builders.hpp, include/compiler/truncation_lowering.hpp | test_truncation (composite) | Partial | GateKind entries for TR/ARS/GapARS plus predicate-only SUF builders; composite keygen + overflow/sign/wrap postproc exercised end-to-end. Lowering helper emits keys+hooks from GateParams; compiler pass/range-selection still TODO. |
 | GapARS range probe | include/compiler/range_analysis.hpp, include/compiler/truncation_pass.hpp | — | Partial | Conservative interval analysis + GateKind selector added; matmul/axpy/mul-const helpers added for range propagation. Needs wiring into IR graph. |
 | Matmul composite truncation path | include/compiler/matmul_truncation.hpp, include/nn/matmul_beaver.hpp, src/nn/matmul_beaver.cpp, src/demo/test_matmul.cpp | test_matmul (composite case) | Partial | Added compiler-side plan helper (select GateKind from operand ranges), threaded through matmul params; runtime now strips output masks and accepts a plan pointer. Still needs graph-level pass to feed hints and replace all local shifts. |
 
@@ -78,4 +78,4 @@ Status legend: `Done` = implemented + test/bench in place; `Partial` = implement
 
 - Integrate trunc/ARS/GapARS into compiler passes (emit GateKinds + postproc hooks) and remove local shifts across matmul/linops/activations.
 - Wire new range analysis (compiler/range_analysis.hpp) into IR to drive GapARS selection; feed hints from graph builder into truncation planner.
-- Implement PFSS super-batching, open fusion, and GPU/CPU overlap plus packing/hoisting to reach Milestone 11 performance goals.
+- Further tune PFSS super-batching, open fusion, and GPU overlap/packing/hoisting to reach Milestone 11 performance goals.

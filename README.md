@@ -60,7 +60,7 @@ docs/                   # milestone/设计文档
 
 ## 代码与数据对齐要点
 
-- Tape 顺序固定（ReluARS/GeLU），在线 evaluator 严格按序消费；wrap/符号位均为加法 share（u64），不暴露公共位。
+- Tape 顺序固定（ReluARS/GeLU），在线 evaluator 严格按序消费；trunc/ARS 的 carry/sign/wrap 均为加法 share（u64），wrap 由 PFSS 谓词 `1[hatx<r_in]` 直接输出（不做 public `r_in` 比较）。
 - PFSS key/输出：pred 默认 `kU64PerBit_Xor`，coeff Step-DCF 输出 `out_words=r*(d+1)`；SigmaFast packed key 带 thresholds+AES round_keys。
 - 范围驱动 rescale/trunc/clamp：range/gap_hint 贯穿 graph 与 trunc 降级，MatmulRescaleSite/softmax/LN/recip 优先 GapARS；Bias/residual 携带 GapCert。
 - PFSS 合并/预算：coeff+trunc 共用 PfssSuperBatch，planner 统计 jobs/hatx/flush，limits fail-closed；GPU 路径可设置 device-byte 预算。
