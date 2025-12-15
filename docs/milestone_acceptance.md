@@ -69,13 +69,11 @@ Status legend: `Done` = implemented + test/bench in place; `Partial` = implement
 | --- | --- | --- | --- | --- |
 | Faithful truncation gate | include/gates/trunc_faithful_gate.hpp | test_truncation, bench_truncation | Done | Exact split-mask (carry-correct) semantics; wrap correction uses PFSS-derived `wrap=1[hatx<r_in]` share (no public `r_in` compare). |
 | Faithful ARS gate | include/gates/ars_faithful_gate.hpp | test_truncation, bench_truncation | Done | Signed extension applied after exact trunc; wrap correction uses PFSS-derived `wrap` share (selection/GapARS remains separate). |
-| GapARS placeholder gate | include/gates/gapars_gate.hpp | test_truncation (gap path), bench_truncation | Partial | Currently aliases faithful ARS until range certificates + cheaper eval path land. |
-| GateKind + trunc SUF builders | include/compiler/pfss_program_desc.hpp, include/suf/trunc_suf_builders.hpp, include/compiler/truncation_lowering.hpp | test_truncation (composite) | Partial | GateKind entries for TR/ARS/GapARS plus predicate-only SUF builders; composite keygen + overflow/sign/wrap postproc exercised end-to-end. Lowering helper emits keys+hooks from GateParams; compiler pass/range-selection still TODO. |
-| GapARS range probe | include/compiler/range_analysis.hpp, include/compiler/truncation_pass.hpp | — | Partial | Conservative interval analysis + GateKind selector added; matmul/axpy/mul-const helpers added for range propagation. Needs wiring into IR graph. |
-| Matmul composite truncation path | include/compiler/matmul_truncation.hpp, include/nn/matmul_beaver.hpp, src/nn/matmul_beaver.cpp, src/demo/test_matmul.cpp | test_matmul (composite case) | Partial | Added compiler-side plan helper (select GateKind from operand ranges), threaded through matmul params; runtime now strips output masks and accepts a plan pointer. Still needs graph-level pass to feed hints and replace all local shifts. |
+| GapARS fast-path gate | include/suf/trunc_suf_builders.hpp, include/gates/postproc_hooks.hpp | test_truncation, test_gapars_fastpath, test_cuda_trunc_gapars | Done | SIGMA-style GapARS uses fewer bool ports (no sign/wrap) and avoids full-width wrap compare predicates under proof-grade bounds. |
+| GateKind + trunc SUF builders | include/compiler/pfss_program_desc.hpp, include/suf/trunc_suf_builders.hpp, include/compiler/truncation_lowering.hpp | test_truncation, test_gapars_selector | Done | GateKind entries for TR/ARS/GapARS plus predicate-only SUF builders; lowering emits keys+hooks from GateParams and is used by tasks and compiler passes. |
+| GapARS range/GapCert probe | include/compiler/range_analysis.hpp, src/compiler/layer_graph.cpp | test_range_proofs, test_mask_abs_propagation | Done | Mask-bound propagation + proof-grade GapCert reasoning drives AutoTrunc selection. |
+| Matmul truncation planning | include/compiler/matmul_truncation.hpp, include/compiler/layer_graph.hpp, include/nn/layer_context.hpp | test_matmul (composite case), test_transformer_no_barriers | Done | Graph-level pass wires trunc plans into MatmulBeaverParams and batches PFSS/trunc via PhaseExecutor/PfssLayerPlanner. |
 
 ## Open TODOs (cross-milestone)
 
-- Integrate trunc/ARS/GapARS into compiler passes (emit GateKinds + postproc hooks) and remove local shifts across matmul/linops/activations.
-- Wire new range analysis (compiler/range_analysis.hpp) into IR to drive GapARS selection; feed hints from graph builder into truncation planner.
-- Further tune PFSS super-batching, open fusion, and GPU overlap/packing/hoisting to reach Milestone 11 performance goals.
+- Further tune PFSS super-batching, open fusion, and GPU overlap/packing/hoisting to reach Milestone 11 performance goals (performance-only).

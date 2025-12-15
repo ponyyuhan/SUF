@@ -196,6 +196,10 @@ add_executable(test_hoist_rescales src/demo/test_hoist_rescales.cpp)
 target_include_directories(test_hoist_rescales PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_hoist_rescales PRIVATE compiler_passes suf_fss cuda_pfss ${MYL7_LINK_LIBS})
 
+add_executable(test_open_collector_packing src/demo/test_open_collector_packing.cpp)
+target_include_directories(test_open_collector_packing PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_open_collector_packing PRIVATE nn_ops suf_fss ${MYL7_LINK_LIBS})
+
 add_library(compiler_passes STATIC
   src/compiler/truncation_pass.cpp
   src/compiler/rescale_pass.cpp
@@ -455,6 +459,7 @@ add_test(NAME test_gapars_fastpath COMMAND test_gapars_fastpath)
 add_test(NAME test_mask_abs_propagation COMMAND test_mask_abs_propagation)
 add_test(NAME test_range_proofs COMMAND test_range_proofs)
 add_test(NAME test_hoist_rescales COMMAND test_hoist_rescales)
+add_test(NAME test_open_collector_packing COMMAND test_open_collector_packing)
 if(HAVE_SUF_CUDA)
 add_test(NAME test_pfss_gpu COMMAND test_pfss_gpu)
 add_test(NAME test_cuda_trunc_gapars COMMAND test_cuda_trunc_gapars)

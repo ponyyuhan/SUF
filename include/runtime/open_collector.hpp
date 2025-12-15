@@ -61,8 +61,10 @@ struct OpenHandle {
 };
 
 // Minimal batched-open collector: gathers multiple additive-share vectors and
-// performs one send/recv burst on flush. Not optimized for packing; intended
-// as a structural step toward phase-level open fusion.
+// performs one send/recv burst on flush. Optional env-gated eff-bits packing
+// can reduce traffic when shares are known to have small magnitude:
+// - enable: `SUF_OPEN_PACK_EFFBITS=1`
+// - cap bits: `SUF_OPEN_PACK_MAX_BITS` (default 48)
 class OpenCollector {
  public:
   struct Stats {

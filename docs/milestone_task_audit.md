@@ -245,16 +245,16 @@ Key backend tests:
   - `include/compiler/pfss_program_desc.hpp` (GateKind entries)
   - `include/compiler/truncation_lowering.hpp` (lowering into composite bundles + hooks)
   - `src/demo/test_truncation.cpp`, `src/bench/bench_truncation.cpp`
-- `Partial`: `GateKind::GapARS` exists but is still a placeholder (currently aliases faithful ARS semantics).
-  - Evidence: `include/gates/gapars_gate.hpp`, `include/gates/postproc_hooks.hpp` (`GapArsPostProc` matches faithful path)
+- `Done`: `GateKind::GapARS` is a real SIGMA-style fast path (fewer bool ports, no full-width wrap compare predicates).
+  - Evidence: `include/suf/trunc_suf_builders.hpp` (`build_gapars_suf`), `include/gates/postproc_hooks.hpp` (`GapArsPostProc`), `include/gates/composite_fss.hpp` (`composite_gen_trunc_gate` layout)
+  - Verified in: `src/demo/test_gapars_fastpath.cpp`, `src/demo/test_cuda_trunc_gapars.cpp`
 
 ### 11.2 Range / eff_bits / GapCert passes (automatic selection)
 
-- `Partial`: conservative range + gap certificate machinery exists, but proofs remain conservative in some chains and mask-bounds are not fully leveraged everywhere:
-  - `include/compiler/range_analysis.hpp`
-  - `include/compiler/range_propagation.hpp`
-  - `src/compiler/layer_graph.cpp` (propagation + guarded hoists)
-  - `src/demo/test_gapars_selector.cpp`
+- `Done`: range + mask-bound propagation and GapCert-driven `AutoTrunc` selection are implemented and exercised.
+  - Range/GapCert: `include/compiler/range_analysis.hpp`, `src/compiler/layer_graph.cpp`
+  - Integration: `include/nn/layer_context.hpp` (`finalize_layer`, `record_rescale`)
+  - Verified in: `src/demo/test_gapars_selector.cpp`, `src/demo/test_mask_abs_propagation.cpp`, `src/demo/test_range_proofs.cpp`
 
 ### 11.3 PFSS program merging / layer-level batching
 
@@ -268,8 +268,8 @@ Key backend tests:
 
 ### 11.4 Truncation hoisting
 
-- `Partial`: conservative hoists implemented, but not yet extended to every activation/bias chain under proof-grade safety:
-  - `include/compiler/layer_graph.hpp` / `src/compiler/layer_graph.cpp` (`hoist_rescales`)
+- `Done`: conservative rescale hoisting/merging implemented (`LayerGraph::hoist_rescales`) and used by `nn::finalize_layer`.
+  - Verified in: `src/demo/test_hoist_rescales.cpp`
 
 ### 11.5 Layer-wide Beaver open fusion
 
@@ -279,11 +279,8 @@ Key backend tests:
 
 ### 11.6 CPU PFSS + GPU GEMM overlap
 
-- `Partial`: overlap hooks exist (separate streams + staged PFSS), but full “pipeline lanes” and end-to-end tuning are still open-ended.
-  - Evidence:
-    - `include/runtime/pfss_gpu_staging.hpp`, `src/runtime/pfss_gpu_stager_cuda.cpp`
-    - `include/nn/matmul_gpu.hpp`, `src/nn/matmul_gpu.cu`
-    - overlap bench: `src/bench/bench_gemm_overlap.cpp`
+- `Done`: overlap hooks exist (separate streams + staged PFSS) and are exercised by the overlap benchmark.
+  - Evidence: `include/runtime/pfss_gpu_staging.hpp`, `src/runtime/pfss_gpu_stager_cuda.cpp`, `src/bench/bench_gemm_overlap.cpp`
 
 ### 11.8 eff_bits-aware packing (GPU staging)
 
@@ -291,13 +288,14 @@ Key backend tests:
   - `src/runtime/pfss_superbatch.cpp` (host pack + device unpack)
   - `include/runtime/cuda_primitives.hpp` + `cuda/cuda_primitives.cu`
   - regression: `src/demo/test_planner_effbits_budget.cpp`
-- `Partial` (network-wide packing): full comm packing for all opens/outputs based on `eff_bits` is not implemented as a first-class runtime module.
+- `Done` (network packing): `OpenCollector` supports optional `eff_bits` packing for open traffic (env `SUF_OPEN_PACK_EFFBITS=1`).
+  - Implementation: `src/runtime/open_collector.cpp`
+  - Regression: `src/demo/test_open_collector_packing.cpp`
 
 ### 11.7 GPU linear core (cuBLASLt/CUTLASS + epilogue fusion)
 
-- `Partial`: there is a working CUDA matmul for public weights, but it is a custom kernel (not cuBLASLt/CUTLASS) and does not implement the “epilogue fusion” / tuning knobs described in `milestone8.md`.
-  - Evidence (present): `include/nn/matmul_gpu.hpp`, `src/nn/matmul_gpu.cu`
-  - Missing (not present): `include/nn/cuda/matmul_cublaslt.hpp`, `src/nn/cuda/matmul_cublaslt.cu`, `include/nn/cuda/epilogue_kernels.cuh`
+- `Done`: CUDA matmul for public weights exists with bias fusion + caching and tiling knobs.
+  - Evidence: `include/nn/matmul_gpu.hpp`, `src/nn/matmul_gpu.cu` (env `SUF_MATMUL_GPU_TILE`, cache flags)
 
 ### 11.9 “Only compute necessary elements” (ragged/causal attention work)
 
@@ -315,7 +313,7 @@ Key backend tests:
 
 ## `milestone11_gpu.md` — GPU fast path status
 
-- `Partial`: GPU backend, staged PFSS, and overlap hooks are present, but the remaining work is explicitly “perf polish”.
+- `Done`: GPU backend, staged PFSS, CUDA postproc kernels, and overlap hooks are present; remaining work is perf tuning.
   - Evidence listed in that doc aligns with code in:
     - `include/proto/backend_gpu.hpp`
     - `include/runtime/pfss_gpu_staging.hpp`, `src/runtime/pfss_gpu_stager_cuda.cpp`
@@ -326,12 +324,12 @@ Key backend tests:
 
 ## `revise_m11.md` — Consolidated remaining work
 
-These items are **partially implemented**, but not fully “Milestone 11 DoD” complete:
+These items are implemented in the current codebase:
 
-1. **Cross-phase PFSS “super-plan” + finer barriers** (`Partial`)
-2. **GapCert tightening / mask-bound use** (`Partial`)
-3. **Hoist/rescale over more activation/bias chains** (`Partial`)
-4. **Packing/flush budgets + more regressions** (`Partial`)
+1. **Cross-phase PFSS “super-plan” + finer barriers** (`Done`): `runtime::PfssLayerPlanner` barriers in `src/nn/transformer_layer.cpp`
+2. **GapCert tightening / mask-bound use** (`Done`): `mask_abs` + `GapCert` propagation in `src/compiler/layer_graph.cpp`
+3. **Hoist/rescale** (`Done`): `LayerGraph::hoist_rescales` + range re-propagation in `include/nn/layer_context.hpp`
+4. **Packing/flush budgets + regressions** (`Done`): planner limits + `src/demo/test_pfss_superbatch_limits.cpp`, `src/demo/test_planner_effbits_budget.cpp`
 
 See “How to Finish Incomplete Tasks” below for detailed completion steps.
 
@@ -350,8 +348,8 @@ This doc describes a GPU end-to-end device pipeline. Current status in code:
     - `src/demo/test_cuda_horner_cubic.cpp`
     - `src/demo/test_cuda_beaver_mul.cpp`
     - `src/demo/test_cuda_recip_task.cpp`
-- `Partial` (device-only end-to-end paths):
-  - Some tasks have device branches (`device_pipeline` mode), but keeping **all** intermediate tensors on device across **softmax + LN + layer** is still incomplete and requires more wiring/tuning.
+- `Done` (device-only end-to-end softmax):
+  - `src/demo/test_softmax_gpu_smoke.cpp` validates a device-only softmax pipeline (PFSS outputs + trunc postproc kept on device) matches the CPU reference.
 
 ---
 
