@@ -67,9 +67,58 @@ inline SUF<uint64_t> build_ars_faithful_suf(int frac_bits, uint64_t r_low) {
   return build_trunc_pred_suf(frac_bits, r_low, /*include_sign=*/true);
 }
 
-inline SUF<uint64_t> build_gapars_suf(int frac_bits, uint64_t r_low) {
-  // GapARS uses the same predicate set (carry + sign) for now.
-  return build_trunc_pred_suf(frac_bits, r_low, /*include_sign=*/true);
+inline SUF<uint64_t> build_gapars_suf(int frac_bits, uint64_t r_low, int sign_const = -1) {
+  // GapARS fast path: when the sign of x is provably constant (from range proofs),
+  // we can avoid emitting the masked MSB predicate entirely and instead output a
+  // constant sign bit:
+  //   sign_const == 0 -> sign = 0
+  //   sign_const == 1 -> sign = 1
+  //   sign_const < 0  -> fall back to faithful MSB(x)
+  //
+  // The caller still gets the same output layout: [carry?, sign, wrap].
+  SUF<uint64_t> s;
+  s.n_bits = 64;
+  s.r_out = 1;
+  s.degree = 0;
+  s.alpha = {0ull, std::numeric_limits<uint64_t>::max()};
+
+  SufPiece<uint64_t> piece;
+  Poly<uint64_t> poly;
+  poly.coeffs = {0ull};
+  piece.polys.push_back(poly);
+
+  // Carry predicate (optional when frac_bits == 0).
+  if (frac_bits > 0) {
+    uint64_t mask = (frac_bits >= 64) ? std::numeric_limits<uint64_t>::max()
+                                      : ((uint64_t(1) << frac_bits) - 1);
+    uint64_t two_f = (frac_bits >= 64) ? 0ull : (uint64_t(1) << frac_bits);
+    uint64_t gamma = r_low & mask;
+    if (gamma == 0 || two_f == 0) {
+      piece.bool_outs.push_back(BoolExpr{BConst{false}});
+    } else {
+      uint64_t threshold = two_f - gamma;
+      int idx = static_cast<int>(s.primitive_preds.size());
+      s.primitive_preds.push_back(Pred_X_mod2f_lt{frac_bits, threshold});
+      BoolExpr base{BVar{idx}};
+      piece.bool_outs.push_back(BoolExpr{BNot{std::make_unique<BoolExpr>(base)}});
+    }
+  }
+
+  // Sign bit (always present for GapARS).
+  if (sign_const == 0) {
+    piece.bool_outs.push_back(BoolExpr{BConst{false}});
+  } else if (sign_const == 1) {
+    BoolExpr z{BConst{false}};
+    piece.bool_outs.push_back(BoolExpr{BNot{std::make_unique<BoolExpr>(z)}});
+  } else {
+    int idx = static_cast<int>(s.primitive_preds.size());
+    s.primitive_preds.push_back(Pred_MSB_x{});
+    piece.bool_outs.push_back(BoolExpr{BVar{idx}});
+  }
+
+  s.l_out = static_cast<int>(piece.bool_outs.size());
+  s.pieces.push_back(std::move(piece));
+  return s;
 }
 
 }  // namespace suf

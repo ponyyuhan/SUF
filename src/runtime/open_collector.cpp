@@ -1,5 +1,6 @@
 #include "runtime/open_collector.hpp"
 
+#include <chrono>
 #include <stdexcept>
 
 namespace runtime {
@@ -31,6 +32,7 @@ OpenHandle OpenCollector::enqueue(const std::vector<uint64_t>& diff) {
 
 void OpenCollector::flush(int party, net::Chan& ch) {
   if (requests_.empty()) return;
+  auto t0 = std::chrono::steady_clock::now();
   size_t total_words = 0;
   for (const auto& req : requests_) {
     if (!req.slot) {
@@ -57,6 +59,9 @@ void OpenCollector::flush(int party, net::Chan& ch) {
   stats_.flushes += 1;
   stats_.opened_words += total_words;
   pending_words_ = 0;
+  auto t1 = std::chrono::steady_clock::now();
+  stats_.flush_ns += static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
 }
 
 std::span<const int64_t> OpenCollector::view(const OpenHandle& h) const {

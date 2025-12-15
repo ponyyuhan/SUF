@@ -16,6 +16,7 @@
 #include "gates/reciprocal_composite.hpp"
 
 #ifdef SUF_HAVE_CUDA
+#include <cuda_runtime.h>
 
 namespace {
 
@@ -29,6 +30,12 @@ struct PartyResult {
 // CUDA-gated RecipTask regression: compares GPU path (mul/trunc kernels +
 // device-staged PFSS outputs) against the reference reciprocal.
 int main() {
+  int dev_count = 0;
+  cudaError_t dev_err = cudaGetDeviceCount(&dev_count);
+  if (dev_err != cudaSuccess || dev_count <= 0) {
+    std::cout << "skip: no CUDA-capable device is detected\n";
+    return 0;
+  }
   // Optionally enable the GPU fast paths inside MulTask/TruncTask.
   const bool use_gpu_kernels = (std::getenv("SUF_RECIP_GPU_KERNELS") != nullptr);
   auto toggle_kernel_env = [&](bool on) {

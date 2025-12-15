@@ -35,20 +35,21 @@ static int add_query(const RawPredQuery& q, std::vector<RawPredQuery>& out, std:
   return idx;
 }
 
-static suf::BoolExpr make_wrap_expr(uint64_t wrap_idx, int idx_raw, int idx_raw2) {
-  // w = wrap ? ((!a)|b) : ((!a)&b)
-  suf::BoolExpr a{ suf::BVar{idx_raw} };
-  suf::BoolExpr b{ suf::BVar{idx_raw2} };
-  suf::BoolExpr na{ suf::BNot{ std::make_unique<suf::BoolExpr>(a) } };
-  suf::BoolExpr and_expr{ suf::BAnd{ std::make_unique<suf::BoolExpr>(na), std::make_unique<suf::BoolExpr>(b) } };
-  suf::BoolExpr or_expr{ suf::BOr{ std::make_unique<suf::BoolExpr>(na), std::make_unique<suf::BoolExpr>(b) } };
+static suf::BoolExpr make_rot_interval_expr(size_t wrap_idx, int idx_theta0, int idx_theta1) {
+  // Rotated interval membership can be expressed without AND/OR:
+  //
+  //   let a = 1[hatx < theta0], b = 1[hatx < theta1], w = 1[theta1 < theta0]
+  //   then membership in [theta0, theta1) mod 2^n is:  a XOR b XOR w
+  //
+  // This avoids Beaver work in the boolean DAG evaluator.
+  suf::BoolExpr a{suf::BVar{idx_theta0}};
+  suf::BoolExpr b{suf::BVar{idx_theta1}};
+  suf::BoolExpr axb{suf::BXor{std::make_unique<suf::BoolExpr>(a),
+                              std::make_unique<suf::BoolExpr>(b)}};
   // Use negative indices to refer to wrap bits; evaluator interprets them with offset.
-  suf::BoolExpr wrap_var{ suf::BVar{ -1 - static_cast<int>(wrap_idx) } };
-  suf::BoolExpr not_wrap{ suf::BNot{ std::make_unique<suf::BoolExpr>(wrap_var) } };
-  suf::BoolExpr term0{ suf::BAnd{ std::make_unique<suf::BoolExpr>(not_wrap), std::make_unique<suf::BoolExpr>(and_expr) } };
-  suf::BoolExpr term1{ suf::BAnd{ std::make_unique<suf::BoolExpr>(wrap_var), std::make_unique<suf::BoolExpr>(or_expr) } };
-  suf::BoolExpr res{ suf::BOr{ std::make_unique<suf::BoolExpr>(term0), std::make_unique<suf::BoolExpr>(term1) } };
-  return res;
+  suf::BoolExpr wrap_var{suf::BVar{-1 - static_cast<int>(wrap_idx)}};
+  return suf::BoolExpr{suf::BXor{std::make_unique<suf::BoolExpr>(axb),
+                                std::make_unique<suf::BoolExpr>(wrap_var)}};
 }
 
 static suf::BoolExpr rewrite_pred(const suf::PrimitivePred& p,
@@ -64,28 +65,28 @@ static suf::BoolExpr rewrite_pred(const suf::PrimitivePred& p,
       int b = add_query(RawPredQuery{RawPredKind::kLtU64, 64, rec.theta1}, queries, mp);
       size_t wrap_idx = wrap_bits.size();
       wrap_bits.push_back(rec.wrap);
-      return make_wrap_expr(wrap_idx, a, b);
+      return make_rot_interval_expr(wrap_idx, a, b);
     } else if constexpr (std::is_same_v<T, suf::Pred_X_mod2f_lt>) {
       auto rec = suf::rewrite_ltlow(r_in, n.f, n.gamma);
       int a = add_query(RawPredQuery{RawPredKind::kLtLow, static_cast<uint8_t>(rec.f), rec.theta0}, queries, mp);
       int b = add_query(RawPredQuery{RawPredKind::kLtLow, static_cast<uint8_t>(rec.f), rec.theta1}, queries, mp);
       size_t wrap_idx = wrap_bits.size();
       wrap_bits.push_back(rec.wrap);
-      return make_wrap_expr(wrap_idx, a, b);
+      return make_rot_interval_expr(wrap_idx, a, b);
     } else if constexpr (std::is_same_v<T, suf::Pred_MSB_x>) {
       auto rec = suf::rewrite_msb_add(r_in, 0);
       int a = add_query(RawPredQuery{RawPredKind::kLtU64, 64, rec.theta0}, queries, mp);
       int b = add_query(RawPredQuery{RawPredKind::kLtU64, 64, rec.theta1}, queries, mp);
       size_t wrap_idx = wrap_bits.size();
       wrap_bits.push_back(rec.wrap);
-      return make_wrap_expr(wrap_idx, a, b);
+      return make_rot_interval_expr(wrap_idx, a, b);
     } else { // MSB(x+c)
       auto rec = suf::rewrite_msb_add(r_in, n.c);
       int a = add_query(RawPredQuery{RawPredKind::kLtU64, 64, rec.theta0}, queries, mp);
       int b = add_query(RawPredQuery{RawPredKind::kLtU64, 64, rec.theta1}, queries, mp);
       size_t wrap_idx = wrap_bits.size();
       wrap_bits.push_back(rec.wrap);
-      return make_wrap_expr(wrap_idx, a, b);
+      return make_rot_interval_expr(wrap_idx, a, b);
     }
   }, p);
 }

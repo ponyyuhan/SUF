@@ -467,7 +467,8 @@ inline CompositeKeyPair composite_gen_trunc_gate(proto::PfssBackend& backend,
                                                  int frac_bits,
                                                  compiler::GateKind kind,
                                                  size_t batch_N = 1,
-                                                 suf::SUF<uint64_t>* F_out = nullptr) {
+                                                 suf::SUF<uint64_t>* F_out = nullptr,
+                                                 int gapars_sign_const = -1) {
   if (kind != compiler::GateKind::FaithfulTR &&
       kind != compiler::GateKind::FaithfulARS &&
       kind != compiler::GateKind::GapARS) {
@@ -484,7 +485,7 @@ inline CompositeKeyPair composite_gen_trunc_gate(proto::PfssBackend& backend,
   } else if (kind == compiler::GateKind::FaithfulARS) {
     F = suf::build_ars_faithful_suf(frac_bits, r_low);
   } else {
-    F = suf::build_gapars_suf(frac_bits, r_low);
+    F = suf::build_gapars_suf(frac_bits, r_low, gapars_sign_const);
   }
   if (F_out) *F_out = F;
   // Use a zero-sum output mask for trunc/ARS gates. Individual shares are still
@@ -498,7 +499,11 @@ inline CompositeKeyPair composite_gen_trunc_gate(proto::PfssBackend& backend,
   if (frac_bits > 0) compiled.layout.bool_ports.push_back("carry");
   if (kind != compiler::GateKind::FaithfulTR) compiled.layout.bool_ports.push_back("sign");
   compiled.layout.bool_ports.push_back("wrap");
-  compiled.extra_u64 = {static_cast<uint64_t>(frac_bits), r_low};
+  uint64_t sign_mode = 2ull;
+  if (kind == compiler::GateKind::GapARS) {
+    if (gapars_sign_const == 0 || gapars_sign_const == 1) sign_mode = static_cast<uint64_t>(gapars_sign_const);
+  }
+  compiled.extra_u64 = {static_cast<uint64_t>(frac_bits), r_low, sign_mode};
 
   auto split_add = [&](uint64_t v) {
     uint64_t s0 = rng();
@@ -819,6 +824,13 @@ inline std::vector<uint64_t> composite_eval_share_backend(int party,
     }
     uint64_t x_plain = proto::sub_mod(hatx, compiled.r_in);
     auto ref_out = suf::eval_suf_ref(F, x_plain);
+    if (compiled.gate_kind == compiler::GateKind::FaithfulTR ||
+        compiled.gate_kind == compiler::GateKind::FaithfulARS ||
+        compiled.gate_kind == compiler::GateKind::GapARS) {
+      // compile_suf_to_pfss_two_programs appends `wrap = 1[hatx < r_in]` as an
+      // extra boolean output for trunc/ARS gates; it is not part of the SUF IR.
+      ref_out.bools.push_back(hatx < compiled.r_in);
+    }
     std::vector<uint64_t> out;
     out.reserve(static_cast<size_t>(compiled.r + compiled.ell));
     for (int j = 0; j < compiled.r; j++) {
@@ -1009,6 +1021,13 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     for (size_t i = 0; i < N; ++i) {
       uint64_t x_plain = proto::sub_mod(in.hatx[i], compiled.r_in);
       auto ref_out = suf::eval_suf_ref(F, x_plain);
+      if (compiled.gate_kind == compiler::GateKind::FaithfulTR ||
+          compiled.gate_kind == compiler::GateKind::FaithfulARS ||
+          compiled.gate_kind == compiler::GateKind::GapARS) {
+        // compile_suf_to_pfss_two_programs appends `wrap = 1[hatx < r_in]` as an
+        // extra boolean output for trunc/ARS gates; it is not part of the SUF IR.
+        ref_out.bools.push_back(in.hatx[i] < compiled.r_in);
+      }
     for (int j = 0; j < compiled.r; ++j) {
       uint64_t share = (party == 0 && j < static_cast<int>(ref_out.arith.size()))
                            ? ref_out.arith[static_cast<size_t>(j)]
@@ -1646,10 +1665,6 @@ inline CompositeBatchOutput composite_eval_batch_with_postproc(int party,
                                                                const CompositeBatchInput& in,
                                                                gates::PostProcHook& hook) {
   auto out = composite_eval_batch_backend(party, backend, ch, k, F, in);
-  // If backend is reference, outputs are already postprocessed; nothing to do.
-  if (dynamic_cast<proto::ReferenceBackend*>(&backend)) {
-    return out;
-  }
   // Use a generous synthetic triple pool to avoid exhaustion when keys do not provision enough.
   std::vector<proto::BeaverTriple64Share> synth_triples;
   size_t generous_need = std::max<size_t>(

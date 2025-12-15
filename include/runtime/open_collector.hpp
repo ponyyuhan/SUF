@@ -69,6 +69,7 @@ class OpenCollector {
     size_t flushes = 0;
     size_t opened_words = 0;
     size_t max_pending_words = 0;
+    uint64_t flush_ns = 0;
   };
   struct Limits {
     size_t max_pending_words = 1ull << 24;  // generous guardrail

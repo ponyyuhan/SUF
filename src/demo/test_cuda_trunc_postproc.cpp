@@ -9,6 +9,12 @@ int main() {
   std::cout << "SUF_HAVE_CUDA not defined; skipping CUDA trunc test.\n";
   return 0;
 #else
+  int dev_count = 0;
+  cudaError_t dev_err = cudaGetDeviceCount(&dev_count);
+  if (dev_err != cudaSuccess || dev_count <= 0) {
+    std::cout << "skip: no CUDA-capable device is detected\n";
+    return 0;
+  }
   const size_t N = 2048;
   const int frac_bits = 8;
   std::mt19937_64 rng(4321);

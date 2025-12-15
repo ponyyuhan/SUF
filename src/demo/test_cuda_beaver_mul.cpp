@@ -9,6 +9,12 @@ int main() {
   std::cout << "SUF_HAVE_CUDA not defined; skipping CUDA beaver mul test.\n";
   return 0;
 #else
+  int dev_count = 0;
+  cudaError_t dev_err = cudaGetDeviceCount(&dev_count);
+  if (dev_err != cudaSuccess || dev_count <= 0) {
+    std::cout << "skip: no CUDA-capable device is detected\n";
+    return 0;
+  }
   const size_t N = 1024;
   std::mt19937_64 rng(1234);
   std::vector<uint64_t> x(N), y(N), a(N), b(N), c(N), d_open(N), e_open(N);
@@ -70,4 +76,3 @@ int main() {
   return 0;
 #endif
 }
-

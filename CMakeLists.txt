@@ -180,6 +180,14 @@ add_executable(test_gapars_selector src/demo/test_gapars_selector.cpp)
 target_include_directories(test_gapars_selector PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_gapars_selector PRIVATE compiler_passes suf_fss cuda_pfss ${MYL7_LINK_LIBS})
 
+add_executable(test_gapars_fastpath src/demo/test_gapars_fastpath.cpp)
+target_include_directories(test_gapars_fastpath PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_gapars_fastpath PRIVATE compiler_passes suf_fss cuda_pfss ${MYL7_LINK_LIBS})
+
+add_executable(test_mask_abs_propagation src/demo/test_mask_abs_propagation.cpp)
+target_include_directories(test_mask_abs_propagation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_mask_abs_propagation PRIVATE compiler_passes suf_fss cuda_pfss ${MYL7_LINK_LIBS})
+
 add_library(compiler_passes STATIC
   src/compiler/truncation_pass.cpp
   src/compiler/rescale_pass.cpp
@@ -401,6 +409,10 @@ add_executable(bench_truncation src/bench/bench_truncation.cpp)
 target_include_directories(bench_truncation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(bench_truncation PRIVATE suf_fss ${MYL7_LINK_LIBS})
 
+add_executable(bench_layer_breakdown src/bench/bench_layer_breakdown.cpp)
+target_include_directories(bench_layer_breakdown PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(bench_layer_breakdown PRIVATE nn_ops compiler_passes)
+
 add_executable(bench_suf_transformer src/demo/bench_suf_transformer.cpp)
 target_include_directories(bench_suf_transformer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(bench_suf_transformer PRIVATE nn_ops)
@@ -421,6 +433,8 @@ add_test(NAME test_pfss_async_stress COMMAND test_pfss_async_stress)
 add_test(NAME test_transformer_async COMMAND test_transformer_async)
 add_test(NAME test_planner_causal COMMAND test_planner_causal)
 add_test(NAME test_gapars_selector COMMAND test_gapars_selector)
+add_test(NAME test_gapars_fastpath COMMAND test_gapars_fastpath)
+add_test(NAME test_mask_abs_propagation COMMAND test_mask_abs_propagation)
 if(HAVE_SUF_CUDA)
 add_test(NAME test_pfss_gpu COMMAND test_pfss_gpu)
 add_test(NAME test_cuda_trunc_gapars COMMAND test_cuda_trunc_gapars)

@@ -5,6 +5,7 @@
 #include <random>
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 
 #ifdef SUF_HAVE_CUDA
 #include <cuda_runtime.h>
@@ -26,6 +27,36 @@ inline size_t packed_words_host(size_t elems, int eff_bits) {
   if (eff_bits == 64) return elems;
   uint64_t bits = static_cast<uint64_t>(elems) * static_cast<uint64_t>(eff_bits);
   return static_cast<size_t>((bits + 63) >> 6);
+}
+
+inline size_t beaver_u64_mul_per_elem(const ::gates::CompositePartyKey& k) {
+  const auto& comp = k.compiled;
+  const size_t cut_count = comp.coeff.cutpoints_ge.size();
+  const size_t piece_count = cut_count + 1;
+  const size_t selector_chain_mul = (cut_count > 0) ? (cut_count - 1) : 0;
+  const size_t horner_mul = static_cast<size_t>(comp.r) * static_cast<size_t>(comp.degree);
+  const size_t coeff_words = static_cast<size_t>(std::max(0, comp.coeff.out_words));
+  const size_t coeff_select_mul = piece_count * coeff_words;
+
+  const size_t ell = static_cast<size_t>(std::max(0, comp.ell));
+  const size_t bool_select_mul = piece_count * ell;
+
+  if (comp.gate_kind == ::compiler::GateKind::FaithfulTR ||
+      comp.gate_kind == ::compiler::GateKind::FaithfulARS ||
+      comp.gate_kind == ::compiler::GateKind::GapARS) {
+    const size_t cut_b2a_mul = cut_count;
+    const size_t bool_b2a_mul = piece_count * ell;
+    return cut_b2a_mul + selector_chain_mul + coeff_select_mul + bool_b2a_mul + bool_select_mul + horner_mul;
+  }
+
+  const size_t conv_bits = comp.pred.queries.size() + cut_count;
+  return conv_bits + selector_chain_mul + coeff_select_mul + bool_select_mul + horner_mul;
+}
+
+inline size_t beaver_u64_capacity_elems(const ::gates::CompositePartyKey& k) {
+  const size_t per_elem = beaver_u64_mul_per_elem(k);
+  if (per_elem == 0) return std::numeric_limits<size_t>::max();
+  return k.triples.size() / per_elem;
 }
 
 std::vector<uint64_t> pack_eff_bits_host(const std::vector<uint64_t>& xs, int eff_bits) {
@@ -280,6 +311,12 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
     std::vector<Bucket> buckets;
     for (auto job_idx : gd.jobs) {
       auto& job = jobs_[job_idx];
+      const size_t cap_elems = beaver_u64_capacity_elems(*job.key);
+      if (cap_elems != std::numeric_limits<size_t>::max() && job.hatx_public.size() > cap_elems) {
+        throw std::runtime_error("PfssSuperBatch: job exceeds provisioned Beaver triple capacity (hatx=" +
+                                 std::to_string(job.hatx_public.size()) + " cap=" + std::to_string(cap_elems) +
+                                 " triples=" + std::to_string(job.key->triples.size()) + ")");
+      }
       size_t bidx;
       auto it = bucket_index.find(job.key);
       if (it == bucket_index.end()) {
@@ -293,6 +330,17 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
         buckets.push_back(std::move(b));
       } else {
         bidx = it->second;
+        if (cap_elems != std::numeric_limits<size_t>::max() &&
+            buckets[bidx].hatx.size() + job.hatx_public.size() > cap_elems) {
+          bidx = buckets.size();
+          bucket_index[job.key] = bidx;
+          Bucket b;
+          b.key = job.key;
+          b.suf = job.suf;
+          b.r = static_cast<size_t>(job.key->compiled.r);
+          b.ell = static_cast<size_t>(job.key->compiled.ell);
+          buckets.push_back(std::move(b));
+        }
       }
       Bucket& b = buckets[bidx];
       if (job.shape.eff_bits > 0 && job.shape.eff_bits <= 64) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <stdexcept>
 #include <algorithm>
 #include <optional>
@@ -29,6 +30,8 @@ class PfssPhasePlanner {
     size_t trunc_active_elems = 0;
     size_t coeff_cost_effbits = 0;
     size_t trunc_cost_effbits = 0;
+    uint64_t coeff_flush_ns = 0;
+    uint64_t trunc_flush_ns = 0;
   };
 
   void bind(PfssSuperBatch* coeff_batch, PfssSuperBatch* trunc_batch) {
@@ -38,18 +41,24 @@ class PfssPhasePlanner {
 
   template <typename PfssChanT>
   void finalize_phase(int party, proto::PfssBackendBatch& backend, PfssChanT& pfss_ch) {
-    auto flush_once = [&](PfssSuperBatch* b) {
-      if (!b) return;
+    stats_.coeff_flush_ns = 0;
+    stats_.trunc_flush_ns = 0;
+    auto flush_once = [&](PfssSuperBatch* b) -> uint64_t {
+      if (!b) return 0;
+      auto t0 = std::chrono::steady_clock::now();
       if (b->has_pending()) {
         b->flush_eval(party, backend, pfss_ch);
       }
       if (b->has_flushed()) {
         b->finalize_all(party, pfss_ch);
       }
+      auto t1 = std::chrono::steady_clock::now();
+      return static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
     };
     // Flush coeff first, trunc second (common to have them aliased).
-    flush_once(coeff_);
-    if (trunc_ != coeff_) flush_once(trunc_);
+    stats_.coeff_flush_ns += flush_once(coeff_);
+    if (trunc_ != coeff_) stats_.trunc_flush_ns += flush_once(trunc_);
     stats_.coeff_jobs = coeff_ ? coeff_->stats().jobs : 0;
     stats_.trunc_jobs = trunc_ ? trunc_->stats().jobs : 0;
     stats_.coeff_flushes = coeff_ ? coeff_->stats().flushes : 0;
@@ -113,6 +122,8 @@ class PfssLayerPlanner {
     size_t trunc_active_elems = 0;
     size_t coeff_cost_effbits = 0;
     size_t trunc_cost_effbits = 0;
+    uint64_t coeff_flush_ns = 0;
+    uint64_t trunc_flush_ns = 0;
   };
 
   void set_limits(const Limits& lim) { limits_ = lim; }
@@ -145,6 +156,8 @@ class PfssLayerPlanner {
     totals_.trunc_active_elems += trunc_batch.stats().active_elems;
     totals_.coeff_cost_effbits += coeff_batch.stats().cost_effbits;
     totals_.trunc_cost_effbits += trunc_batch.stats().cost_effbits;
+    totals_.coeff_flush_ns += ps.coeff_flush_ns;
+    totals_.trunc_flush_ns += ps.trunc_flush_ns;
     enforce_limits();
   }
 
@@ -255,13 +268,24 @@ class PfssLayerPlanner {
         }
       }
     } else {
-      auto flush_once = [&](PfssSuperBatch& b, size_t& flush_counter, size_t& jobs_counter, size_t& hatx_counter, size_t& hatx_bytes_counter, size_t& active_counter, size_t& cost_counter) {
+      auto flush_once = [&](PfssSuperBatch& b,
+                            size_t& flush_counter,
+                            size_t& jobs_counter,
+                            size_t& hatx_counter,
+                            size_t& hatx_bytes_counter,
+                            size_t& active_counter,
+                            size_t& cost_counter,
+                            uint64_t& time_counter) {
+        auto t0 = std::chrono::steady_clock::now();
         if (b.has_pending()) {
           b.flush_eval(party, backend, pfss_ch);
         }
         if (b.has_flushed()) {
           b.finalize_all(party, pfss_ch);
         }
+        auto t1 = std::chrono::steady_clock::now();
+        time_counter += static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
         const auto& st = b.stats();
         jobs_counter += st.jobs;
         hatx_counter += st.hatx_words;
@@ -271,9 +295,23 @@ class PfssLayerPlanner {
         flush_counter += st.flushes;
         b.clear();
       };
-      flush_once(coeff_batch, totals_.coeff_flushes, totals_.coeff_jobs, totals_.coeff_hatx_words, totals_.coeff_hatx_bytes, totals_.coeff_active_elems, totals_.coeff_cost_effbits);
+      flush_once(coeff_batch,
+                 totals_.coeff_flushes,
+                 totals_.coeff_jobs,
+                 totals_.coeff_hatx_words,
+                 totals_.coeff_hatx_bytes,
+                 totals_.coeff_active_elems,
+                 totals_.coeff_cost_effbits,
+                 totals_.coeff_flush_ns);
       if (&trunc_batch != &coeff_batch) {
-        flush_once(trunc_batch, totals_.trunc_flushes, totals_.trunc_jobs, totals_.trunc_hatx_words, totals_.trunc_hatx_bytes, totals_.trunc_active_elems, totals_.trunc_cost_effbits);
+        flush_once(trunc_batch,
+                   totals_.trunc_flushes,
+                   totals_.trunc_jobs,
+                   totals_.trunc_hatx_words,
+                   totals_.trunc_hatx_bytes,
+                   totals_.trunc_active_elems,
+                   totals_.trunc_cost_effbits,
+                   totals_.trunc_flush_ns);
       }
     }
     enforce_limits();

@@ -834,6 +834,7 @@ void attention_forward(const AttentionConfig& cfg,
         SoftmaxProbTask(std::unique_ptr<nn::SoftmaxBlockTask> sm_task,
                         runtime::TruncChoice trunc_choice,
                         compiler::RangeInterval prob_range,
+                        const compiler::TruncationLoweringResult* ctx_trunc_bundle,
                         size_t rows,
                         size_t cols,
                         size_t Dh,
@@ -850,6 +851,7 @@ void attention_forward(const AttentionConfig& cfg,
             : sm_task_(std::move(sm_task)),
               trunc_choice_(trunc_choice),
               prob_range_(prob_range),
+              ctx_trunc_bundle_(ctx_trunc_bundle),
               rows_(rows),
               cols_(cols),
               Dh_(Dh),
@@ -894,8 +896,8 @@ void attention_forward(const AttentionConfig& cfg,
                     1, static_cast<int>(cur_len_), static_cast<int>(Dh_), prob_row,
                     std::span<const uint64_t>(v_mats_[row].data(), v_mats_[row].size()), ctx_row,
                     std::span<const proto::BeaverTriple64Share>(triples.data(), triples.size()));
-                const auto* trunc_bundle =
-                    select_trunc_bundle(trunc_choice_, prob_range_, static_cast<int>(fb_));
+                const auto* trunc_bundle = ctx_trunc_bundle_;
+                if (!trunc_bundle) trunc_bundle = trunc_choice_.faithful;
                 auto trunc = std::make_unique<runtime::TruncTask>(
                     trunc_bundle ? trunc_bundle : trunc_choice_.faithful,
                     std::span<const uint64_t>(ctx_row.data(), ctx_row.size()), ctx_row);
@@ -950,6 +952,7 @@ void attention_forward(const AttentionConfig& cfg,
         std::unique_ptr<nn::SoftmaxBlockTask> sm_task_;
         runtime::TruncChoice trunc_choice_{};
         compiler::RangeInterval prob_range_{};
+        const compiler::TruncationLoweringResult* ctx_trunc_bundle_ = nullptr;
         size_t rows_ = 0;
         size_t cols_ = 0;
         size_t Dh_ = 0;
@@ -976,6 +979,7 @@ void attention_forward(const AttentionConfig& cfg,
       pe->add_task(std::make_unique<SoftmaxProbTask>(std::move(sm_task),
                                                      prob_choice,
                                                      prob_range,
+                                                     &ctx_trunc,
                                                      rows,
                                                      cols,
                                                      Dh,

@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <iostream>
 #include <cstddef>
+#include <string>
 #include <type_traits>
 #include <random>
 #include <cstring>
@@ -436,16 +437,28 @@ class TruncTask final : public detail::PhaseTask {
       }
       case St::EnqueuePfss: {
         if (per_element_) {
+          constexpr size_t kMaxEnqueuePerStep = 1024;
           pfss_handles_.clear();
-          pfss_handles_.reserve(opened_.size());
-          for (size_t i = 0; i < opened_.size(); ++i) {
+          pfss_chunk_begin_ = pfss_next_elem_;
+          size_t enqueued = 0;
+          while (pfss_next_elem_ < opened_.size() && enqueued < kMaxEnqueuePerStep) {
+            size_t elem = pfss_next_elem_;
             PreparedCompositeJob job;
-            job.suf = &bundle_->per_elems[i].suf;
-            job.key = per_keys_[i];
+            job.suf = &bundle_->per_elems[elem].suf;
+            job.key = per_keys_[elem];
             job.hook = nullptr;  // Run postproc locally to avoid double-application.
             job.hatx_public.resize(1);
-            job.hatx_public[0] = static_cast<uint64_t>(opened_[i]);
-            pfss_handles_.push_back(R.pfss_trunc->enqueue_composite(std::move(job)));
+            job.hatx_public[0] = static_cast<uint64_t>(opened_[elem]);
+            try {
+              pfss_handles_.push_back(R.pfss_trunc->enqueue_composite(std::move(job)));
+              pfss_next_elem_++;
+              enqueued++;
+            } catch (const std::exception& e) {
+              std::string msg = e.what();
+              bool budget = (msg.find("PfssSuperBatch: pending") != std::string::npos);
+              if (!budget || pfss_handles_.empty()) throw;
+              break;
+            }
           }
         } else {
           PreparedCompositeJob job;
@@ -487,13 +500,17 @@ class TruncTask final : public detail::PhaseTask {
             if (!R.pfss_trunc->ready(pfss_handles_[i])) return detail::Need::PfssTrunc;
           }
           for (size_t i = 0; i < pfss_handles_.size(); ++i) {
+            size_t elem = pfss_chunk_begin_ + i;
+            if (elem >= opened_.size()) {
+              throw std::runtime_error("TruncTask: per-element chunk index out of range");
+            }
             auto v = R.pfss_trunc->view(pfss_handles_[i]);
             if (v.arith_words < v.r) {
               throw std::runtime_error("TruncTask: PFSS arith slice too small (per-element)");
             }
             std::vector<uint64_t> hook_out(v.r, 0);
             size_t need_triples = std::max<size_t>(v.ell, v.r);
-            const auto* key_i = per_keys_[i];
+            const auto* key_i = per_keys_[elem];
             const std::vector<proto::BeaverTriple64Share>* triples = &key_i->triples;
             std::vector<proto::BeaverTriple64Share> tmp_triples;
             if (triples->size() < need_triples && !triples->empty()) {
@@ -507,17 +524,23 @@ class TruncTask final : public detail::PhaseTask {
               throw std::runtime_error("TruncTask: insufficient triples (per-element)");
             }
             proto::BeaverMul64 mul{R.party, *R.pfss_chan, *triples};
-            per_hooks_[i]->run_batch(R.party,
+            uint64_t hatx_public = static_cast<uint64_t>(opened_[elem]);
+            per_hooks_[elem]->run_batch(R.party,
                                      *R.pfss_chan,
                                      mul,
-                                     nullptr,
+                                     &hatx_public,
                                      v.arith,
                                      v.r,
                                      v.bools,
                                      v.ell,
                                      /*N=*/1,
                                      hook_out.data());
-            out_[i] = hook_out[0];
+            out_[elem] = hook_out[0];
+          }
+          pfss_handles_.clear();
+          if (pfss_next_elem_ < opened_.size()) {
+            st_ = St::EnqueuePfss;
+            return detail::Need::None;
           }
           st_ = St::Done;
           return detail::Need::None;
@@ -830,6 +853,8 @@ class TruncTask final : public detail::PhaseTask {
   std::vector<const gates::CompositePartyKey*> per_keys_;
   std::vector<gates::PostProcHook*> per_hooks_;
   std::vector<PfssHandle> pfss_handles_;
+  size_t pfss_next_elem_ = 0;
+  size_t pfss_chunk_begin_ = 0;
   std::span<const uint64_t> in_;
   std::span<uint64_t> out_;
   const std::vector<uint64_t>* r_in_src_ = nullptr;

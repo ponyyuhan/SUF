@@ -48,6 +48,20 @@ inline TruncationLoweringResult lower_truncation_gate(proto::PfssBackend& backen
     }
     kind = select_trunc_kind(abs, params.frac_bits, gap);
   }
+  int gapars_sign_const = -1;
+  if (kind == GateKind::GapARS) {
+    // Current GapARS implementation is a fast-path only when the sign is provably constant.
+    // Derive this from the provided range hint when available; otherwise fall back to faithful ARS.
+    const auto& r = params.range_hint;
+    if (r.lo >= 0) {
+      gapars_sign_const = 0;
+    } else if (r.hi < 0) {
+      gapars_sign_const = 1;
+    } else {
+      kind = GateKind::FaithfulARS;
+      gapars_sign_const = -1;
+    }
+  }
   if (kind != GateKind::FaithfulTR &&
       kind != GateKind::FaithfulARS &&
       kind != GateKind::GapARS) {
@@ -55,7 +69,8 @@ inline TruncationLoweringResult lower_truncation_gate(proto::PfssBackend& backen
   }
   TruncationLoweringResult res;
   // Legacy single-mask path.
-  res.keys = gates::composite_gen_trunc_gate(backend, rng, params.frac_bits, kind, batch_N, &res.suf);
+  res.keys = gates::composite_gen_trunc_gate(backend, rng, params.frac_bits, kind, batch_N, &res.suf,
+                                             gapars_sign_const);
 
   // Build postproc hooks wired with layout + masks.
   if (kind == GateKind::FaithfulTR) {
@@ -90,7 +105,8 @@ inline TruncationLoweringResult lower_truncation_gate(proto::PfssBackend& backen
     res.per_elems.resize(batch_N);
     for (size_t i = 0; i < batch_N; ++i) {
       auto& pe = res.per_elems[i];
-      pe.keys = gates::composite_gen_trunc_gate(backend, rng, params.frac_bits, kind, 1, &pe.suf);
+      pe.keys = gates::composite_gen_trunc_gate(backend, rng, params.frac_bits, kind, 1, &pe.suf,
+                                                gapars_sign_const);
       if (kind == GateKind::FaithfulTR) {
         auto h0 = std::make_unique<gates::FaithfulTruncPostProc>();
         auto h1 = std::make_unique<gates::FaithfulTruncPostProc>();

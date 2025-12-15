@@ -234,23 +234,27 @@ void LayerGraph::propagate_ranges() {
       case OpKind::kAdd: {
         auto ra = propagate_add(get_tensor(op.inputs[0]).range, get_tensor(op.inputs[1]).range);
         auto ab = add_abs(get_tensor(op.inputs[0]).abs, get_tensor(op.inputs[1]).abs);
-        uint64_t mask_abs = std::max(get_tensor(op.inputs[0]).mask_abs,
-                                     get_tensor(op.inputs[1]).mask_abs);
+        uint64_t mask_abs = sat_add_u64(get_tensor(op.inputs[0]).mask_abs,
+                                        get_tensor(op.inputs[1]).mask_abs);
         set_tensor(op.outputs[0], ra, ab, gap_from_abs(ab, tensors_[static_cast<size_t>(op.outputs[0])].scale.frac_bits, mask_abs), mask_abs);
         break;
       }
       case OpKind::kSub: {
         auto ra = propagate_sub(get_tensor(op.inputs[0]).range, get_tensor(op.inputs[1]).range);
         auto ab = sub_abs(get_tensor(op.inputs[0]).abs, get_tensor(op.inputs[1]).abs);
-        uint64_t mask_abs = std::max(get_tensor(op.inputs[0]).mask_abs,
-                                     get_tensor(op.inputs[1]).mask_abs);
+        uint64_t mask_abs = sat_add_u64(get_tensor(op.inputs[0]).mask_abs,
+                                        get_tensor(op.inputs[1]).mask_abs);
         set_tensor(op.outputs[0], ra, ab, gap_from_abs(ab, tensors_[static_cast<size_t>(op.outputs[0])].scale.frac_bits, mask_abs), mask_abs);
         break;
       }
       case OpKind::kMulConst: {
         auto ra = propagate_mul_const(get_tensor(op.inputs[0]).range, op.scalar, op.frac_bits);
         auto ab = mul_const_abs(get_tensor(op.inputs[0]).abs, op.scalar, op.frac_bits);
-        uint64_t mask_abs = get_tensor(op.inputs[0]).mask_abs;
+        const auto& x = get_tensor(op.inputs[0]);
+        uint64_t c_abs = (op.scalar < 0) ? static_cast<uint64_t>(-static_cast<__int128>(op.scalar))
+                                         : static_cast<uint64_t>(op.scalar);
+        uint64_t prod = sat_mul_u64(x.mask_abs, c_abs);
+        uint64_t mask_abs = ceil_div_pow2(prod, op.frac_bits);
         set_tensor(op.outputs[0], ra, ab, gap_from_abs(ab, tensors_[static_cast<size_t>(op.outputs[0])].scale.frac_bits, mask_abs), mask_abs);
         break;
       }
@@ -263,8 +267,12 @@ void LayerGraph::propagate_ranges() {
                            get_tensor(op.inputs[1]).abs,
                            op.scalar,
                            op.frac_bits);
-        uint64_t mask_abs = std::max(get_tensor(op.inputs[0]).mask_abs,
-                                     get_tensor(op.inputs[1]).mask_abs);
+        const auto& x = get_tensor(op.inputs[0]);
+        const auto& y = get_tensor(op.inputs[1]);
+        uint64_t a_abs = (op.scalar < 0) ? static_cast<uint64_t>(-static_cast<__int128>(op.scalar))
+                                         : static_cast<uint64_t>(op.scalar);
+        uint64_t y_scaled = ceil_div_pow2(sat_mul_u64(y.mask_abs, a_abs), op.frac_bits);
+        uint64_t mask_abs = sat_add_u64(x.mask_abs, y_scaled);
         set_tensor(op.outputs[0], ra, ab, gap_from_abs(ab, tensors_[static_cast<size_t>(op.outputs[0])].scale.frac_bits, mask_abs), mask_abs);
         break;
       }
@@ -284,8 +292,7 @@ void LayerGraph::propagate_ranges() {
         AbsBound ab = shift_down_abs(get_tensor(op.inputs[0]).abs, shift);
         const auto& in_t = get_tensor(op.inputs[0]);
         // Mask scales down with the same shift.
-        uint64_t mask_abs = shift > 0 ? ceil_div_pow2(in_t.mask_abs, shift)
-                                      : sat_mul_u64(in_t.mask_abs, uint64_t(1) << (-shift));
+        uint64_t mask_abs = shift_mask(in_t.mask_abs, shift);
         mask_abs = std::max<uint64_t>(mask_abs, default_mask_bound(tensors_[static_cast<size_t>(op.outputs[0])].scale.frac_bits));
         set_tensor(op.outputs[0],
                    ra,
