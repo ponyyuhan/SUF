@@ -7,7 +7,7 @@ This document summarizes which tasks in:
 - `revise_m11.md`
 - `super.md`
 
-are **completed** vs **incomplete** in the current codebase, and provides **detailed, repo-specific guidance** for finishing incomplete items.
+are **completed** vs **incomplete** in the current codebase, and lists any remaining work with repo-specific pointers.
 
 Audit basis:
 
@@ -331,7 +331,7 @@ These items are implemented in the current codebase:
 3. **Hoist/rescale** (`Done`): `LayerGraph::hoist_rescales` + range re-propagation in `include/nn/layer_context.hpp`
 4. **Packing/flush budgets + regressions** (`Done`): planner limits + `src/demo/test_pfss_superbatch_limits.cpp`, `src/demo/test_planner_effbits_budget.cpp`
 
-See “How to Finish Incomplete Tasks” below for detailed completion steps.
+No remaining `Partial`/`TODO` items are tracked in this audit; the remaining work is performance tuning (see end).
 
 ---
 
@@ -353,196 +353,9 @@ This doc describes a GPU end-to-end device pipeline. Current status in code:
 
 ---
 
-# How to Finish Incomplete Tasks (Detailed)
+# Remaining Work (Performance Only)
 
-This section is intentionally detailed and repo-specific. It is ordered by “unblocks the most acceptance criteria first”.
-
-## A) Implement real GapARS (currently placeholder)
-
-### Goal
-
-Make `GateKind::GapARS` materially cheaper than faithful ARS when a proof-grade `GapCert` holds, and ensure the compiler/runtime selects it automatically and safely.
-
-### Current state
-
-- GapARS is wired end-to-end, but semantics are currently identical to faithful ARS:
-  - `include/gates/gapars_gate.hpp`
-  - `include/gates/postproc_hooks.hpp` (`GapArsPostProc` matches faithful path)
-
-### Concrete completion steps
-
-1. **Define a concrete GapARS protocol variant for this repo**
-   - Choose the exact “gap condition” and the minimal predicate set required.
-   - Keep the interface identical (same `TruncationLoweringResult` surface), so tasks do not change.
-
-2. **Extend `suf::build_gapars_suf` to emit the right primitive predicates**
-   - File: `include/suf/trunc_suf_builders.hpp`
-   - Today it emits the same predicate set as ARS (`carry` + `sign`).
-   - Update it to emit the predicates you actually need for GapARS (e.g., omit sign-extension compare if certificate guarantees it, or replace with cheaper low-bit predicates).
-
-3. **Teach the compiler to pick GapARS only with `RangeKind::Proof`**
-   - File: `include/compiler/range_analysis.hpp` (already has `can_gapars`)
-   - Ensure selection requires:
-     - `gap.kind == Proof`
-     - mask bound (`mask_abs`) is not “unknown” and is propagated (see section B).
-
-4. **Implement a real `GapArsPostProc`**
-   - File: `include/gates/postproc_hooks.hpp`
-   - Make it do fewer operations than `FaithfulArsPostProc` and/or depend on a smaller PFSS output surface.
-   - Add a micro-test that checks:
-     - reconstructed output matches faithful ARS output for values satisfying the certificate
-     - it refuses/does not get selected when the certificate does not hold.
-
-5. **Update `bench_truncation` to report “protocol cost”**
-   - File: `src/bench/bench_truncation.cpp`
-   - Add counters for:
-     - number of PFSS pred bits and coeff words
-     - number of Beaver opens used by postproc (if any)
-   - Use this to demonstrate GapARS is cheaper when enabled.
-
-6. **Add/extend a “GapARS selection” regression**
-   - Existing: `src/demo/test_gapars_selector.cpp`
-   - Add a test that drives a full composite truncation job and asserts:
-     - `compiled.gate_kind == GapARS` when proofs hold
-     - otherwise `FaithfulARS` (or `FaithfulTR` for unsigned).
-
-## B) Tighten GapCert proofs + propagate mask bounds more aggressively
-
-### Goal
-
-Make `AutoTrunc` choose GapARS in more places safely, and allow more hoists with proof guards.
-
-### Concrete steps
-
-1. **Make mask bounds first-class in graph metadata**
-   - Files:
-     - `include/compiler/pfss_program_desc.hpp` (`GapCert{mask_abs}`)
-     - `include/nn/layer_context.hpp` / `src/nn/transformer_layer.cpp`
-   - Ensure every tensor carries a non-default `mask_abs` whenever a mask is introduced (matmul outputs, rescale sites).
-
-2. **Propagate `mask_abs` through ops in `range_propagation`**
-   - File: `include/compiler/range_propagation.hpp`
-   - When you combine masked values (add/sub/axpy), update mask bounds conservatively:
-     - `mask_abs(add) = mask_abs(a)+mask_abs(b)` (cap at 2^64-1)
-     - `mask_abs(mul_const) = |c|*mask_abs(a)`
-
-3. **Upgrade key proof sites from Hint→Proof**
-   - File: `src/compiler/layer_graph.cpp`
-   - Identify the “known difficulties” in `revise_m11.md` (activations/LN affine) and:
-     - compute worst-case bounds from table specs (SiLU/nExp clamps)
-     - use deterministic integer arithmetic (ceil-div) for sums/means
-
-4. **Add regressions that assert proof-grade bounds are produced**
-   - Add a `src/demo/test_range_proofs.cpp` (or extend existing tests) that:
-     - builds a small layer graph (LN→Attn→MLP) in code
-     - runs the range pass
-     - asserts key nodes have `RangeKind::Proof` and finite `mask_abs`
-
-## C) Cross-phase “super-plan” and finer dependency barriers
-
-### Goal
-
-Reduce flush count and enable deeper overlap by keeping PFSS/Open batches alive across multiple sub-steps, but still avoid deadlocks.
-
-### Current state
-
-- `PfssLayerPlanner` exists and supports explicit barriers:
-  - `include/runtime/pfss_phase_planner.hpp`
-- Some code paths still drain coarsely (`drain_all`) at phase boundaries:
-  - `src/nn/transformer_layer.cpp`
-
-### Concrete steps
-
-1. **Define explicit dependency points in attention + MLP**
-   - Files:
-     - `src/nn/attention_block.cpp`
-     - `src/nn/mlp_block.cpp`
-   - Replace coarse `drain_all` barriers with:
-     - “drain only open” when you just need Beaver opens to proceed
-     - “drain PFSS coeff only” when a gate needs coefficients but not trunc outputs, etc.
-
-2. **Make stall-driven flush the default when `keep_batches=true`**
-   - File: `include/runtime/phase_executor.hpp`
-   - Ensure tasks request flushes only when they truly need results (`Need::{Open,PfssCoeff,PfssTrunc}`).
-   - Avoid unconditional flushes at phase end unless a barrier policy demands it.
-
-3. **Add a deadlock regression**
-   - Extend `src/demo/test_pfss_async_stress.cpp` or add a new test:
-     - run a layer with `keep_batches=true` and inner barriers disabled
-     - assert it completes and `PhaseExecutor` does not throw the “deadlock” error.
-
-4. **Add statistics to validate the improvement**
-   - Use existing totals:
-     - `PfssLayerPlanner::Totals` (flush count, active elems, cost_effbits, flush_ns)
-   - Wire those into `bench_layer_breakdown` output to show:
-     - fewer flushes after barrier tightening.
-
-## D) Extend hoist/rescale safely across more chains
-
-### Goal
-
-Reduce the number of truncation gates without overflow/precision regressions, guarded by proof-grade bounds.
-
-### Concrete steps
-
-1. **Add “proof-required” hoists for activation chains**
-   - File: `src/compiler/layer_graph.cpp` (`hoist_rescales`)
-   - Add patterns:
-     - Rescale after `BiasAdd` → hoist over bias if bias can be safely upscaled
-     - Rescale around `SiLU`/`GELU` when the table spec clamps guarantee no overflow
-
-2. **Enforce “no mixed-sign hoist” unless certified**
-   - Require:
-     - either `GapCert` proof or “unsigned-only” path
-   - Reject hoist if sign uncertainty could make ARS vs TR semantics change.
-
-3. **Regression tests**
-   - Add/extend a test that:
-     - builds a graph with back-to-back rescales and activations
-     - checks hoisted graph produces identical outputs (bit-exact) when using the same truncation semantics,
-       and within tolerance when using the optimized placement mode.
-
-## E) GPU device-only pipeline (super.md)
-
-### Goal
-
-Keep PFSS outputs and postproc on device across softmax/LN/layer to reduce H2D/D2H and CPU bottlenecks.
-
-### Concrete steps
-
-1. **Standardize “device output ownership”**
-   - Files:
-     - `include/runtime/pfss_superbatch.hpp`
-     - `src/runtime/pfss_superbatch.cpp`
-   - Ensure:
-     - `device_outputs` implies the backend returns or stages `arith_device/bools_device`
-     - tasks can “take ownership” (or borrow) without double-free.
-
-2. **Make task outputs optionally device-backed**
-   - Files:
-     - `include/runtime/phase_tasks.hpp` (`TruncTask`, `CubicPolyTask`, `RecipTask`, `MulRowBroadcastTask`, `LayerNormTask`)
-   - Prefer a consistent pattern:
-     - if `R.device_pipeline==true`, keep device output and skip host materialization
-     - otherwise copy back and keep existing CPU semantics.
-
-3. **End-to-end “device-only softmax”**
-   - Start from `SoftmaxBlockTask` (already has `device_only` and GPU row-sum paths).
-   - Ensure:
-     - `nExp` coeff PFSS outputs stay device-side (avoid host copy)
-     - row-broadcast mul stays device-side
-     - final probability truncation stays device-side
-
-4. **End-to-end “device-only LN”**
-   - Use existing CUDA row kernels:
-     - `launch_row_mean_kernel`, `launch_row_variance_kernel`
-   - Keep mean/var and rsqrt updates on device.
-
-5. **Add one integration test**
-   - Extend `src/demo/test_softmax_gpu_smoke.cpp` to run:
-     - CPU pipeline vs GPU device-only pipeline for a small shape
-     - compare reconstructed outputs.
-
-## F) Performance polish (milestone11_gpu.md)
+## Performance polish (`milestone11_gpu.md`)
 
 The remaining GPU milestone item is intentionally open-ended. A practical way to close it:
 
