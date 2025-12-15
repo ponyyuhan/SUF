@@ -226,6 +226,8 @@ void LayerGraph::propagate_ranges() {
         } else {
           acc = propagate_matmul_accum(tx.range, attrs.w_range, attrs.K);
           AbsBound w_abs = abs_from_range(attrs.w_range, true);
+          // Public weights/constants have exact bounds, so treat their abs as proof-grade.
+          w_abs.kind = RangeKind::Proof;
           acc_abs = matmul_accum_abs(tx.abs, w_abs, attrs.K);
         }
         set_tensor(op.outputs[0], acc, acc_abs);
@@ -577,8 +579,9 @@ void LayerGraph::hoist_rescales() {
     OpNode new_rescale;
     new_rescale.kind = OpKind::kRescale;
     new_rescale.inputs = {op.outputs[0]};
-    new_rescale.outputs = {add_tensor(tensors_[static_cast<size_t>(op.outputs[0])].scale,
-                                      shift_down(sum_range, from_frac - to_frac))};
+    Scale final_scale = tensors_[static_cast<size_t>(op.outputs[0])].scale;
+    final_scale.frac_bits = to_frac;
+    new_rescale.outputs = {add_tensor(final_scale, shift_down(sum_range, from_frac - to_frac))};
     new_rescale.rescale.from_frac = from_frac;
     new_rescale.rescale.to_frac = to_frac;
     new_rescale.rescale.signed_ars = ar.signed_ars;
@@ -638,8 +641,9 @@ void LayerGraph::hoist_rescales() {
     OpNode new_rescale;
     new_rescale.kind = OpKind::kRescale;
     new_rescale.inputs = {op.outputs[0]};
-    new_rescale.outputs = {add_tensor(tensors_[static_cast<size_t>(op.outputs[0])].scale,
-                                      shift_down(prod, from_frac - to_frac))};
+    Scale final_scale = tensors_[static_cast<size_t>(op.outputs[0])].scale;
+    final_scale.frac_bits = to_frac;
+    new_rescale.outputs = {add_tensor(final_scale, shift_down(prod, from_frac - to_frac))};
     new_rescale.rescale.from_frac = from_frac;
     new_rescale.rescale.to_frac = to_frac;
     new_rescale.rescale.signed_ars = ar.signed_ars;
@@ -720,8 +724,9 @@ void LayerGraph::hoist_rescales() {
     OpNode new_rescale;
     new_rescale.kind = OpKind::kRescale;
     new_rescale.inputs = {op.outputs[0]};
-      new_rescale.outputs = {add_tensor(tensors_[static_cast<size_t>(op.outputs[0])].scale,
-                                        shift_down(out_range, from_frac - to_frac))};
+    Scale final_scale = tensors_[static_cast<size_t>(op.outputs[0])].scale;
+    final_scale.frac_bits = to_frac;
+    new_rescale.outputs = {add_tensor(final_scale, shift_down(out_range, from_frac - to_frac))};
     new_rescale.rescale.from_frac = from_frac;
     new_rescale.rescale.to_frac = to_frac;
     new_rescale.rescale.signed_ars = x_prod.rescale.signed_ars;
@@ -910,8 +915,9 @@ void LayerGraph::hoist_rescales() {
     OpNode new_rescale;
     new_rescale.kind = OpKind::kRescale;
     new_rescale.inputs = {op.outputs[0]};
-    new_rescale.outputs = {add_tensor(tensors_[static_cast<size_t>(op.outputs[0])].scale,
-                                      shift_down(mr, from_frac - to_frac))};
+    Scale final_scale = tensors_[static_cast<size_t>(op.outputs[0])].scale;
+    final_scale.frac_bits = to_frac;
+    new_rescale.outputs = {add_tensor(final_scale, shift_down(mr, from_frac - to_frac))};
     new_rescale.rescale.from_frac = from_frac;
     new_rescale.rescale.to_frac = to_frac;
     new_rescale.rescale.signed_ars = pr.signed_ars;

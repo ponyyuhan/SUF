@@ -39,6 +39,7 @@ void launch_trunc_postproc_kernel(int party,
                                   int kind_gapars,       // 0 = faithful, 1 = GapARS
                                   int frac_bits,
                                   uint64_t r_hi_share,
+                                  uint64_t m_share,
                                   const uint64_t* d_hatx_public,
                                   const uint64_t* d_arith,
                                   size_t arith_stride,

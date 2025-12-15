@@ -194,6 +194,12 @@ int main(int argc, char** argv) {
     uint64_t sum_open_flushes = 0;
     uint64_t sum_pfss_jobs = 0;
     uint64_t sum_pfss_flushes = 0;
+    uint64_t sum_pfss_coeff_hatx_bytes = 0;
+    uint64_t sum_pfss_trunc_hatx_bytes = 0;
+    uint64_t sum_pfss_coeff_active_elems = 0;
+    uint64_t sum_pfss_trunc_active_elems = 0;
+    uint64_t sum_pfss_coeff_cost_effbits = 0;
+    uint64_t sum_pfss_trunc_cost_effbits = 0;
 
     for (int it = 0; it < args.n_iters; ++it) {
       CountingChan::Shared pfss_sh;
@@ -290,6 +296,12 @@ int main(int argc, char** argv) {
                            b0.pfss.trunc_jobs + b1.pfss.trunc_jobs;
       uint64_t pfss_flushes = b0.pfss.coeff_flushes + b1.pfss.coeff_flushes +
                               b0.pfss.trunc_flushes + b1.pfss.trunc_flushes;
+      uint64_t coeff_hatx_bytes = b0.pfss.coeff_hatx_bytes + b1.pfss.coeff_hatx_bytes;
+      uint64_t trunc_hatx_bytes = b0.pfss.trunc_hatx_bytes + b1.pfss.trunc_hatx_bytes;
+      uint64_t coeff_active_elems = b0.pfss.coeff_active_elems + b1.pfss.coeff_active_elems;
+      uint64_t trunc_active_elems = b0.pfss.trunc_active_elems + b1.pfss.trunc_active_elems;
+      uint64_t coeff_cost_effbits = b0.pfss.coeff_cost_effbits + b1.pfss.coeff_cost_effbits;
+      uint64_t trunc_cost_effbits = b0.pfss.trunc_cost_effbits + b1.pfss.trunc_cost_effbits;
 
       sum_ms += ms;
       sum_pfss_bytes += pfss_bytes;
@@ -301,6 +313,12 @@ int main(int argc, char** argv) {
       sum_open_flushes += open_flushes;
       sum_pfss_jobs += pfss_jobs;
       sum_pfss_flushes += pfss_flushes;
+      sum_pfss_coeff_hatx_bytes += coeff_hatx_bytes;
+      sum_pfss_trunc_hatx_bytes += trunc_hatx_bytes;
+      sum_pfss_coeff_active_elems += coeff_active_elems;
+      sum_pfss_trunc_active_elems += trunc_active_elems;
+      sum_pfss_coeff_cost_effbits += coeff_cost_effbits;
+      sum_pfss_trunc_cost_effbits += trunc_cost_effbits;
     }
 
     double mean_ms = sum_ms / static_cast<double>(args.n_iters);
@@ -314,6 +332,18 @@ int main(int argc, char** argv) {
     std::cout << "  comm_open_bytes_mean=" << (sum_net_bytes / static_cast<uint64_t>(args.n_iters)) << "\n";
     std::cout << "  pfss_jobs_sum_mean=" << (sum_pfss_jobs / static_cast<uint64_t>(args.n_iters)) << "\n";
     std::cout << "  pfss_flushes_sum_mean=" << (sum_pfss_flushes / static_cast<uint64_t>(args.n_iters)) << "\n";
+    std::cout << "  pfss_hatx_bytes_sum_mean="
+              << ((sum_pfss_coeff_hatx_bytes + sum_pfss_trunc_hatx_bytes) /
+                  static_cast<uint64_t>(args.n_iters))
+              << "\n";
+    std::cout << "  pfss_active_elems_sum_mean="
+              << ((sum_pfss_coeff_active_elems + sum_pfss_trunc_active_elems) /
+                  static_cast<uint64_t>(args.n_iters))
+              << "\n";
+    std::cout << "  pfss_cost_effbits_sum_mean="
+              << ((sum_pfss_coeff_cost_effbits + sum_pfss_trunc_cost_effbits) /
+                  static_cast<uint64_t>(args.n_iters))
+              << "\n";
     std::cout << "  pfss_coeff_flush_ms_sum_mean=" << (static_cast<double>(sum_coeff_flush_ns) / 1e6 / args.n_iters) << "\n";
     std::cout << "  pfss_trunc_flush_ms_sum_mean=" << (static_cast<double>(sum_trunc_flush_ns) / 1e6 / args.n_iters) << "\n";
     std::cout << "  open_flushes_sum_mean=" << (sum_open_flushes / static_cast<uint64_t>(args.n_iters)) << "\n";
@@ -325,4 +355,3 @@ int main(int argc, char** argv) {
   }
   return 0;
 }
-

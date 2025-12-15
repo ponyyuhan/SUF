@@ -352,8 +352,7 @@ CompiledSUFGate compile_suf_to_pfss_two_programs(
   // Expose it explicitly as an additional boolean output so postproc can apply
   // the correction without revealing r_in.
   if (gate_kind == GateKind::FaithfulTR ||
-      gate_kind == GateKind::FaithfulARS ||
-      gate_kind == GateKind::GapARS) {
+      gate_kind == GateKind::FaithfulARS) {
     int wrap_qid = add_query(RawPredQuery{RawPredKind::kLtU64, 64, r_in}, queries, qmap);
     for (auto& piece : out.bool_per_piece) {
       piece.push_back(suf::BoolExpr{suf::BVar{wrap_qid}});

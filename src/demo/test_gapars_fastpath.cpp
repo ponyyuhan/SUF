@@ -19,24 +19,23 @@ int main() {
   proto::ClearBackend backend;
   std::mt19937_64 rng(0x1234);
 
-  // Case 1: provably non-negative -> GapARS should compile without MSB(x) predicates.
+  // Case 1: proof-grade small bound -> GapARS should compile without any 64-bit compares.
   compiler::GateParams p;
   p.kind = compiler::GateKind::AutoTrunc;
   p.frac_bits = 8;
-  p.range_hint = compiler::RangeInterval{0, static_cast<int64_t>(1ll << p.frac_bits), true};
+  p.range_hint = compiler::RangeInterval{-128, 127, true};
   p.abs_hint.is_signed = true;
-  p.abs_hint.max_abs = static_cast<uint64_t>(1ull << p.frac_bits);
+  p.abs_hint.max_abs = 128;
   p.abs_hint.kind = compiler::RangeKind::Proof;
   auto b0 = compiler::lower_truncation_gate(backend, rng, p, /*batch_N=*/1);
   const auto& c0 = b0.keys.k0.compiled;
   assert(c0.gate_kind == compiler::GateKind::GapARS);
-  // Only needs the wrap query in the full 64-bit domain.
-  assert(count_lt_u64(c0) == 1);
+  // GapARS uses only low-bit predicates (no full-width wrap/MSB comparisons).
+  assert(count_lt_u64(c0) == 0);
 
-  // Case 2: range crosses zero -> fall back to faithful ARS (needs MSB predicate).
+  // Case 2: hint-only bounds -> must fall back to faithful ARS (needs full-width compares).
   compiler::GateParams p2 = p;
-  p2.range_hint = compiler::RangeInterval{-128, 127, true};
-  p2.abs_hint.max_abs = 128;
+  p2.abs_hint.kind = compiler::RangeKind::Hint;
   auto b1 = compiler::lower_truncation_gate(backend, rng, p2, /*batch_N=*/1);
   const auto& c1 = b1.keys.k0.compiled;
   assert(c1.gate_kind == compiler::GateKind::FaithfulARS);
@@ -46,4 +45,3 @@ int main() {
   std::cout << "gapars fastpath ok\n";
   return 0;
 }
-

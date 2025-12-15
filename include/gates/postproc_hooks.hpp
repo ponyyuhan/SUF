@@ -290,7 +290,37 @@ struct FaithfulArsPostProc : public PostProcHook {
   }
 };
 
-struct GapArsPostProc : public FaithfulArsPostProc {
+// GapARS (SIGMA-style): ARS for inputs with a proven "gap" condition.
+// Implements ARS(v) by reducing to a GapLRS on x = v + 2^(n-2) (with n=64),
+// then subtracting 2^(n-f-2). The wrap correction 1[hatx < r_in] is computed
+// without a full-width compare using:
+//   if x < 2^(n-1):  1[hatx < r_in] = 1[MSB(hatx)=0] ∧ 1[MSB(r_in)=1]
+// where hatx = x + r_in mod 2^n.
+struct GapArsPostProc final : public PostProcHook {
+  int idx_carry = 0;
+  int idx_y = 0;
+  int f = 0;
+  uint64_t r_hi_share = 0;
+  // Share of m = 2^(64-f) * MSB(r_in). Used to apply the wrap correction without
+  // evaluating a full-width comparison.
+  uint64_t m_share = 0;
+
+  void configure(const compiler::PortLayout& layout) override {
+    auto findb = [&](const std::string& name)->int {
+      for (size_t i = 0; i < layout.bool_ports.size(); i++) if (layout.bool_ports[i] == name) return static_cast<int>(i);
+      return -1;
+    };
+    auto finda = [&](const std::string& name)->int {
+      for (size_t i = 0; i < layout.arith_ports.size(); i++) if (layout.arith_ports[i] == name) return static_cast<int>(i);
+      return -1;
+    };
+    int c = findb("carry");
+    if (c >= 0) idx_carry = c;
+    int y = finda("y0");
+    if (y < 0) y = finda("y");
+    if (y >= 0) idx_y = y;
+  }
+
   void run_batch(int party,
                  proto::IChannel&,
                  proto::BeaverMul64&,
@@ -301,22 +331,42 @@ struct GapArsPostProc : public FaithfulArsPostProc {
                  size_t bool_stride,
                  size_t N,
                  uint64_t* haty_share_out) const override {
-    uint64_t sign_mask = (f <= 0) ? 0ull : (f >= 64 ? 0ull : (~uint64_t(0) << (64 - f)));
-    uint64_t modulus = (f <= 0 || f >= 64) ? 0ull : (uint64_t(1) << (64 - f));
+    const uint64_t bias_in = uint64_t(1) << 62;  // 2^(64-2)
+    uint64_t bias_out = 0;
+    if (f >= 0 && f <= 62) {
+      bias_out = uint64_t(1) << (62 - f);
+    }
     for (size_t i = 0; i < N; i++) {
       const uint64_t* arow = arith_share_in + i * arith_stride;
-      const uint64_t* brow = bool_share_in + i * bool_stride;
-      uint64_t base = (idx_y < static_cast<int>(arith_stride)) ? arow[idx_y] : 0ull;
-      uint64_t carry = (idx_carry >= 0 && idx_carry < static_cast<int>(bool_stride)) ? brow[idx_carry] : 0ull;
-      uint64_t sign = (idx_sign >= 0 && idx_sign < static_cast<int>(bool_stride)) ? brow[idx_sign] : 0ull;
-      uint64_t wrap = (idx_wrap >= 0 && idx_wrap < static_cast<int>(bool_stride)) ? brow[idx_wrap] : 0ull;
-      uint64_t top = (hatx_public != nullptr && f < 64 && party == 0) ? (hatx_public[i] >> f) : 0ull;
+      const uint64_t* brow = (bool_share_in != nullptr) ? (bool_share_in + i * bool_stride) : nullptr;
+      uint64_t base = (idx_y >= 0 && idx_y < static_cast<int>(arith_stride)) ? arow[idx_y] : 0ull;
+      uint64_t carry = (bool_share_in != nullptr && idx_carry >= 0 && idx_carry < static_cast<int>(bool_stride))
+                           ? brow[idx_carry]
+                           : 0ull;
+
+      uint64_t hatx = (hatx_public != nullptr) ? hatx_public[i] : 0ull;
+      uint64_t hatx_biased = proto::add_mod(hatx, bias_in);
+      uint64_t top = 0ull;
+      if (party == 0 && f >= 0 && f < 64) {
+        top = (f == 0) ? hatx_biased : (hatx_biased >> f);
+      }
+
       uint64_t y = proto::add_mod(base, top);
       y = proto::sub_mod(y, r_hi_share);
       y = proto::sub_mod(y, carry);
-      if (modulus != 0) y = proto::add_mod(y, proto::mul_mod(wrap, modulus));
-      uint64_t sign_term = proto::mul_mod(sign, sign_mask);
-      y = proto::add_mod(y, sign_term);
+
+      // Add 2^(64-f) * 1[hatx_biased < r_in] using the MSB-to-wrap optimization.
+      if (f > 0 && f < 64) {
+        uint64_t msb_hatx = (hatx_biased >> 63) & 1ull;
+        if (msb_hatx == 0) {
+          y = proto::add_mod(y, m_share);
+        }
+      }
+
+      // ARS(v) = GapLRS(v + 2^(n-2)) - 2^(n-f-2).
+      if (party == 0) {
+        y = proto::sub_mod(y, bias_out);
+      }
       haty_share_out[i] = y;
     }
   }

@@ -91,6 +91,13 @@ class ProtoChanFromNet final : public proto::IChannel {
 struct PfssResultSlot {
   std::shared_ptr<std::vector<uint64_t>> arith_storage;
   std::shared_ptr<std::vector<uint64_t>> bool_storage;
+  // Optional device-resident views (when PFSS outputs are staged to device).
+  std::shared_ptr<void> arith_device_owner;
+  const uint64_t* arith_device = nullptr;
+  size_t arith_device_words = 0;
+  std::shared_ptr<void> bools_device_owner;
+  const uint64_t* bools_device = nullptr;
+  size_t bools_device_words = 0;
   size_t r = 0;
   size_t ell = 0;
   std::atomic<bool> ready{false};
@@ -242,6 +249,10 @@ class PfssSuperBatch {
     std::vector<uint64_t> bools;  // [N * ell]
     DeviceBufferRef dev_arith{};       // owned when staged via PfssGpuStager
     DeviceBufferRef dev_bools{};
+    // Shared ownership for staged device buffers; when present, callers can keep
+    // device pointers alive across finalize/phase boundaries without leaking.
+    std::shared_ptr<void> dev_arith_owner;
+    std::shared_ptr<void> dev_bools_owner;
     const uint64_t* dev_arith_ptr = nullptr;  // backend-owned device pointer (non-owning)
     size_t dev_arith_words = 0;
     const uint64_t* dev_bools_ptr = nullptr;

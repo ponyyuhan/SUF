@@ -188,6 +188,14 @@ add_executable(test_mask_abs_propagation src/demo/test_mask_abs_propagation.cpp)
 target_include_directories(test_mask_abs_propagation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_mask_abs_propagation PRIVATE compiler_passes suf_fss cuda_pfss ${MYL7_LINK_LIBS})
 
+add_executable(test_range_proofs src/demo/test_range_proofs.cpp)
+target_include_directories(test_range_proofs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_range_proofs PRIVATE compiler_passes suf_fss cuda_pfss ${MYL7_LINK_LIBS})
+
+add_executable(test_hoist_rescales src/demo/test_hoist_rescales.cpp)
+target_include_directories(test_hoist_rescales PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_hoist_rescales PRIVATE compiler_passes suf_fss cuda_pfss ${MYL7_LINK_LIBS})
+
 add_library(compiler_passes STATIC
   src/compiler/truncation_pass.cpp
   src/compiler/rescale_pass.cpp
@@ -307,6 +315,10 @@ add_executable(test_pfss_planner src/demo/test_pfss_planner.cpp)
 target_include_directories(test_pfss_planner PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_pfss_planner PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
 
+add_executable(test_pfss_superbatch_limits src/demo/test_pfss_superbatch_limits.cpp)
+target_include_directories(test_pfss_superbatch_limits PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_pfss_superbatch_limits PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
+
 add_executable(test_pfss_async src/demo/test_pfss_async.cpp)
 target_include_directories(test_pfss_async PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_pfss_async PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
@@ -318,6 +330,10 @@ target_link_libraries(test_pfss_async_stress PRIVATE nn_ops compiler_passes suf_
 add_executable(test_transformer_async src/demo/test_transformer_async.cpp)
 target_include_directories(test_transformer_async PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(test_transformer_async PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
+
+add_executable(test_transformer_no_barriers src/demo/test_transformer_no_barriers.cpp)
+target_include_directories(test_transformer_no_barriers PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(test_transformer_no_barriers PRIVATE nn_ops compiler_passes suf_fss ${MYL7_LINK_LIBS})
 
 add_executable(test_planner_causal src/demo/test_planner_causal.cpp)
 target_include_directories(test_planner_causal PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -428,13 +444,17 @@ add_test(NAME test_trunc_effbits COMMAND test_trunc_effbits)
 add_test(NAME test_layernorm_task COMMAND test_layernorm_task)
 add_test(NAME test_staged_softmax COMMAND test_staged_softmax)
 add_test(NAME test_pfss_planner COMMAND test_pfss_planner)
+add_test(NAME test_pfss_superbatch_limits COMMAND test_pfss_superbatch_limits)
 add_test(NAME test_pfss_async COMMAND test_pfss_async)
 add_test(NAME test_pfss_async_stress COMMAND test_pfss_async_stress)
 add_test(NAME test_transformer_async COMMAND test_transformer_async)
+add_test(NAME test_transformer_no_barriers COMMAND test_transformer_no_barriers)
 add_test(NAME test_planner_causal COMMAND test_planner_causal)
 add_test(NAME test_gapars_selector COMMAND test_gapars_selector)
 add_test(NAME test_gapars_fastpath COMMAND test_gapars_fastpath)
 add_test(NAME test_mask_abs_propagation COMMAND test_mask_abs_propagation)
+add_test(NAME test_range_proofs COMMAND test_range_proofs)
+add_test(NAME test_hoist_rescales COMMAND test_hoist_rescales)
 if(HAVE_SUF_CUDA)
 add_test(NAME test_pfss_gpu COMMAND test_pfss_gpu)
 add_test(NAME test_cuda_trunc_gapars COMMAND test_cuda_trunc_gapars)

@@ -555,8 +555,7 @@ class TruncTask final : public detail::PhaseTask {
         uint64_t* d_tmp_out = nullptr;
         cudaStream_t trunc_stream = nullptr;
 #ifdef SUF_HAVE_CUDA
-        if (R.pfss_backend && std::getenv("SUF_TRUNC_GPU")) {
-          if (!hatx_public_.empty() && v.arith_device) {
+        if (R.pfss_backend && std::getenv("SUF_TRUNC_GPU") && v.arith_device) {
             if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend)) {
               trunc_stream = reinterpret_cast<cudaStream_t>(staged->device_stream());
               gpu_direct = true;
@@ -596,9 +595,10 @@ class TruncTask final : public detail::PhaseTask {
                 }
               };
               // Stage hatx_public to device.
+              const uint64_t* hatx_host = job_hatx();
               uint64_t* d_hatx = nullptr;
               do_malloc(&d_hatx, elems * sizeof(uint64_t));
-              cudaMemcpyAsync(d_hatx, hatx_public_.data(), elems * sizeof(uint64_t),
+              cudaMemcpyAsync(d_hatx, hatx_host, elems * sizeof(uint64_t),
                               cudaMemcpyHostToDevice, trunc_stream);
               // Stage bools to device if needed.
               uint64_t* d_bools = nullptr;
@@ -642,10 +642,12 @@ class TruncTask final : public detail::PhaseTask {
               }
               int kind_gapars = (key_ && key_->compiled.gate_kind == compiler::GateKind::GapARS) ? 1 : 0;
               uint64_t r_hi_share = key_ ? key_->r_hi_share : 0ull;
+              uint64_t m_share = (kind_gapars && key_) ? key_->wrap_sign_share : 0ull;
               launch_trunc_postproc_kernel(R.party,
                                            kind_gapars,
                                            f_bits,
                                            r_hi_share,
+                                           m_share,
                                            d_hatx,
                                            v.arith_device,
                                            v.r,
@@ -739,7 +741,6 @@ class TruncTask final : public detail::PhaseTask {
               if (d_hatx) do_free(d_hatx);
               if (d_bools && d_bools != v.bools_device) do_free(d_bools);
             }
-          }
         }
 #endif
         if (gpu_direct || std::getenv("SOFTMAX_TRUNC_DIRECT")) {
@@ -2098,48 +2099,6 @@ class CubicPolyTask final : public detail::PhaseTask {
           std::cerr << "CubicPolyTask coeffs: c0=" << c0_[0] << " c1=" << c1_[0]
                     << " c2=" << c2_[0] << " c3=" << c3_[0] << " r=" << v.r << "\n";
         }
-        // Optional CUDA Horner fast-path when PFSS outputs are already on device.
-#ifdef SUF_HAVE_CUDA
-        if (std::getenv("SUF_HORNER_GPU") && v.arith_device && R.pfss_backend) {
-          if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend)) {
-            cudaStream_t stream = reinterpret_cast<cudaStream_t>(staged->device_stream());
-            if (stream) {
-              const uint64_t* d_arith = v.arith_device;
-              size_t elems_bytes = elems * sizeof(uint64_t);
-              uint64_t *d_x = nullptr, *d_c0 = nullptr, *d_c1 = nullptr, *d_c2 = nullptr, *d_c3 = nullptr, *d_out = nullptr;
-              cudaMalloc(&d_x, elems_bytes);
-              cudaMalloc(&d_c0, elems_bytes);
-              cudaMalloc(&d_c1, elems_bytes);
-              cudaMalloc(&d_c2, elems_bytes);
-              cudaMalloc(&d_c3, elems_bytes);
-              cudaMalloc(&d_out, elems_bytes);
-              // hatx_public = opened_ modulo ring
-              std::vector<uint64_t> hatx_host(elems, 0);
-              for (size_t i = 0; i < elems; ++i) hatx_host[i] = static_cast<uint64_t>(opened_[i]);
-              cudaMemcpyAsync(d_x, hatx_host.data(), elems_bytes, cudaMemcpyHostToDevice, stream);
-              size_t src_pitch = static_cast<size_t>(v.r) * sizeof(uint64_t);
-              size_t dst_pitch = sizeof(uint64_t);
-              cudaMemcpy2DAsync(d_c0, dst_pitch, d_arith + 0, src_pitch, sizeof(uint64_t), elems, cudaMemcpyDeviceToDevice, stream);
-              cudaMemcpy2DAsync(d_c1, dst_pitch, d_arith + 1, src_pitch, sizeof(uint64_t), elems, cudaMemcpyDeviceToDevice, stream);
-              cudaMemcpy2DAsync(d_c2, dst_pitch, d_arith + 2, src_pitch, sizeof(uint64_t), elems, cudaMemcpyDeviceToDevice, stream);
-              cudaMemcpy2DAsync(d_c3, dst_pitch, d_arith + 3, src_pitch, sizeof(uint64_t), elems, cudaMemcpyDeviceToDevice, stream);
-              launch_horner_cubic_kernel(d_x, d_c0, d_c1, d_c2, d_c3, d_out, elems, stream);
-              if (!R.device_pipeline) {
-                cudaMemcpyAsync(out_.data(), d_out, elems_bytes, cudaMemcpyDeviceToHost, stream);
-                cudaStreamSynchronize(stream);
-                cudaFree(d_out);
-              } else {
-                d_out_device_ = d_out;
-                d_out_elems_ = elems;
-                d_out = nullptr;
-              }
-              cudaFree(d_x); cudaFree(d_c0); cudaFree(d_c1); cudaFree(d_c2); cudaFree(d_c3);
-              st_ = St::Done;
-              return detail::Need::None;
-            }
-          }
-        }
-#endif
         if (R.pfss_backend && dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) != nullptr) {
           // Reference backend: evaluate directly using the reference polynomial/spec.
           auto eval_ref = [&](int64_t x_plain, size_t idx) -> int64_t {
@@ -2228,6 +2187,15 @@ class CubicPolyTask final : public detail::PhaseTask {
       case St::Trunc1: {
         auto need = trunc1_->step(R);
         if (!trunc1_->done()) return need;
+#ifdef SUF_HAVE_CUDA
+        if (R.device_pipeline) {
+          if (auto* dptr = trunc1_->device_out()) {
+            size_t n = std::min(p2_q2f_.size(), trunc1_->device_out_elems());
+            if (n > 0) cudaMemcpy(p2_q2f_.data(), dptr, n * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+            trunc1_->release_device_out();
+          }
+        }
+#endif
         for (size_t i = 0; i < x_.size(); ++i) {
           uint64_t c1_scaled = proto::mul_mod(c1_[i], shift_scale_);
           q_q2f_[i] = proto::add_mod(p2_q2f_[i], c1_scaled);
@@ -2253,6 +2221,15 @@ class CubicPolyTask final : public detail::PhaseTask {
       case St::Trunc2: {
         auto need = trunc2_->step(R);
         if (!trunc2_->done()) return need;
+#ifdef SUF_HAVE_CUDA
+        if (R.device_pipeline) {
+          if (auto* dptr = trunc2_->device_out()) {
+            size_t n = std::min(y_qf_.size(), trunc2_->device_out_elems());
+            if (n > 0) cudaMemcpy(y_qf_.data(), dptr, n * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+            trunc2_->release_device_out();
+          }
+        }
+#endif
         for (size_t i = 0; i < x_.size(); ++i) {
           out_[i] = proto::add_mod(y_qf_[i], c0_[i]);
         }

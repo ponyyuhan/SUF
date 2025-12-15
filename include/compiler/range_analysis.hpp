@@ -12,9 +12,16 @@ namespace compiler {
 
 inline bool can_gapars(const GapCert& g, int nbits = 64) {
   if (g.kind != RangeKind::Proof || !g.is_signed) return false;
-  __int128 lhs = static_cast<__int128>(g.max_abs) + static_cast<__int128>(g.mask_abs);
-  __int128 rhs = static_cast<__int128>(uint64_t(1) << (nbits - 1));
-  return lhs < rhs;
+  // SIGMA-style GapARS requires the cleartext value to lie in:
+  //   [0, 2^(n-2)) ∪ [2^n - 2^(n-2), 2^n)
+  // i.e. (interpreted as signed) |x| < 2^(n-2).
+  //
+  // With only a symmetric abs bound, we enforce the strict inequality to be safe.
+  if (nbits <= 2) return false;
+  if (nbits >= 64) {
+    return g.max_abs < (uint64_t(1) << 62);
+  }
+  return g.max_abs < (uint64_t(1) << (nbits - 2));
 }
 
 inline uint64_t default_mask_bound(int frac_bits) {

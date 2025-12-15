@@ -66,19 +66,26 @@ int main() {
   auto kp_faith_cpu = gates::composite_gen_trunc_gate(cpu, rng_faith_cpu, frac_bits, compiler::GateKind::FaithfulTR, N, nullptr);
 
   std::vector<uint64_t> hatx_gap(N), hatx_faith(N);
+  std::vector<uint64_t> hatx_gap_cpu(N), hatx_faith_cpu(N);
   for (size_t i = 0; i < N; i++) {
     hatx_gap[i] = static_cast<uint64_t>(plain[i]) + kp_gap.k0.compiled.r_in;
     hatx_faith[i] = static_cast<uint64_t>(plain[i]) + kp_faith.k0.compiled.r_in;
+    hatx_gap_cpu[i] = static_cast<uint64_t>(plain[i]) + kp_gap_cpu.k0.compiled.r_in;
+    hatx_faith_cpu[i] = static_cast<uint64_t>(plain[i]) + kp_faith_cpu.k0.compiled.r_in;
   }
   gates::CompositeBatchInput in_gap{hatx_gap.data(), N, nullptr};
   gates::CompositeBatchInput in_faith{hatx_faith.data(), N, nullptr};
+  gates::CompositeBatchInput in_gap_cpu{hatx_gap_cpu.data(), N, nullptr};
+  gates::CompositeBatchInput in_faith_cpu{hatx_faith_cpu.data(), N, nullptr};
 
   ProtoLocalChan::Shared sh_gap, sh_faith;
   ProtoLocalChan c0_gap(&sh_gap, true), c1_gap(&sh_gap, false);
   ProtoLocalChan c0_faith(&sh_faith, true), c1_faith(&sh_faith, false);
 
-  gates::FaithfulTruncPostProc hook_gap0, hook_gap1, hook_f0, hook_f1;
-  hook_gap0.f = hook_gap1.f = hook_f0.f = hook_f1.f = frac_bits;
+  gates::GapArsPostProc hook_gap0, hook_gap1;
+  gates::FaithfulTruncPostProc hook_f0, hook_f1;
+  hook_gap0.f = hook_gap1.f = frac_bits;
+  hook_f0.f = hook_f1.f = frac_bits;
 
   gates::CompositeBatchOutput out_gap0, out_gap1, out_gap_cpu0, out_gap_cpu1;
   gates::CompositeBatchOutput out_f0, out_f1, out_f_cpu0, out_f_cpu1;
@@ -111,26 +118,28 @@ int main() {
   std::exception_ptr thr_cpu_exc;
   std::thread t_cpu([&]() {
     try {
-      out_gap_cpu1 = gates::composite_eval_batch_with_postproc(1, cpu, c1_gap_cpu, kp_gap_cpu.k1, suf_gap, in_gap, hook_gap1);
-      out_f_cpu1 = gates::composite_eval_batch_with_postproc(1, cpu, c1_faith_cpu, kp_faith_cpu.k1, suf_faith, in_faith, hook_f1);
+      out_gap_cpu1 = gates::composite_eval_batch_with_postproc(1, cpu, c1_gap_cpu, kp_gap_cpu.k1, suf_gap, in_gap_cpu, hook_gap1);
+      out_f_cpu1 = gates::composite_eval_batch_with_postproc(1, cpu, c1_faith_cpu, kp_faith_cpu.k1, suf_faith, in_faith_cpu, hook_f1);
     } catch (...) { thr_cpu_exc = std::current_exception(); }
   });
-  out_gap_cpu0 = gates::composite_eval_batch_with_postproc(0, cpu, c0_gap_cpu, kp_gap_cpu.k0, suf_gap, in_gap, hook_gap0);
-  out_f_cpu0 = gates::composite_eval_batch_with_postproc(0, cpu, c0_faith_cpu, kp_faith_cpu.k0, suf_faith, in_faith, hook_f0);
+  out_gap_cpu0 = gates::composite_eval_batch_with_postproc(0, cpu, c0_gap_cpu, kp_gap_cpu.k0, suf_gap, in_gap_cpu, hook_gap0);
+  out_f_cpu0 = gates::composite_eval_batch_with_postproc(0, cpu, c0_faith_cpu, kp_faith_cpu.k0, suf_faith, in_faith_cpu, hook_f0);
   t_cpu.join();
   if (thr_cpu_exc) std::rethrow_exception(thr_cpu_exc);
   std::cout << "[trunc-gpu] CPU eval done\n";
 
   auto check = [&](const gates::CompositeBatchOutput& a0,
                    const gates::CompositeBatchOutput& a1,
+                   const gates::CompositeKeyPair& kp_a,
                    const gates::CompositeBatchOutput& b0,
                    const gates::CompositeBatchOutput& b1,
+                   const gates::CompositeKeyPair& kp_b,
                    const char* label) {
+    uint64_t rmask_a = proto::add_mod(kp_a.k0.r_out_share[0], kp_a.k1.r_out_share[0]);
+    uint64_t rmask_b = proto::add_mod(kp_b.k0.r_out_share[0], kp_b.k1.r_out_share[0]);
     for (size_t i = 0; i < N; i++) {
-      uint64_t rec_a = proto::sub_mod(a0.haty_share[i] + a1.haty_share[i],
-                                      proto::add_mod(kp_gap.k0.r_out_share[0], kp_gap.k1.r_out_share[0]));
-      uint64_t rec_b = proto::sub_mod(b0.haty_share[i] + b1.haty_share[i],
-                                      proto::add_mod(kp_gap_cpu.k0.r_out_share[0], kp_gap_cpu.k1.r_out_share[0]));
+      uint64_t rec_a = proto::sub_mod(a0.haty_share[i] + a1.haty_share[i], rmask_a);
+      uint64_t rec_b = proto::sub_mod(b0.haty_share[i] + b1.haty_share[i], rmask_b);
       if (rec_a != rec_b) {
         std::cerr << label << " mismatch idx=" << i << " gpu=" << rec_a << " cpu=" << rec_b << "\n";
         return false;
@@ -139,8 +148,8 @@ int main() {
     return true;
   };
 
-  bool ok_gap = check(out_gap0, out_gap1, out_gap_cpu0, out_gap_cpu1, "GapARS");
-  bool ok_f = check(out_f0, out_f1, out_f_cpu0, out_f_cpu1, "FaithfulTR");
+  bool ok_gap = check(out_gap0, out_gap1, kp_gap, out_gap_cpu0, out_gap_cpu1, kp_gap_cpu, "GapARS");
+  bool ok_f = check(out_f0, out_f1, kp_faith, out_f_cpu0, out_f_cpu1, kp_faith_cpu, "FaithfulTR");
   if (!ok_gap || !ok_f) return 1;
   std::cout << "CUDA GapARS/Faithful truncation tests passed.\n";
   return 0;

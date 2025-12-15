@@ -153,6 +153,10 @@ PfssHandle PfssSuperBatch::enqueue_composite(PreparedCompositeJob job) {
   if (limits_.max_pending_hatx_words > 0 && new_pending_hatx > limits_.max_pending_hatx_words) {
     throw std::runtime_error("PfssSuperBatch: pending hatx packing limit exceeded");
   }
+  if (limits_.max_pending_hatx_bytes > 0 &&
+      new_pending_hatx * sizeof(uint64_t) > limits_.max_pending_hatx_bytes) {
+    throw std::runtime_error("PfssSuperBatch: pending hatx byte limit exceeded");
+  }
   if (gpu_stager_ && limits_.max_pending_device_bytes > 0) {
     size_t new_pending_dev = pending_dev_bytes_ + hatx_bytes;
     if (new_pending_dev > limits_.max_pending_device_bytes) {
@@ -263,9 +267,16 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
   std::vector<GroupData> groups;
 
   if (gpu_stager_) {
+    // Drop any group-local device buffers from a prior flush. If device outputs were
+    // published to per-handle slots via shared owners, those owners keep the buffers
+    // alive; we must not free them here.
     for (auto& gr : group_results_) {
-      if (gr.dev_arith.ptr) gpu_stager_->free_bytes(gr.dev_arith);
-      if (gr.dev_bools.ptr) gpu_stager_->free_bytes(gr.dev_bools);
+      if (gr.dev_arith.ptr && !gr.dev_arith_owner) gpu_stager_->free_bytes(gr.dev_arith);
+      if (gr.dev_bools.ptr && !gr.dev_bools_owner) gpu_stager_->free_bytes(gr.dev_bools);
+      gr.dev_arith_owner.reset();
+      gr.dev_bools_owner.reset();
+      gr.dev_arith = DeviceBufferRef{};
+      gr.dev_bools = DeviceBufferRef{};
     }
   }
   group_results_.clear();
@@ -438,7 +449,9 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
                                       (dev_capable && b.dev_hatx.ptr)
                                           ? reinterpret_cast<const uint64_t*>(b.dev_hatx.ptr)
                                           : nullptr};
-        in.device_outputs = device_outputs_ && dev_capable;
+        // We stage raw PFSS outputs ourselves (via PfssGpuStager) so device pointers
+        // remain stable across flushes/finalize boundaries.
+        in.device_outputs = false;
         auto out = gates::composite_eval_batch_backend(party, backend, ch, *b.key, *b.suf, in);
       size_t gr_idx = group_results_.size();
       GroupResult gr;
@@ -448,20 +461,52 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
       gr.ell = b.ell;
       gr.arith = std::move(out.haty_share);
       gr.bools = std::move(out.bool_share);
-      if (device_outputs_ && dev_capable) {
-        if (out.haty_device && out.haty_device_words > 0) {
-          gr.dev_arith_ptr = out.haty_device;
-          gr.dev_arith_words = out.haty_device_words;
-        } else if (gpu_stager_ && !gr.arith.empty()) {
+      if (device_outputs_ && dev_capable && gpu_stager_) {
+        if (!gr.arith.empty()) {
           HostBufferRef host{gr.arith.data(), gr.arith.size() * sizeof(uint64_t)};
           gr.dev_arith = gpu_stager_->stage_to_device(host);
+          gr.dev_arith_words = gr.arith.size();
+          if (gr.dev_arith.ptr) {
+            void* ptr = gr.dev_arith.ptr;
+            size_t bytes = gr.dev_arith.bytes;
+#ifdef SUF_HAVE_CUDA
+            gr.dev_arith_owner = std::shared_ptr<void>(ptr, [bytes](void* p) {
+              (void)bytes;
+              if (!p) return;
+              cudaFree(p);
+            });
+#else
+            PfssGpuStager* stager = gpu_stager_;
+            gr.dev_arith_owner = std::shared_ptr<void>(ptr, [stager, bytes](void* p) {
+              if (!p) return;
+              if (!stager) return;
+              stager->free_bytes(DeviceBufferRef{p, bytes});
+            });
+#endif
+          }
         }
-        if (out.bool_device && out.bool_device_words > 0) {
-          gr.dev_bools_ptr = out.bool_device;
-          gr.dev_bools_words = out.bool_device_words;
-        } else if (gpu_stager_ && !gr.bools.empty()) {
+        if (!gr.bools.empty()) {
           HostBufferRef host_b{gr.bools.data(), gr.bools.size() * sizeof(uint64_t)};
           gr.dev_bools = gpu_stager_->stage_to_device(host_b);
+          gr.dev_bools_words = gr.bools.size();
+          if (gr.dev_bools.ptr) {
+            void* ptr = gr.dev_bools.ptr;
+            size_t bytes = gr.dev_bools.bytes;
+#ifdef SUF_HAVE_CUDA
+            gr.dev_bools_owner = std::shared_ptr<void>(ptr, [bytes](void* p) {
+              (void)bytes;
+              if (!p) return;
+              cudaFree(p);
+            });
+#else
+            PfssGpuStager* stager = gpu_stager_;
+            gr.dev_bools_owner = std::shared_ptr<void>(ptr, [stager, bytes](void* p) {
+              if (!p) return;
+              if (!stager) return;
+              stager->free_bytes(DeviceBufferRef{p, bytes});
+            });
+#endif
+          }
         }
       }
       total_arith_words += gr.arith.size();
@@ -505,10 +550,10 @@ PfssResultView PfssSuperBatch::view(const PfssHandle& h) const {
       v.bools = h.slot->bool_storage->data();
       v.bool_words = h.slot->bool_storage->size();
     }
-    v.arith_device = nullptr;
-    v.arith_device_words = 0;
-    v.bools_device = nullptr;
-    v.bools_device_words = 0;
+    v.arith_device = h.slot->arith_device;
+    v.arith_device_words = h.slot->arith_device_words;
+    v.bools_device = h.slot->bools_device;
+    v.bools_device_words = h.slot->bools_device_words;
     v.r = h.slot->r;
     v.ell = h.slot->ell;
     return v;
@@ -523,18 +568,29 @@ PfssResultView PfssSuperBatch::view(const PfssHandle& h) const {
     const auto& sl = slices_[h.token];
     if (sl.group_result < group_results_.size()) {
       const auto& gr = group_results_[sl.group_result];
-      if (gr.dev_arith.ptr) {
-        v.arith_device = reinterpret_cast<const uint64_t*>(gr.dev_arith.ptr) + sl.start * cj.r;
-        v.arith_device_words = sl.len * cj.r;
+      const uint64_t* dev_arith_base = nullptr;
+      if (gr.dev_arith_owner) {
+        dev_arith_base = reinterpret_cast<const uint64_t*>(gr.dev_arith_owner.get());
+      } else if (gr.dev_arith.ptr) {
+        dev_arith_base = reinterpret_cast<const uint64_t*>(gr.dev_arith.ptr);
       } else if (gr.dev_arith_ptr) {
-        v.arith_device = gr.dev_arith_ptr + sl.start * cj.r;
+        dev_arith_base = gr.dev_arith_ptr;
+      }
+      if (dev_arith_base) {
+        v.arith_device = dev_arith_base + sl.start * cj.r;
         v.arith_device_words = sl.len * cj.r;
       }
-      if (gr.dev_bools.ptr) {
-        v.bools_device = reinterpret_cast<const uint64_t*>(gr.dev_bools.ptr) + sl.start * cj.ell;
-        v.bools_device_words = sl.len * cj.ell;
+
+      const uint64_t* dev_bools_base = nullptr;
+      if (gr.dev_bools_owner) {
+        dev_bools_base = reinterpret_cast<const uint64_t*>(gr.dev_bools_owner.get());
+      } else if (gr.dev_bools.ptr) {
+        dev_bools_base = reinterpret_cast<const uint64_t*>(gr.dev_bools.ptr);
       } else if (gr.dev_bools_ptr) {
-        v.bools_device = gr.dev_bools_ptr + sl.start * cj.ell;
+        dev_bools_base = gr.dev_bools_ptr;
+      }
+      if (dev_bools_base) {
+        v.bools_device = dev_bools_base + sl.start * cj.ell;
         v.bools_device_words = sl.len * cj.ell;
       }
     }
@@ -601,6 +657,43 @@ void PfssSuperBatch::populate_completed_() {
       } else {
         slot->bool_storage->clear();
       }
+
+      // Optional device views for this slice (if staged by flush_eval()).
+      slot->arith_device_owner.reset();
+      slot->arith_device = nullptr;
+      slot->arith_device_words = 0;
+      slot->bools_device_owner.reset();
+      slot->bools_device = nullptr;
+      slot->bools_device_words = 0;
+
+      const uint64_t* dev_arith_base = nullptr;
+      if (gr.dev_arith_owner) {
+        dev_arith_base = reinterpret_cast<const uint64_t*>(gr.dev_arith_owner.get());
+        slot->arith_device_owner = gr.dev_arith_owner;
+      } else if (gr.dev_arith.ptr) {
+        dev_arith_base = reinterpret_cast<const uint64_t*>(gr.dev_arith.ptr);
+      } else if (gr.dev_arith_ptr) {
+        dev_arith_base = gr.dev_arith_ptr;
+      }
+      if (dev_arith_base) {
+        slot->arith_device = dev_arith_base + sl.start * r;
+        slot->arith_device_words = arith_words;
+      }
+
+      const uint64_t* dev_bools_base = nullptr;
+      if (gr.dev_bools_owner) {
+        dev_bools_base = reinterpret_cast<const uint64_t*>(gr.dev_bools_owner.get());
+        slot->bools_device_owner = gr.dev_bools_owner;
+      } else if (gr.dev_bools.ptr) {
+        dev_bools_base = reinterpret_cast<const uint64_t*>(gr.dev_bools.ptr);
+      } else if (gr.dev_bools_ptr) {
+        dev_bools_base = gr.dev_bools_ptr;
+      }
+      if (dev_bools_base) {
+        slot->bools_device = dev_bools_base + sl.start * ell;
+        slot->bools_device_words = bool_words;
+      }
+
       slot->ready.store(true);
     }
   }
@@ -609,14 +702,16 @@ void PfssSuperBatch::populate_completed_() {
 void PfssSuperBatch::clear() {
   if (gpu_stager_) {
     for (auto& gr : group_results_) {
-      if (gr.dev_arith.ptr) {
+      if (gr.dev_arith.ptr && !gr.dev_arith_owner) {
         gpu_stager_->free_bytes(gr.dev_arith);
         gr.dev_arith = DeviceBufferRef{};
       }
-      if (gr.dev_bools.ptr) {
+      if (gr.dev_bools.ptr && !gr.dev_bools_owner) {
         gpu_stager_->free_bytes(gr.dev_bools);
         gr.dev_bools = DeviceBufferRef{};
       }
+      gr.dev_arith_owner.reset();
+      gr.dev_bools_owner.reset();
     }
   }
   jobs_.clear();
@@ -727,7 +822,6 @@ void PfssSuperBatch::finalize_all(int party, proto::IChannel& ch) {
 void PfssSuperBatch::materialize_host(int party, proto::IChannel& ch) {
   if (!flushed_) return;
   if (completed_.empty()) populate_completed_();
-  if (device_outputs_) return;  // caller intends to consume device buffers directly
   for (size_t idx = 0; idx < jobs_.size(); ++idx) {
     const auto& job = jobs_[idx];
     if (job.token >= completed_.size()) continue;

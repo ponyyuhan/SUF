@@ -163,24 +163,33 @@ struct SoftmaxResult {
   std::vector<uint64_t> recip_y;
 };
 
-std::vector<int64_t> ref_softmax(const std::vector<int64_t>& t_qf, int rows, int cols, int fb) {
+std::vector<int64_t> ref_softmax(const std::vector<int64_t>& t_qf,
+                                 int rows,
+                                 int cols,
+                                 int fb,
+                                 const std::vector<int>& valid_lens) {
   std::vector<int64_t> out(t_qf.size(), 0);
   auto spec = gates::make_nexp_spec(gates::NExpGateParams{fb, 16});
   auto recip_spec = gates::make_recip_affine_init_spec(fb, 1024.0);
+  if (!valid_lens.empty() && static_cast<int>(valid_lens.size()) != rows) {
+    throw std::runtime_error("ref_softmax: valid_lens size mismatch");
+  }
   for (int r = 0; r < rows; ++r) {
     int row_start = r * cols;
+    int L = valid_lens.empty() ? cols : valid_lens[static_cast<size_t>(r)];
+    if (L <= 0) continue;
     int64_t max_sc = t_qf[row_start];
-    for (int c = 1; c < cols; ++c) max_sc = std::max<int64_t>(max_sc, t_qf[row_start + c]);
-    std::vector<int64_t> expv(cols, 0);
+    for (int c = 1; c < L; ++c) max_sc = std::max<int64_t>(max_sc, t_qf[row_start + c]);
+    std::vector<int64_t> expv(static_cast<size_t>(L), 0);
     int64_t sum = 0;
-    for (int c = 0; c < cols; ++c) {
+    for (int c = 0; c < L; ++c) {
       int64_t diff = max_sc - t_qf[row_start + c];
       expv[c] = gates::ref_nexp_fixed(spec, diff);
       sum += expv[c];
     }
     if (sum == 0) sum = 1;
     int64_t inv = gates::ref_reciprocal_fixed(recip_spec, sum, fb, 2);
-    for (int c = 0; c < cols; ++c) {
+    for (int c = 0; c < L; ++c) {
       __int128 p = static_cast<__int128>(expv[c]) * static_cast<__int128>(inv);
       out[row_start + c] = static_cast<int64_t>(p >> fb);
     }
@@ -199,8 +208,27 @@ SoftmaxResult run_party(int party,
                         runtime::RowBroadcastTripleProvider* rb,
                         proto::PfssBackendBatch& backend,
                         net::Chan& chan,
-                        const std::vector<int>& valid_lens) {
+                        const std::vector<int>& valid_lens,
+                        bool device_only_pipeline) {
   runtime::PhaseExecutor pe;
+  if (device_only_pipeline) {
+    pe.set_device_pipeline(true);
+    pe.set_device_pipeline_materialize(false);
+    pe.pfss_coeff_batch().set_device_outputs(true);
+    pe.pfss_trunc_batch().set_device_outputs(true);
+  }
+#ifdef SUF_HAVE_CUDA
+  std::unique_ptr<runtime::CudaPfssStager> cuda_stager;
+  if (device_only_pipeline) {
+    if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(&backend)) {
+      cuda_stager = std::make_unique<runtime::CudaPfssStager>(staged->device_stream());
+      pe.pfss_coeff_batch().set_gpu_stager(cuda_stager.get());
+      pe.pfss_trunc_batch().set_gpu_stager(cuda_stager.get());
+    } else {
+      throw std::runtime_error("device_only_pipeline requested but backend is not PfssGpuStagedEval");
+    }
+  }
+#endif
   runtime::PhaseResources R{};
   R.party = party;
   runtime::ProtoChanFromNet pch(chan);
@@ -219,10 +247,13 @@ SoftmaxResult run_party(int party,
   plan.rows = rows;
   plan.cols = cols;
   plan.valid_lens = valid_lens;
+  plan.input_is_max_diff = false;  // this smoke passes raw logits; SoftmaxBlockTask does max-diff preprocessing
   plan.nexp = gates::make_nexp_cubic_bundle(nexp_mat, fb);
   plan.recip = gates::make_recip_bundle(recip_mat);
   plan.prob_trunc = prob_choice;
   plan.row_triples = rb;
+  plan.device_only = device_only_pipeline;
+  plan.materialize_host = !device_only_pipeline;
   compiler::RangeInterval prob_range;
   prob_range.lo = 0;
   prob_range.hi = static_cast<int64_t>(1) << fb;
@@ -238,6 +269,29 @@ SoftmaxResult run_party(int party,
   nn::SoftmaxBlockTask* task_raw = task.get();
   pe.add_task(std::move(task));
   pe.run(R);
+  if (device_only_pipeline) {
+#ifdef SUF_HAVE_CUDA
+    if (!task_raw->device_prob() || task_raw->device_prob_elems() == 0) {
+      throw std::runtime_error("device_only_pipeline: missing/short device_prob");
+    }
+    std::vector<uint64_t> packed(task_raw->device_prob_elems(), 0);
+    cudaMemcpy(packed.data(), task_raw->device_prob(), packed.size() * sizeof(uint64_t),
+               cudaMemcpyDeviceToHost);
+    task_raw->release_device_prob();
+    std::fill(probs.begin(), probs.end(), 0);
+    size_t off = 0;
+    for (int r = 0; r < rows; ++r) {
+      int L = valid_lens.empty() ? cols : valid_lens[static_cast<size_t>(r)];
+      for (int c = 0; c < L; ++c) {
+        if (off >= packed.size()) throw std::runtime_error("device_only_pipeline: packed scatter overflow");
+        probs[static_cast<size_t>(r * cols + c)] = packed[off++];
+      }
+    }
+    if (off != packed.size()) throw std::runtime_error("device_only_pipeline: packed scatter leftover");
+    pe.pfss_coeff_batch().clear();
+    pe.pfss_trunc_batch().clear();
+#endif
+  }
   SoftmaxResult res;
   res.probs = std::move(probs);
   res.exp_qf = task_raw->exp_qf_debug();
@@ -281,23 +335,15 @@ int main() {
   }
   auto gpu0 = proto::make_real_gpu_backend();
   auto gpu1 = proto::make_real_gpu_backend();
-  bool strict_gpu = (std::getenv("SOFTMAX_GPU_STRICT") != nullptr);
   if (!gpu0 || !gpu1) {
     std::cout << "GPU backend unavailable; skipping softmax GPU smoke.\n";
     return 0;
   }
   proto::ReferenceBackend ref_backend;
-  if (!strict_gpu) {
-    // Temporary escape hatch: run the "GPU" path on the reference backend to keep the test green
-    // while the CUDA pipeline is being debugged.
-    gpu0.reset(new proto::ReferenceBackend());
-    gpu1.reset(new proto::ReferenceBackend());
-    std::cout << "Softmax GPU smoke running in reference-only fallback; set SOFTMAX_GPU_STRICT=1 to exercise CUDA path.\n";
-    std::cout << "Softmax GPU smoke passed.\n";
-    return 0;
-  }
-  // When exercising CUDA, also force the safe predicate path to reduce divergence.
-  setenv("SUF_DISABLE_PACKED_CMP_KERNEL", "1", 1);
+  // Enable CUDA postproc fast-paths for the device-only integration check.
+  setenv("SUF_HORNER_GPU", "1", 1);
+  setenv("SUF_TRUNC_GPU", "1", 1);
+  setenv("SUF_SOFTMAX_GPU", "1", 1);
 
   const int rows = 2;
   const int cols = 3;
@@ -657,14 +703,16 @@ int main() {
   std::string fail_msg;
   std::thread t_a([&] {
     try {
-      g0 = run_party(0, rows, cols, fb, t0, nexp_mat, recip_mat, prob_choice, &rb0, *gpu0, c0, valid);
+      g0 = run_party(0, rows, cols, fb, t0, nexp_mat, recip_mat, prob_choice, &rb0, *gpu0, c0, valid,
+                     /*device_only_pipeline=*/false);
     } catch (const std::exception& e) {
       fail = true;
       fail_msg = e.what();
     }
   });
   try {
-    g1 = run_party(1, rows, cols, fb, t1, nexp_mat, recip_mat, prob_choice, &rb1, *gpu1, c1, valid);
+    g1 = run_party(1, rows, cols, fb, t1, nexp_mat, recip_mat, prob_choice, &rb1, *gpu1, c1, valid,
+                   /*device_only_pipeline=*/false);
   } catch (const std::exception& e) {
     fail = true;
     fail_msg = e.what();
@@ -680,14 +728,16 @@ int main() {
   LocalChan rc0(&sh_ref, true), rc1(&sh_ref, false);
   std::thread t_b([&] {
     try {
-      c0_res = run_party(0, rows, cols, fb, t0, nexp_mat_ref, recip_mat_ref, prob_choice_ref, &rb0, ref_backend, rc0, valid);
+      c0_res = run_party(0, rows, cols, fb, t0, nexp_mat_ref, recip_mat_ref, prob_choice_ref, &rb0, ref_backend, rc0,
+                         valid, /*device_only_pipeline=*/false);
     } catch (const std::exception& e) {
       fail = true;
       fail_msg = e.what();
     }
   });
   try {
-    c1_res = run_party(1, rows, cols, fb, t1, nexp_mat_ref, recip_mat_ref, prob_choice_ref, &rb1, ref_backend, rc1, valid);
+    c1_res = run_party(1, rows, cols, fb, t1, nexp_mat_ref, recip_mat_ref, prob_choice_ref, &rb1, ref_backend, rc1,
+                       valid, /*device_only_pipeline=*/false);
   } catch (const std::exception& e) {
     fail = true;
     fail_msg = e.what();
@@ -698,7 +748,7 @@ int main() {
     return 1;
   }
 
-  auto ref = ref_softmax(t_plain, rows, cols, fb);
+  auto ref = ref_softmax(t_plain, rows, cols, fb, valid);
   auto recon_stage = [](const std::vector<uint64_t>& a, const std::vector<uint64_t>& b) {
     std::vector<uint64_t> out(a.size());
     for (size_t i = 0; i < a.size(); i++) out[i] = a[i] + b[i];
@@ -751,6 +801,47 @@ int main() {
   }
 
   auto recon = recon_stage(g0.probs, g1.probs);
+
+  // Device-only integration: run the same softmax with PFSS outputs + trunc/horner
+  // postproc kept on device, then compare reconstructed outputs vs the CPU stage run.
+  LocalChan::Shared sh_dev;
+  LocalChan dc0(&sh_dev, true), dc1(&sh_dev, false);
+  SoftmaxResult d0_res, d1_res;
+  fail = false;
+  fail_msg.clear();
+  std::thread t_dev([&] {
+    try {
+      d0_res =
+          run_party(0, rows, cols, fb, t0, nexp_mat, recip_mat, prob_choice, &rb0, *gpu0, dc0, valid,
+                    /*device_only_pipeline=*/true);
+    } catch (const std::exception& e) {
+      fail = true;
+      fail_msg = e.what();
+    }
+  });
+  try {
+    d1_res =
+        run_party(1, rows, cols, fb, t1, nexp_mat, recip_mat, prob_choice, &rb1, *gpu1, dc1, valid,
+                  /*device_only_pipeline=*/true);
+  } catch (const std::exception& e) {
+    fail = true;
+    fail_msg = e.what();
+  }
+  t_dev.join();
+  if (fail) {
+    std::cerr << "Softmax device-only pipeline failed: " << fail_msg << "\n";
+    return 1;
+  }
+  auto recon_dev = recon_stage(d0_res.probs, d1_res.probs);
+  for (size_t i = 0; i < recon_dev.size(); ++i) {
+    if (recon_dev[i] != recon_ref_probs[i]) {
+      std::cerr << "Softmax device-only mismatch at idx " << i
+                << " dev=" << recon_dev[i]
+                << " ref=" << recon_ref_probs[i] << "\n";
+      return 1;
+    }
+  }
+
   for (int r = 0; r < rows; ++r) {
     int L = valid[r];
     for (int c = 0; c < cols; ++c) {

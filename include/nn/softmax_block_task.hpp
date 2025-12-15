@@ -1,6 +1,8 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdio>
+#include <limits>
 #include <memory>
 #include <vector>
 #include <optional>
@@ -15,6 +17,9 @@ struct SoftmaxPlan {
   int rows = 0;
   int cols = 0;
   std::vector<int> valid_lens;  // optional row-wise lengths; empty => dense
+  // If true, input `t_qf` is already `delta = max(row) - x` (non-negative, clamped to [0,16]).
+  // If false, task will open inputs to compute per-row max and form `delta`.
+  bool input_is_max_diff = true;
   bool device_only = false;     // optional: skip host materialization entirely
   bool materialize_host = true; // if false and device output exists, keep device only
   runtime::CubicPolyBundle nexp;
@@ -85,12 +90,93 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
       case St::ExpInit: {
         build_offsets();
         t_packed_.resize(active_elems_);
-        size_t off = 0;
-        for (int r = 0; r < plan_.rows; ++r) {
-          int L = plan_.valid_lens.empty() ? plan_.cols : plan_.valid_lens[r];
-          for (int c = 0; c < L; ++c) {
-            size_t idx = static_cast<size_t>(r * plan_.cols + c);
-            t_packed_[off++] = t_[idx];
+        if (plan_.input_is_max_diff) {
+          size_t off = 0;
+          for (int r = 0; r < plan_.rows; ++r) {
+            int L = plan_.valid_lens.empty() ? plan_.cols : plan_.valid_lens[r];
+            for (int c = 0; c < L; ++c) {
+              size_t idx = static_cast<size_t>(r * plan_.cols + c);
+              t_packed_[off++] = t_[idx];
+            }
+          }
+        } else {
+          if (!R.net_chan) throw std::runtime_error("SoftmaxBlockTask: net channel missing for max-diff preprocessing");
+          std::vector<uint64_t> other(active_elems_, 0);
+          if (R.party == 0) {
+            for (int r = 0; r < plan_.rows; ++r) {
+              int L = plan_.valid_lens.empty() ? plan_.cols : plan_.valid_lens[r];
+              for (int c = 0; c < L; ++c) {
+                size_t idx = static_cast<size_t>(r * plan_.cols + c);
+                R.net_chan->send_u64(t_[idx]);
+              }
+            }
+            size_t off = 0;
+            for (int r = 0; r < plan_.rows; ++r) {
+              int L = plan_.valid_lens.empty() ? plan_.cols : plan_.valid_lens[r];
+              for (int c = 0; c < L; ++c) {
+                other[off++] = R.net_chan->recv_u64();
+              }
+            }
+          } else {
+            size_t off = 0;
+            for (int r = 0; r < plan_.rows; ++r) {
+              int L = plan_.valid_lens.empty() ? plan_.cols : plan_.valid_lens[r];
+              for (int c = 0; c < L; ++c) {
+                other[off++] = R.net_chan->recv_u64();
+              }
+            }
+            for (int r = 0; r < plan_.rows; ++r) {
+              int L = plan_.valid_lens.empty() ? plan_.cols : plan_.valid_lens[r];
+              for (int c = 0; c < L; ++c) {
+                size_t idx = static_cast<size_t>(r * plan_.cols + c);
+                R.net_chan->send_u64(t_[idx]);
+              }
+            }
+          }
+
+          std::vector<int64_t> plain(active_elems_, 0);
+          {
+            size_t off = 0;
+            for (int r = 0; r < plan_.rows; ++r) {
+              int L = plan_.valid_lens.empty() ? plan_.cols : plan_.valid_lens[r];
+              for (int c = 0; c < L; ++c) {
+                size_t idx = static_cast<size_t>(r * plan_.cols + c);
+                plain[off] = static_cast<int64_t>(t_[idx] + other[off]);
+                ++off;
+              }
+            }
+          }
+
+          std::vector<int64_t> row_max(static_cast<size_t>(plan_.rows), 0);
+          {
+            size_t off = 0;
+            for (int r = 0; r < plan_.rows; ++r) {
+              int L = plan_.valid_lens.empty() ? plan_.cols : plan_.valid_lens[r];
+              if (L <= 0) {
+                row_max[static_cast<size_t>(r)] = 0;
+                continue;
+              }
+              int64_t best = plain[off];
+              for (int c = 1; c < L; ++c) best = std::max(best, plain[off + static_cast<size_t>(c)]);
+              row_max[static_cast<size_t>(r)] = best;
+              off += static_cast<size_t>(L);
+            }
+          }
+
+          int64_t cap = std::numeric_limits<int64_t>::max();
+          if (plan_.frac_bits >= 0 && plan_.frac_bits <= 58) cap = (16ll << plan_.frac_bits);
+
+          size_t off = 0;
+          for (int r = 0; r < plan_.rows; ++r) {
+            int L = plan_.valid_lens.empty() ? plan_.cols : plan_.valid_lens[r];
+            int64_t best = row_max[static_cast<size_t>(r)];
+            for (int c = 0; c < L; ++c) {
+              int64_t diff = best - plain[off];
+              if (diff < 0) diff = 0;
+              if (diff > cap) diff = cap;
+              t_packed_[off] = (R.party == 0) ? static_cast<uint64_t>(diff) : 0ull;
+              ++off;
+            }
           }
         }
         exp_packed_.assign(active_elems_, 0);
@@ -112,6 +198,13 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
           if (auto* dptr = nexp_task_->device_out()) {
             d_exp_device_ = dptr;
             d_exp_elems_ = nexp_task_->device_out_elems();
+            // CubicPolyTask may keep results device-only in pipeline mode; copy back so
+            // subsequent opens/muls that currently consume host buffers remain correct.
+            size_t n = std::min(exp_packed_.size(), d_exp_elems_);
+            if (n > 0) {
+              cudaMemcpy(exp_packed_.data(), d_exp_device_, n * sizeof(uint64_t),
+                         cudaMemcpyDeviceToHost);
+            }
           }
         }
 #endif
@@ -225,6 +318,13 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
           if (auto* dptr = mul_task_->device_out()) {
             d_prod_device_ = dptr;
             d_prod_elems_ = mul_task_->device_out_elems();
+            // TruncTask currently consumes host shares, so we still need a host
+            // copy of the product even when we keep a device buffer alive.
+            size_t n = std::min(prod_q2f_.size(), d_prod_elems_);
+            if (n > 0) {
+              cudaMemcpy(prod_q2f_.data(), d_prod_device_, n * sizeof(uint64_t),
+                         cudaMemcpyDeviceToHost);
+            }
           }
         } else if (R.device_pipeline) {
           if (auto* dptr = mul_task_->device_out()) {

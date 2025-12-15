@@ -58,6 +58,7 @@ __global__ void trunc_postproc_kernel(int party,
                                       int kind_gapars,
                                       int frac_bits,
                                       uint64_t r_hi_share,
+                                      uint64_t m_share,
                                       const uint64_t* __restrict__ hatx_public,
                                       const uint64_t* __restrict__ arith,
                                       size_t arith_stride,
@@ -71,7 +72,6 @@ __global__ void trunc_postproc_kernel(int party,
                                       size_t n) {
   size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   if (idx >= n) return;
-  (void)kind_gapars;
   uint64_t base = arith[arith_idx + idx * arith_stride];
   bool have_carry = bools && carry_idx >= 0 && carry_idx < static_cast<int>(bool_stride);
   bool have_sign = bools && sign_idx >= 0 && sign_idx < static_cast<int>(bool_stride);
@@ -80,6 +80,36 @@ __global__ void trunc_postproc_kernel(int party,
   uint64_t sign = have_sign ? bools[sign_idx + idx * bool_stride] : 0ull;
   uint64_t wrap = have_wrap ? bools[wrap_idx + idx * bool_stride] : 0ull;
   uint64_t y = base;
+  if (kind_gapars) {
+    const uint64_t bias_in = uint64_t(1) << 62;  // 2^(64-2)
+    uint64_t hatx = hatx_public ? hatx_public[idx] : 0ull;
+    uint64_t hatx_biased = add_mod(hatx, bias_in);
+    uint64_t top = 0ull;
+    if (party == 0) {
+      if (frac_bits <= 0) {
+        top = hatx_biased;
+      } else if (frac_bits >= 64) {
+        top = 0ull;
+      } else {
+        top = hatx_biased >> frac_bits;
+      }
+    }
+    y = add_mod(y, top);
+    y = add_mod(y, (~r_hi_share) + 1);  // subtract r_hi_share
+    y = add_mod(y, (~carry) + 1);       // subtract carry
+    if (frac_bits > 0 && frac_bits < 64) {
+      uint64_t msb_hatx = (hatx_biased >> 63) & 1ull;
+      if (msb_hatx == 0) {
+        y = add_mod(y, m_share);
+      }
+    }
+    if (party == 0 && frac_bits >= 0 && frac_bits <= 62) {
+      uint64_t bias_out = uint64_t(1) << (62 - frac_bits);
+      y = add_mod(y, (~bias_out) + 1);
+    }
+    out[idx] = y;
+    return;
+  }
   if (party == 0 && frac_bits > 0 && frac_bits < 64) {
     uint64_t top = hatx_public ? (hatx_public[idx] >> frac_bits) : 0ull;
     y = add_mod(y, top);
@@ -300,6 +330,7 @@ extern "C" void launch_trunc_postproc_kernel(int party,
                                              int kind_gapars,
                                              int frac_bits,
                                              uint64_t r_hi_share,
+                                             uint64_t m_share,
                                              const uint64_t* d_hatx_public,
                                              const uint64_t* d_arith,
                                              size_t arith_stride,
@@ -313,7 +344,7 @@ extern "C" void launch_trunc_postproc_kernel(int party,
                                              size_t n,
                                              void* stream) {
 #ifndef SUF_HAVE_CUDA
-  (void)party; (void)kind_gapars; (void)frac_bits; (void)r_hi_share;
+  (void)party; (void)kind_gapars; (void)frac_bits; (void)r_hi_share; (void)m_share;
   (void)d_hatx_public; (void)d_arith; (void)arith_stride; (void)arith_idx;
   (void)d_bools; (void)bool_stride; (void)carry_idx; (void)sign_idx; (void)wrap_idx; (void)d_out; (void)n; (void)stream;
 #else
@@ -321,7 +352,7 @@ extern "C" void launch_trunc_postproc_kernel(int party,
   constexpr int kBlock = 256;
   int grid = static_cast<int>((n + kBlock - 1) / kBlock);
   trunc_postproc_kernel<<<grid, kBlock, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
-      party, kind_gapars, frac_bits, r_hi_share,
+      party, kind_gapars, frac_bits, r_hi_share, m_share,
       d_hatx_public, d_arith, arith_stride, arith_idx,
       d_bools, bool_stride, carry_idx, sign_idx, wrap_idx,
       d_out, n);

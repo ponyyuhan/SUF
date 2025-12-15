@@ -360,8 +360,11 @@ void transformer_layer_forward(const TransformerConfig& cfg,
     layer_planner_ptr->begin_layer();
   }
   bool restore_disable = false;
-  runtime::PfssLayerPlanner::BarrierPolicy attn_barrier{.drain_all = true};
-  runtime::PfssLayerPlanner::BarrierPolicy ln_barrier{.drain_all = true};
+  // Default barriers: keep batches alive across phases, but clear completed PFSS
+  // state to avoid unbounded token growth when PfssPhasePlanner is used.
+  // Only drain opens where required by follow-on computation.
+  runtime::PfssLayerPlanner::BarrierPolicy attn_barrier{.drain_open = true, .drain_pfss_coeff = true};
+  runtime::PfssLayerPlanner::BarrierPolicy ln_barrier{.drain_pfss_coeff = true};
   if (ctx && !ctx->disable_inner_barriers) {
     restore_disable = true;
     // Enable a finer super-plan: keep batches alive, but insert explicit
