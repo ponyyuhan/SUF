@@ -1,0 +1,3 @@
+[submodule "external/sigma_ezpc"]
+	path = external/sigma_ezpc
+	url = https://github.com/mpc-msri/EzPC.git
