@@ -31,7 +31,12 @@ SIGMA writes these into:
 
 - Two parties are simulated **in-process** with a paired channel.
 - We force the **PFSS execution path** even when using the clear/reference backend (for stable end-to-end accounting) via `SUF_FORCE_PFSS=1`.
+- We enable `SUF_BENCH_CACHE_MATERIAL=1` so expensive dealer-generated materials (GeLU/SiLU/NExp/Recip + trunc bundles) are generated once and reused; this makes **keygen vs online** separation meaningful.
+- We disable per-element trunc/ARS masks by default (`SUF_PER_ELEMENT_MASKS=0`) to keep truncation batched; set `SUF_PER_ELEMENT_MASKS=1` to re-enable per-element masking.
 - We collect:
+  - `timing.keygen_time_s` (approx: first-iter minus steady-state online mean; set `n_iters >= 2`)
+  - `timing.online_time_s` (steady-state mean over iters 1..N-1 when `n_iters >= 2`)
+  - `timing.wall_time_s` (sum over measured iterations)
   - `timing.online_time_s_mean` and `timing.online_time_s_max`
   - `communication.online_bytes`
   - `preprocessing.key_bytes` (see “How SUF key size is measured” below)
@@ -114,10 +119,3 @@ Outputs:
 - Per-run JSON logs in `results_dir`
 - `summary.jsonl`
 - `summary.csv`
-
-## Practical limitations / notes
-
-- SIGMA’s key sizes for large models (e.g., BERT-base/large) can require **tens of GB of CPU RAM** (see Table 9 in the paper). Ensure your machine has sufficient memory.
-- This repository’s current environment (if using a small VRAM GPU / limited RAM) may only support `bert-tiny` in practice.
-- SIGMA requires sequence lengths that are powers of 2.
-

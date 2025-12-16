@@ -31,8 +31,13 @@ inline void ensure_recips_triples(gates::CompositeKeyPair& kp,
                                   size_t per_iter_need,
                                   int nr_iters,
                                   std::mt19937_64& rng) {
-  // One mul for the affine init plus per-iter muls.
-  size_t need = per_iter_need * static_cast<size_t>(nr_iters) + 1;
+  // One mul for the affine init plus per-iter muls, per element in the batch.
+  const size_t batch_N = std::max<size_t>(
+      1,
+      std::max(kp.k0.r_in_share_vec.size(),
+               kp.k1.r_in_share_vec.size()));
+  const size_t per_elem = per_iter_need * static_cast<size_t>(nr_iters) + 1;
+  size_t need = per_elem * batch_N;
   auto fill = [&](std::vector<proto::BeaverTriple64Share>& dst0,
                   std::vector<proto::BeaverTriple64Share>& dst1) {
     while (dst0.size() < need || dst1.size() < need) {

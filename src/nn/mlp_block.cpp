@@ -4,6 +4,8 @@
 #include <random>
 #include <limits>
 #include <optional>
+#include <mutex>
+#include <unordered_map>
 #include "nn/matmul_publicW.hpp"
 #include "nn/matmul_gpu.hpp"
 #include "gates/tables/gelu_spline_table.hpp"
@@ -25,6 +27,38 @@ using gates::ref_silu_fixed;
 
 static inline int64_t to_signed(uint64_t v) { return static_cast<int64_t>(v); }
 static inline uint64_t to_ring(int64_t v) { return static_cast<uint64_t>(v); }
+
+struct MlpActMatKey {
+  bool is_gpu = false;
+  int frac_bits = 0;
+  size_t elems = 0;
+  int activation = 0;  // 0=silu, 1=gelu
+
+  bool operator==(const MlpActMatKey& o) const {
+    return is_gpu == o.is_gpu && frac_bits == o.frac_bits && elems == o.elems && activation == o.activation;
+  }
+};
+
+struct MlpActMatKeyHash {
+  size_t operator()(const MlpActMatKey& k) const noexcept {
+    size_t h = 1469598103934665603ull;
+    auto mix = [&](size_t v) {
+      h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    };
+    mix(static_cast<size_t>(k.is_gpu));
+    mix(static_cast<size_t>(k.frac_bits));
+    mix(static_cast<size_t>(k.elems));
+    mix(static_cast<size_t>(k.activation));
+    return h;
+  }
+};
+
+static bool bench_cache_enabled() {
+  const char* env = std::getenv("SUF_BENCH_CACHE_MATERIAL");
+  return env && std::string(env) != "0";
+}
+
+static bool bench_trace_enabled() { return std::getenv("SUF_BENCH_TRACE") != nullptr; }
 
 static void open_to_plain(int party,
                           net::Chan& ch,
@@ -156,7 +190,7 @@ void mlp_forward(const MLPConfig& cfg,
     const auto& st = planner.stats();
     if (st.coeff_jobs == 0 && st.trunc_jobs == 0 && st.coeff_flushes == 0 && st.trunc_flushes == 0) return;
     ctx->pfss_layer_planner->record_phase(planner, pe->pfss_coeff_batch(), pe->pfss_trunc_batch());
-    if (party == 0) {
+    if (party == 0 && bench_trace_enabled()) {
       std::cerr << "[pfss-phase][mlp] coeff_jobs=" << st.coeff_jobs
                 << " trunc_jobs=" << st.trunc_jobs
                 << " coeff_flushes=" << st.coeff_flushes
@@ -394,17 +428,37 @@ void mlp_forward(const MLPConfig& cfg,
         std::span<uint64_t>(hidden_scaled.data(), hidden_scaled.size()));
     std::mt19937_64 rng2(0);
     std::unique_ptr<runtime::CubicPolyTask> act_task;
-    std::optional<gates::SiluTaskMaterial> silu_mat;
-    std::optional<gates::GeluTaskMaterial> gelu_mat;
+    std::shared_ptr<gates::SiluTaskMaterial> silu_mat;
+    std::shared_ptr<gates::GeluTaskMaterial> gelu_mat;
     if (cfg.activation == MLPConfig::Activation::GeLU) {
-      std::cerr << "mlp_forward: building gelu task material frac_bits=" << cfg.frac_bits
-                << " elems=" << hidden_scaled.size() << "\n";
-      gelu_mat.emplace(gates::dealer_make_gelu_task_material(
-          ctx->trunc_backend(),
-          cfg.frac_bits,
-          rng2,
-          3 * hidden_scaled.size(),
-          hidden_scaled.size()));
+      if (bench_trace_enabled()) {
+        std::cerr << "mlp_forward: building gelu task material frac_bits=" << cfg.frac_bits
+                  << " elems=" << hidden_scaled.size() << "\n";
+      }
+      if (bench_cache_enabled()) {
+        static std::mutex mu;
+        static std::unordered_map<MlpActMatKey, std::shared_ptr<gates::GeluTaskMaterial>, MlpActMatKeyHash> cache;
+        MlpActMatKey key{ctx && ctx->uses_gpu_backend(), cfg.frac_bits, hidden_scaled.size(), /*activation=*/1};
+        std::lock_guard<std::mutex> lk(mu);
+        auto it = cache.find(key);
+        if (it == cache.end()) {
+          auto mat = std::make_shared<gates::GeluTaskMaterial>(gates::dealer_make_gelu_task_material(
+              ctx->trunc_backend(),
+              cfg.frac_bits,
+              rng2,
+              3 * hidden_scaled.size(),
+              hidden_scaled.size()));
+          it = cache.emplace(key, std::move(mat)).first;
+        }
+        gelu_mat = it->second;
+      } else {
+        gelu_mat = std::make_shared<gates::GeluTaskMaterial>(gates::dealer_make_gelu_task_material(
+            ctx->trunc_backend(),
+            cfg.frac_bits,
+            rng2,
+            3 * hidden_scaled.size(),
+            hidden_scaled.size()));
+      }
       auto& mat = *gelu_mat;
       runtime::CubicPolyBundle bundle{
           &mat.suf,
@@ -421,14 +475,34 @@ void mlp_forward(const MLPConfig& cfg,
           std::span<uint64_t>(hidden_scaled.data(), hidden_scaled.size()));
       mat2_x_range = clamp_gelu_range(cfg.frac_bits);
     } else {
-      std::cerr << "mlp_forward: building silu task material frac_bits=" << cfg.frac_bits
-                << " elems=" << hidden_scaled.size() << "\n";
-      silu_mat.emplace(gates::dealer_make_silu_task_material(
-          ctx->trunc_backend(),
-          cfg.frac_bits,
-          rng2,
-          3 * hidden_scaled.size(),
-          hidden_scaled.size()));
+      if (bench_trace_enabled()) {
+        std::cerr << "mlp_forward: building silu task material frac_bits=" << cfg.frac_bits
+                  << " elems=" << hidden_scaled.size() << "\n";
+      }
+      if (bench_cache_enabled()) {
+        static std::mutex mu;
+        static std::unordered_map<MlpActMatKey, std::shared_ptr<gates::SiluTaskMaterial>, MlpActMatKeyHash> cache;
+        MlpActMatKey key{ctx && ctx->uses_gpu_backend(), cfg.frac_bits, hidden_scaled.size(), /*activation=*/0};
+        std::lock_guard<std::mutex> lk(mu);
+        auto it = cache.find(key);
+        if (it == cache.end()) {
+          auto mat = std::make_shared<gates::SiluTaskMaterial>(gates::dealer_make_silu_task_material(
+              ctx->trunc_backend(),
+              cfg.frac_bits,
+              rng2,
+              3 * hidden_scaled.size(),
+              hidden_scaled.size()));
+          it = cache.emplace(key, std::move(mat)).first;
+        }
+        silu_mat = it->second;
+      } else {
+        silu_mat = std::make_shared<gates::SiluTaskMaterial>(gates::dealer_make_silu_task_material(
+            ctx->trunc_backend(),
+            cfg.frac_bits,
+            rng2,
+            3 * hidden_scaled.size(),
+            hidden_scaled.size()));
+      }
       auto& mat = *silu_mat;
       runtime::CubicPolyBundle bundle{
           &mat.suf,

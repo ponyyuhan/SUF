@@ -31,6 +31,14 @@ inline size_t packed_words_host(size_t elems, int eff_bits) {
 
 inline size_t beaver_u64_mul_per_elem(const ::gates::CompositePartyKey& k) {
   const auto& comp = k.compiled;
+  // Interval-LUT coeff mode can make coefficient selection Beaver-free. For the
+  // current usage in this repo (payload-only gates: degree=0, ell=0), the PFSS
+  // evaluation does not consume any Beaver 64-bit triples.
+  if (comp.coeff.mode == ::compiler::CoeffMode::kIntervalLut &&
+      comp.degree == 0 &&
+      comp.ell == 0) {
+    return 0;
+  }
   const size_t cut_count = comp.coeff.cutpoints_ge.size();
   const size_t piece_count = cut_count + 1;
   const size_t selector_chain_mul = (cut_count > 0) ? (cut_count - 1) : 0;

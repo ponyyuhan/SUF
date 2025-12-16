@@ -4,6 +4,9 @@
 #include <cmath>
 #include <limits>
 #include <random>
+#include <cctype>
+#include <cstdlib>
+#include <string>
 #include <vector>
 #include <unordered_map>
 #include <algorithm>
@@ -19,6 +22,15 @@ namespace {
 
 inline int64_t to_signed(uint64_t v) { return static_cast<int64_t>(v); }
 inline uint64_t to_ring(int64_t v) { return static_cast<uint64_t>(v); }
+
+static bool per_element_masks_enabled() {
+  const char* env = std::getenv("SUF_PER_ELEMENT_MASKS");
+  if (!env) return true;
+  std::string v(env);
+  std::transform(v.begin(), v.end(), v.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return !(v == "0" || v == "false" || v == "off" || v == "no");
+}
 
 struct RowBroadcastTripleMaterial {
   int rows = 0;
@@ -402,7 +414,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   compiler::GateParams p_faithful;
   p_faithful.kind = compiler::GateKind::FaithfulARS;
   p_faithful.frac_bits = fb;
-  p_faithful.per_element_masks = true;
+  p_faithful.per_element_masks = per_element_masks_enabled();
   compiler::GateParams p_gap = p_faithful;
   p_gap.kind = compiler::GateKind::GapARS;
 
@@ -625,7 +637,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
         async_runner,
         wait,
         pfss_chan_mu.get());
-    if (party == 0) {
+    if (party == 0 && std::getenv("SUF_BENCH_TRACE")) {
       const auto& totals = layer_planner_ptr->totals();
       std::cerr << "[pfss-layer] phases=" << totals.phases
                 << " coeff_jobs=" << totals.coeff_jobs

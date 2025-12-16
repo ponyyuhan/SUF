@@ -100,6 +100,9 @@ Correctness note: trunc/ARS helper bits (`carry/sign/wrap`) are maintained as **
 - GPU PFSS tuning: `SUF_PFSS_GPU_BLOCK`, `RUN_GPU_COMPOSITE=1`
 - GPU matmul tuning: `SUF_MATMUL_GPU_TILE=wide|narrow`
 - GPU caches: `SUF_NO_CACHE_KEYS=1`, `SUF_NO_CACHE_HATX=1`
+- Benchmark toggles:
+  - `SUF_PER_ELEMENT_MASKS=0|1` disables/enables per-element trunc/ARS masks (benchmark sets `0` by default for batching)
+  - `SUF_BENCH_DEVICE_PIPELINE=1` keeps PFSS outputs on GPU when downstream can consume device pointers
 - Open batching/packing:
   - `SUF_OPEN_PACK_EFFBITS=1` enables packed opens when shares fit in small bitwidth
   - `SUF_OPEN_PACK_MAX_BITS` caps packing width (default 48)
@@ -113,9 +116,15 @@ Correctness note: trunc/ARS helper bits (`carry/sign/wrap`) are maintained as **
 
 ## Sigma-vs-SUF Harness
 
-The repo includes a lightweight runner that can collate Sigma and SUF results:
+See `docs/benchmark_sigma_vs_suf.md` for end-to-end comparison instructions (time + key size).
 
-- Config: `bench/configs/sigma_vs_suf.json`
 - Runner: `bench/run_sigma_vs_suf.py`
+- Configs: `bench/configs/sigma_vs_suf.json`, `bench/configs/sigma_vs_suf_bert_tiny.json`, `bench/configs/sigma_vs_suf_large.json`
 - Hardware probe: `scripts/describe_hardware.py` (writes `bench/hardware_<hostname>.json`)
 - Sigma build helper: `scripts/build_sigma.sh`
+
+Smoke (bert-tiny):
+
+```bash
+python3 bench/run_sigma_vs_suf.py --config bench/configs/sigma_vs_suf_bert_tiny.json --timeout-sigma-s 1800
+```

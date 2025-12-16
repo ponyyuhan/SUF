@@ -2,11 +2,14 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cctype>
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <optional>
 #include <random>
 #include <vector>
+#include <mutex>
 #include <unordered_map>
 #include "compiler/truncation_lowering.hpp"
 #include "compiler/range_analysis.hpp"
@@ -15,6 +18,7 @@
 #include "gates/reciprocal_composite.hpp"
 #include "gates/nexp_composite.hpp"
 #include "gates/softmax_composite.hpp"
+#include "nn/matmul_beaver.hpp"
 #include "nn/matmul_publicW.hpp"
 #include "nn/matmul_gpu.hpp"
 #include "nn/softmax_block_task.hpp"
@@ -48,6 +52,52 @@ void open_to_plain(int party,
     plain_out[i] = to_signed(local[i]) + to_signed(other[i]);
   }
 }
+
+static bool bench_cache_enabled() {
+  const char* env = std::getenv("SUF_BENCH_CACHE_MATERIAL");
+  return env && std::string(env) != "0";
+}
+
+static bool per_element_masks_enabled() {
+  const char* env = std::getenv("SUF_PER_ELEMENT_MASKS");
+  if (!env) return true;
+  std::string v(env);
+  std::transform(v.begin(), v.end(), v.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return !(v == "0" || v == "false" || v == "off" || v == "no");
+}
+
+static bool bench_trace_enabled() { return std::getenv("SUF_BENCH_TRACE") != nullptr; }
+
+struct SoftmaxMatKey {
+  bool is_gpu = false;
+  int frac_bits = 0;
+  size_t batch_N = 0;
+  size_t triple_need = 0;
+  int which = 0;  // 0=nexp, 1=recip, 2=prob_gapars, 3=prob_faithful
+  int nr_iters = 0;  // recip only
+
+  bool operator==(const SoftmaxMatKey& o) const {
+    return is_gpu == o.is_gpu && frac_bits == o.frac_bits && batch_N == o.batch_N &&
+           triple_need == o.triple_need && which == o.which && nr_iters == o.nr_iters;
+  }
+};
+
+struct SoftmaxMatKeyHash {
+  size_t operator()(const SoftmaxMatKey& k) const noexcept {
+    size_t h = 1469598103934665603ull;
+    auto mix = [&](size_t v) {
+      h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    };
+    mix(static_cast<size_t>(k.is_gpu));
+    mix(static_cast<size_t>(k.frac_bits));
+    mix(static_cast<size_t>(k.batch_N));
+    mix(static_cast<size_t>(k.triple_need));
+    mix(static_cast<size_t>(k.which));
+    mix(static_cast<size_t>(k.nr_iters));
+    return h;
+  }
+};
 
 struct RowBroadcastTripleMaterial {
   int rows = 0;
@@ -170,6 +220,176 @@ static std::vector<proto::BeaverTriple64Share>& ensure_cached_triples(
   auto [ins_it, _] = cache.emplace(count, std::move(triples));
   return ins_it->second;
 }
+
+struct MatmulTripleKey {
+  bool is_gpu = false;
+  int frac_bits = 0;
+  int M = 0;
+  int K = 0;
+  int N = 0;
+  bool w_transposed = false;
+  uint64_t domain = 0;
+
+  bool operator==(const MatmulTripleKey& o) const {
+    return is_gpu == o.is_gpu && frac_bits == o.frac_bits && M == o.M && K == o.K && N == o.N &&
+           w_transposed == o.w_transposed && domain == o.domain;
+  }
+};
+
+struct MatmulTripleKeyHash {
+  size_t operator()(const MatmulTripleKey& k) const noexcept {
+    size_t h = 1469598103934665603ull;
+    auto mix = [&](size_t v) {
+      h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    };
+    mix(static_cast<size_t>(k.is_gpu));
+    mix(static_cast<size_t>(k.frac_bits));
+    mix(static_cast<size_t>(k.M));
+    mix(static_cast<size_t>(k.K));
+    mix(static_cast<size_t>(k.N));
+    mix(static_cast<size_t>(k.w_transposed));
+    mix(static_cast<size_t>(k.domain));
+    return h;
+  }
+};
+
+static const nn::MatmulBeaverTriple& get_cached_matmul_triple(const MatmulTripleKey& key, int party) {
+  static std::mutex mu;
+  static std::unordered_map<MatmulTripleKey, nn::MatmulBeaverTriple, MatmulTripleKeyHash> cache0;
+  static std::unordered_map<MatmulTripleKey, nn::MatmulBeaverTriple, MatmulTripleKeyHash> cache1;
+  std::lock_guard<std::mutex> lk(mu);
+  auto it0 = cache0.find(key);
+  auto it1 = cache1.find(key);
+  if (it0 != cache0.end() && it1 != cache1.end()) {
+    return (party == 0) ? it0->second : it1->second;
+  }
+  std::mt19937_64 rng(static_cast<uint64_t>(MatmulTripleKeyHash{}(key)) ^ 0x6d61746d756c6c75ull);
+  auto [t0, t1] = nn::dealer_gen_matmul_triple(
+      static_cast<size_t>(key.M),
+      static_cast<size_t>(key.K),
+      static_cast<size_t>(key.N),
+      key.frac_bits,
+      rng,
+      key.w_transposed);
+  auto ins0 = cache0.emplace(key, std::move(t0)).first;
+  auto ins1 = cache1.emplace(key, std::move(t1)).first;
+  return (party == 0) ? ins0->second : ins1->second;
+}
+
+// Matrix Beaver matmul task using one (A,B,C=A*B) triple per matrix multiply.
+// Writes raw Q2f shares (caller truncates). If mul_const is set, multiplies by mul_const and
+// shifts right by mul_shift before writing (useful to fold public scaling into the same trunc).
+class Matmul2DTask final : public runtime::detail::PhaseTask {
+ public:
+  Matmul2DTask(int M,
+               int K,
+               int N,
+               std::span<const uint64_t> A,
+               std::span<const uint64_t> B,
+               std::span<uint64_t> out_q2f,
+               std::span<const uint64_t> a_tri,
+               std::span<const uint64_t> b_tri,
+               std::span<const uint64_t> c_tri,
+               bool w_transposed,
+               std::optional<int64_t> mul_const = std::nullopt,
+               int mul_shift = 0)
+      : M_(M),
+        K_(K),
+        N_(N),
+        A_(A),
+        B_(B),
+        out_(out_q2f),
+        a_tri_(a_tri),
+        b_tri_(b_tri),
+        c_tri_(c_tri),
+        w_transposed_(w_transposed),
+        mul_const_(mul_const),
+        mul_shift_(mul_shift) {
+    if (A_.size() != static_cast<size_t>(M_) * static_cast<size_t>(K_)) {
+      throw std::runtime_error("Matmul2DTask: A size mismatch");
+    }
+    size_t want_B = w_transposed_ ? (static_cast<size_t>(N_) * static_cast<size_t>(K_))
+                                  : (static_cast<size_t>(K_) * static_cast<size_t>(N_));
+    if (B_.size() != want_B) {
+      throw std::runtime_error("Matmul2DTask: B size mismatch");
+    }
+    if (out_.size() != static_cast<size_t>(M_) * static_cast<size_t>(N_)) {
+      throw std::runtime_error("Matmul2DTask: out size mismatch");
+    }
+    if (a_tri_.size() != A_.size()) throw std::runtime_error("Matmul2DTask: a triple size mismatch");
+    if (b_tri_.size() != B_.size()) throw std::runtime_error("Matmul2DTask: b triple size mismatch");
+    if (c_tri_.size() != out_.size()) throw std::runtime_error("Matmul2DTask: c triple size mismatch");
+  }
+
+  bool done() const override { return st_ == St::Done; }
+
+  runtime::detail::Need step(runtime::PhaseResources& R) override {
+    switch (st_) {
+      case St::Init: {
+        if (!R.opens) throw std::runtime_error("Matmul2DTask: OpenCollector missing");
+        const size_t A_words = static_cast<size_t>(M_) * static_cast<size_t>(K_);
+        const size_t B_words = B_.size();
+        diff_.resize(A_words + B_words);
+        for (size_t i = 0; i < A_words; ++i) diff_[i] = proto::sub_mod(A_[i], a_tri_[i]);
+        for (size_t i = 0; i < B_words; ++i) diff_[A_words + i] = proto::sub_mod(B_[i], b_tri_[i]);
+        h_open_ = R.opens->enqueue(diff_);
+        st_ = St::WaitOpen;
+        return runtime::detail::Need::Open;
+      }
+      case St::WaitOpen: {
+        if (!R.opens->ready(h_open_)) return runtime::detail::Need::Open;
+        auto opened = R.opens->view(h_open_);
+        const size_t A_words = static_cast<size_t>(M_) * static_cast<size_t>(K_);
+        const size_t B_words = B_.size();
+        if (opened.size() != A_words + B_words) {
+          throw std::runtime_error("Matmul2DTask: opened size mismatch");
+        }
+        for (int m = 0; m < M_; ++m) {
+          for (int n = 0; n < N_; ++n) {
+            __int128 acc = static_cast<__int128>(to_signed(c_tri_[static_cast<size_t>(m) * static_cast<size_t>(N_) +
+                                                                static_cast<size_t>(n)]));
+            for (int k = 0; k < K_; ++k) {
+              size_t aidx = static_cast<size_t>(m) * static_cast<size_t>(K_) + static_cast<size_t>(k);
+              size_t bidx = w_transposed_
+                                ? (static_cast<size_t>(n) * static_cast<size_t>(K_) + static_cast<size_t>(k))
+                                : (static_cast<size_t>(k) * static_cast<size_t>(N_) + static_cast<size_t>(n));
+              int64_t e = opened[aidx];
+              int64_t f = opened[A_words + bidx];
+              acc += static_cast<__int128>(e) * static_cast<__int128>(to_signed(b_tri_[bidx]));
+              acc += static_cast<__int128>(to_signed(a_tri_[aidx])) * static_cast<__int128>(f);
+              if (R.party == 0) acc += static_cast<__int128>(e) * static_cast<__int128>(f);
+            }
+            if (mul_const_) {
+              acc = (acc * static_cast<__int128>(*mul_const_)) >> mul_shift_;
+            }
+            out_[static_cast<size_t>(m) * static_cast<size_t>(N_) + static_cast<size_t>(n)] =
+                static_cast<uint64_t>(acc);
+          }
+        }
+        st_ = St::Done;
+        return runtime::detail::Need::None;
+      }
+      case St::Done:
+        return runtime::detail::Need::None;
+    }
+    return runtime::detail::Need::None;
+  }
+
+ private:
+  enum class St { Init, WaitOpen, Done } st_ = St::Init;
+  int M_ = 0, K_ = 0, N_ = 0;
+  std::span<const uint64_t> A_;
+  std::span<const uint64_t> B_;
+  std::span<uint64_t> out_;
+  std::span<const uint64_t> a_tri_;
+  std::span<const uint64_t> b_tri_;
+  std::span<const uint64_t> c_tri_;
+  bool w_transposed_ = false;
+  std::optional<int64_t> mul_const_;
+  int mul_shift_ = 0;
+  std::vector<uint64_t> diff_;
+  runtime::OpenHandle h_open_{};
+};
 
 }  // namespace
 
@@ -329,7 +549,7 @@ void attention_forward(const AttentionConfig& cfg,
     const auto& st = planner.stats();
     if (st.coeff_jobs == 0 && st.trunc_jobs == 0 && st.coeff_flushes == 0 && st.trunc_flushes == 0) return;
     ctx->pfss_layer_planner->record_phase(planner, pe->pfss_coeff_batch(), pe->pfss_trunc_batch());
-    if (party == 0) {
+    if (party == 0 && bench_trace_enabled()) {
       std::cerr << "[pfss-phase][attn] coeff_jobs=" << st.coeff_jobs
                 << " trunc_jobs=" << st.trunc_jobs
                 << " coeff_flushes=" << st.coeff_flushes
@@ -383,7 +603,7 @@ void attention_forward(const AttentionConfig& cfg,
   trunc_params_qkv.frac_bits = fb;
   trunc_params_qkv.range_hint = compiler::matmul_accum_range(
       q_range, wqkv_range, D);
-  trunc_params_qkv.per_element_masks = true;
+  trunc_params_qkv.per_element_masks = per_element_masks_enabled();
   compiler::AbsBound qkv_acc_abs =
       compiler::matmul_accum_abs(have_x_abs ? x_abs_hint : compiler::abs_from_range(q_range, true),
                                  wqkv_abs,
@@ -459,12 +679,12 @@ void attention_forward(const AttentionConfig& cfg,
       gates::make_recip_affine_init_spec(fb, static_cast<double>(std::max(cache.S_max, T + init_len)));
   compiler::RangeInterval recip_range = clamp_recip_range(
       fb, static_cast<double>(std::max(cache.S_max, T + init_len)));
-  std::optional<gates::NexpTaskMaterial> nexp_mat;
+  std::shared_ptr<gates::NexpTaskMaterial> nexp_mat;
   runtime::CubicPolyBundle nexp_bundle{};
-  std::optional<gates::RecipTaskMaterial> recip_mat;
+  std::shared_ptr<gates::RecipTaskMaterial> recip_mat;
   runtime::RecipTaskBundle recip_bundle{};
-  std::optional<compiler::TruncationLoweringResult> prob_gapars;
-  std::optional<compiler::TruncationLoweringResult> prob_faithful;
+  std::shared_ptr<compiler::TruncationLoweringResult> prob_gapars;
+  std::shared_ptr<compiler::TruncationLoweringResult> prob_faithful;
   runtime::TruncChoice prob_choice{};
   runtime::PhaseResources phase_R{};
   phase_R.party = party;
@@ -502,42 +722,105 @@ void attention_forward(const AttentionConfig& cfg,
     open_lim.max_pending_words = 1ull << 22;
     pe->open_collector().set_limits(open_lim);
     pe->set_max_flushes(1ull << 11);
+    const bool is_gpu = ctx && ctx->uses_gpu_backend();
+    const size_t softmax_rows_mat = cfg.causal ? (B * H) : (B * H * T);
+    const size_t softmax_cols_mat = cfg.causal ? cache.S_max : T;
+    const size_t batch_N = softmax_rows_mat * softmax_cols_mat;
     // Extra triples for tighter planner bytes test; use generous pool.
-    size_t triple_need = 6 * cache.S_max * B * H;
-    nexp_mat = gates::dealer_make_nexp_task_material(ctx->trunc_backend(),
-                                                     nexp_params,
-                                                     rng,
-                                                     triple_need,
-                                                     static_cast<size_t>(B * H * cache.S_max));
-    nexp_bundle = gates::make_nexp_cubic_bundle(*nexp_mat, fb);
+    size_t triple_need = 6 * batch_N;
+    {
+      if (bench_cache_enabled()) {
+        static std::mutex mu;
+        static std::unordered_map<SoftmaxMatKey, std::shared_ptr<gates::NexpTaskMaterial>, SoftmaxMatKeyHash> cache_map;
+        SoftmaxMatKey key{is_gpu, fb, batch_N, triple_need, /*which=*/0, /*nr_iters=*/0};
+        std::lock_guard<std::mutex> lk(mu);
+        auto it = cache_map.find(key);
+        if (it == cache_map.end()) {
+          auto mat = std::make_shared<gates::NexpTaskMaterial>(gates::dealer_make_nexp_task_material(
+              ctx->trunc_backend(), nexp_params, rng, triple_need, batch_N));
+          it = cache_map.emplace(key, std::move(mat)).first;
+        }
+        nexp_mat = it->second;
+      } else {
+        nexp_mat = std::make_shared<gates::NexpTaskMaterial>(gates::dealer_make_nexp_task_material(
+            ctx->trunc_backend(), nexp_params, rng, triple_need, batch_N));
+      }
+      nexp_bundle = gates::make_nexp_cubic_bundle(*nexp_mat, fb);
+    }
     // Allocate a generous pool of triples to cover packed truncations in stress tests.
-    size_t recip_triples = std::max<size_t>(B * H * cache.S_max * 4, 256);
-    recip_mat = gates::dealer_make_recip_task_material(ctx->trunc_backend(),
-                                                       fb,
-                                                       /*nr_iters=*/1,
-                                                       rng,
-                                                       recip_triples);
-    recip_bundle = gates::make_recip_bundle(*recip_mat);
+    size_t recip_triples = std::max<size_t>(B * H * (cfg.causal ? cache.S_max : T) * 4, 256);
+    {
+      constexpr int nr_iters = 1;
+      if (bench_cache_enabled()) {
+        static std::mutex mu;
+        static std::unordered_map<SoftmaxMatKey, std::shared_ptr<gates::RecipTaskMaterial>, SoftmaxMatKeyHash> cache_map;
+        SoftmaxMatKey key{is_gpu, fb, batch_N, recip_triples, /*which=*/1, /*nr_iters=*/nr_iters};
+        std::lock_guard<std::mutex> lk(mu);
+        auto it = cache_map.find(key);
+        if (it == cache_map.end()) {
+          auto mat = std::make_shared<gates::RecipTaskMaterial>(gates::dealer_make_recip_task_material(
+              ctx->trunc_backend(), fb, nr_iters, rng, recip_triples));
+          it = cache_map.emplace(key, std::move(mat)).first;
+        }
+        recip_mat = it->second;
+      } else {
+        recip_mat = std::make_shared<gates::RecipTaskMaterial>(gates::dealer_make_recip_task_material(
+            ctx->trunc_backend(), fb, nr_iters, rng, recip_triples));
+      }
+      recip_bundle = gates::make_recip_bundle(*recip_mat);
+    }
       compiler::GateParams gap_p;
       gap_p.kind = compiler::GateKind::AutoTrunc;
       gap_p.frac_bits = fb;
       gap_p.range_hint = clamp_softmax_range(fb);
-      gap_p.per_element_masks = true;
+      gap_p.per_element_masks = per_element_masks_enabled();
       gap_p.abs_hint = compiler::AbsBound{
           /*is_signed=*/true,
           static_cast<uint64_t>(1ull << fb),
           compiler::RangeKind::Proof};
       gap_p.gap_hint =
           compiler::gap_from_abs(gap_p.abs_hint, fb, compiler::default_mask_bound(fb));
-    prob_gapars = compiler::lower_truncation_gate(
-        ctx->trunc_backend(), rng, gap_p, static_cast<size_t>(B * H * cache.S_max));
+    {
+      if (bench_cache_enabled()) {
+        static std::mutex mu;
+        static std::unordered_map<SoftmaxMatKey, std::shared_ptr<compiler::TruncationLoweringResult>, SoftmaxMatKeyHash> cache_map;
+        SoftmaxMatKey key{is_gpu, fb, batch_N, /*triple_need=*/0, /*which=*/2, /*nr_iters=*/0};
+        std::lock_guard<std::mutex> lk(mu);
+        auto it = cache_map.find(key);
+        if (it == cache_map.end()) {
+          auto res = std::make_shared<compiler::TruncationLoweringResult>(
+              compiler::lower_truncation_gate(ctx->trunc_backend(), rng, gap_p, batch_N));
+          it = cache_map.emplace(key, std::move(res)).first;
+        }
+        prob_gapars = it->second;
+      } else {
+        prob_gapars = std::make_shared<compiler::TruncationLoweringResult>(
+            compiler::lower_truncation_gate(ctx->trunc_backend(), rng, gap_p, batch_N));
+      }
+    }
     compiler::GateParams faithful_p;
     faithful_p.kind = compiler::GateKind::FaithfulTR;
     faithful_p.frac_bits = fb;
-    prob_faithful = compiler::lower_truncation_gate(
-        ctx->trunc_backend(), rng, faithful_p, static_cast<size_t>(B * H * cache.S_max));
-    prob_choice.gapars = prob_gapars ? &*prob_gapars : nullptr;
-    prob_choice.faithful = prob_faithful ? &*prob_faithful : nullptr;
+    {
+      if (bench_cache_enabled()) {
+        static std::mutex mu;
+        static std::unordered_map<SoftmaxMatKey, std::shared_ptr<compiler::TruncationLoweringResult>, SoftmaxMatKeyHash> cache_map;
+        SoftmaxMatKey key{is_gpu, fb, batch_N, /*triple_need=*/0, /*which=*/3, /*nr_iters=*/0};
+        std::lock_guard<std::mutex> lk(mu);
+        auto it = cache_map.find(key);
+        if (it == cache_map.end()) {
+          auto res = std::make_shared<compiler::TruncationLoweringResult>(
+              compiler::lower_truncation_gate(ctx->trunc_backend(), rng, faithful_p, batch_N));
+          it = cache_map.emplace(key, std::move(res)).first;
+        }
+        prob_faithful = it->second;
+      } else {
+        prob_faithful = std::make_shared<compiler::TruncationLoweringResult>(
+            compiler::lower_truncation_gate(ctx->trunc_backend(), rng, faithful_p, batch_N));
+      }
+    }
+    prob_choice.gapars = prob_gapars ? prob_gapars.get() : nullptr;
+    prob_choice.faithful = prob_faithful ? prob_faithful.get() : nullptr;
     prob_choice.shift_bits = fb;
     prob_choice.signed_value = false;  // probabilities are non-negative
     phase_R.pfss_backend = &ctx->trunc_backend();
@@ -555,8 +838,257 @@ void attention_forward(const AttentionConfig& cfg,
       std::llround((1.0 / std::sqrt(static_cast<double>(Dh))) * std::ldexp(1.0, fb)));
   if (inv_sqrt == 0) inv_sqrt = 1;
 
-  std::vector<uint64_t> stepK(B * H * Dh, 0), stepV(B * H * Dh, 0);
-  for (size_t t = 0; t < T; ++t) {
+  if (!cfg.causal) {
+    if (!use_phase_softmax) {
+      throw std::runtime_error("attention_forward: encoder attention requires phase softmax path");
+    }
+
+    const bool is_gpu = ctx && ctx->uses_gpu_backend();
+    const size_t rows_all = B * H * T;
+    const size_t cols_all = T;
+
+    // Materialize Q/K/V per (batch,head) as contiguous [T x Dh] blocks.
+    std::vector<uint64_t> Q_all(B * H * T * Dh, 0);
+    std::vector<uint64_t> K_all(B * H * T * Dh, 0);
+    std::vector<uint64_t> V_all(B * H * T * Dh, 0);
+    for (size_t b = 0; b < B; ++b) {
+      for (size_t t = 0; t < T; ++t) {
+        size_t base = (b * T + t) * 3 * D;
+        const uint64_t* q_ptr = qkv.data() + base;
+        const uint64_t* k_ptr = qkv.data() + base + D;
+        const uint64_t* v_ptr = qkv.data() + base + 2 * D;
+        for (size_t h = 0; h < H; ++h) {
+          const size_t head_base = (b * H + h) * T * Dh + t * Dh;
+          for (size_t d = 0; d < Dh; ++d) {
+            Q_all[head_base + d] = q_ptr[h * Dh + d];
+            K_all[head_base + d] = k_ptr[h * Dh + d];
+            V_all[head_base + d] = v_ptr[h * Dh + d];
+          }
+        }
+      }
+    }
+
+    std::vector<uint64_t> score_scaled_q2f(rows_all * cols_all, 0);
+    std::vector<uint64_t> score_scaled_qf(rows_all * cols_all, 0);
+
+    std::shared_ptr<compiler::TruncationLoweringResult> score_trunc_bundle;
+    {
+      compiler::GateParams score_trunc_p;
+      score_trunc_p.kind = compiler::GateKind::AutoTrunc;
+      score_trunc_p.frac_bits = fb;
+      score_trunc_p.range_hint = compiler::matmul_accum_range(q_range, q_range, Dh);
+      score_trunc_p.per_element_masks = per_element_masks_enabled();
+      compiler::AbsBound q_abs = have_qkv_abs ? qkv_abs_hint : compiler::abs_from_range(q_range, true);
+      compiler::AbsBound score_abs = compiler::matmul_accum_abs(q_abs, q_abs, Dh);
+      score_trunc_p.abs_hint = score_abs;
+      if (score_abs.kind == compiler::RangeKind::Proof) {
+        score_trunc_p.gap_hint =
+            compiler::gap_from_abs(score_abs, fb, compiler::default_mask_bound(fb));
+      }
+      if (bench_cache_enabled()) {
+        static std::mutex mu;
+        static std::unordered_map<SoftmaxMatKey, std::shared_ptr<compiler::TruncationLoweringResult>, SoftmaxMatKeyHash> cache_map;
+        SoftmaxMatKey k{is_gpu, fb, rows_all * cols_all, /*triple_need=*/0, /*which=*/4, /*nr_iters=*/0};
+        std::lock_guard<std::mutex> lk(mu);
+        auto it = cache_map.find(k);
+        if (it == cache_map.end()) {
+          std::mt19937_64 rng_score(0x656e63736f7265ull);
+          auto res = std::make_shared<compiler::TruncationLoweringResult>(
+              compiler::lower_truncation_gate(ctx->trunc_backend(), rng_score, score_trunc_p, rows_all * cols_all));
+          it = cache_map.emplace(k, std::move(res)).first;
+        }
+        score_trunc_bundle = it->second;
+      } else {
+        std::mt19937_64 rng_score(0x656e63736f7265ull);
+        score_trunc_bundle = std::make_shared<compiler::TruncationLoweringResult>(
+            compiler::lower_truncation_gate(ctx->trunc_backend(), rng_score, score_trunc_p, rows_all * cols_all));
+      }
+    }
+
+    // Compute scores per (batch,head): Q[T x Dh] * K^T[Dh x T] -> Q2f, fold inv_sqrt scaling.
+    pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
+    enter_phase();
+    for (size_t b = 0; b < B; ++b) {
+      for (size_t h = 0; h < H; ++h) {
+        const size_t head_base = (b * H + h) * T * Dh;
+        const size_t out_base = (b * H + h) * T * T;
+        MatmulTripleKey tri_key;
+        tri_key.is_gpu = is_gpu;
+        tri_key.frac_bits = fb;
+        tri_key.M = static_cast<int>(T);
+        tri_key.K = static_cast<int>(Dh);
+        tri_key.N = static_cast<int>(T);
+        tri_key.w_transposed = true;
+        tri_key.domain = 0x73636f7265ull;  // "score"
+        const auto& tri = get_cached_matmul_triple(tri_key, party);
+        pe->add_task(std::make_unique<Matmul2DTask>(
+            static_cast<int>(T),
+            static_cast<int>(Dh),
+            static_cast<int>(T),
+            std::span<const uint64_t>(Q_all.data() + head_base, T * Dh),
+            std::span<const uint64_t>(K_all.data() + head_base, T * Dh),  // stored as [N x K]
+            std::span<uint64_t>(score_scaled_q2f.data() + out_base, T * T),
+            std::span<const uint64_t>(tri.A_share.data(), tri.A_share.size()),
+            std::span<const uint64_t>(tri.B_share.data(), tri.B_share.size()),
+            std::span<const uint64_t>(tri.C_share.data(), tri.C_share.size()),
+            /*w_transposed=*/true,
+            std::optional<int64_t>(inv_sqrt),
+            /*mul_shift=*/fb));
+      }
+    }
+    pe->run(phase_R);
+    barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
+                                                     .drain_pfss_coeff = true,
+                                                     .drain_pfss_trunc = true});
+    record_phase_plan(phase_planner);
+
+    // Truncate scores (scaled) Q2f -> Qf.
+    {
+      pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
+      enter_phase();
+      pe->add_task(std::make_unique<runtime::TruncTask>(
+          score_trunc_bundle.get(),
+          std::span<const uint64_t>(score_scaled_q2f.data(), score_scaled_q2f.size()),
+          std::span<uint64_t>(score_scaled_qf.data(), score_scaled_qf.size())));
+      pe->run(phase_R);
+      barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
+                                                       .drain_pfss_coeff = true,
+                                                       .drain_pfss_trunc = true});
+      record_phase_plan(phase_planner);
+    }
+
+    // Softmax over all (batch,head,token) rows.
+    std::vector<uint64_t> prob_shares(rows_all * cols_all, 0);
+    {
+      static CachedRowBroadcastTripleProvider row_triples_p0(/*party=*/0);
+      static CachedRowBroadcastTripleProvider row_triples_p1(/*party=*/1);
+      auto& row_triples = (party == 0) ? row_triples_p0 : row_triples_p1;
+
+      runtime::TruncChoice choice = prob_choice;
+      if (!choice.faithful) choice.faithful = recip_bundle.trunc_fb;
+      if (!choice.gapars) choice.gapars = choice.faithful;
+
+      nn::SoftmaxPlan plan;
+      plan.frac_bits = fb;
+      plan.rows = static_cast<int>(rows_all);
+      plan.cols = static_cast<int>(cols_all);
+      plan.input_is_max_diff = false;  // open scores to compute stable max-diff
+      plan.nexp = nexp_bundle;
+      plan.recip = recip_bundle;
+      plan.prob_trunc = choice;
+      plan.row_triples = &row_triples;
+      plan.prob_range = clamp_softmax_range(fb);
+
+      pe->begin_phase(runtime::PhaseExecutor::Phase::kSoftmax);
+      enter_phase();
+      pe->add_task(std::make_unique<nn::SoftmaxBlockTask>(
+          plan,
+          std::span<const uint64_t>(score_scaled_qf.data(), score_scaled_qf.size()),
+          std::span<uint64_t>(prob_shares.data(), prob_shares.size())));
+      pe->run(phase_R);
+      barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
+                                                       .drain_pfss_coeff = true,
+                                                       .drain_pfss_trunc = true});
+      record_phase_plan(phase_planner);
+    }
+
+    // Context matmul per head: Prob[T x T] * V[T x Dh] -> ctx Q2f, then trunc once for all heads.
+    std::vector<uint64_t> ctx_q2f(B * H * T * Dh, 0);
+    std::vector<uint64_t> ctx_qf(B * H * T * Dh, 0);
+
+    std::shared_ptr<compiler::TruncationLoweringResult> ctx_trunc_bundle;
+    {
+      compiler::GateParams ctx_trunc_p;
+      ctx_trunc_p.kind = compiler::GateKind::AutoTrunc;
+      ctx_trunc_p.frac_bits = fb;
+      ctx_trunc_p.range_hint = clamp_softmax_range(fb);
+      ctx_trunc_p.abs_hint = compiler::AbsBound{/*is_signed=*/true,
+                                               static_cast<uint64_t>(1ull << fb),
+                                               compiler::RangeKind::Proof};
+      ctx_trunc_p.gap_hint =
+          compiler::gap_from_abs(ctx_trunc_p.abs_hint, fb, compiler::default_mask_bound(fb));
+      if (bench_cache_enabled()) {
+        static std::mutex mu;
+        static std::unordered_map<SoftmaxMatKey, std::shared_ptr<compiler::TruncationLoweringResult>, SoftmaxMatKeyHash> cache_map;
+        SoftmaxMatKey k{is_gpu, fb, B * H * T * Dh, /*triple_need=*/0, /*which=*/5, /*nr_iters=*/0};
+        std::lock_guard<std::mutex> lk(mu);
+        auto it = cache_map.find(k);
+        if (it == cache_map.end()) {
+          std::mt19937_64 rng_ctx(0x656e6363747874ull);
+          auto res = std::make_shared<compiler::TruncationLoweringResult>(
+              compiler::lower_truncation_gate(ctx->trunc_backend(), rng_ctx, ctx_trunc_p, B * H * T * Dh));
+          it = cache_map.emplace(k, std::move(res)).first;
+        }
+        ctx_trunc_bundle = it->second;
+      } else {
+        std::mt19937_64 rng_ctx(0x656e6363747874ull);
+        ctx_trunc_bundle = std::make_shared<compiler::TruncationLoweringResult>(
+            compiler::lower_truncation_gate(ctx->trunc_backend(), rng_ctx, ctx_trunc_p, B * H * T * Dh));
+      }
+    }
+
+    pe->begin_phase(runtime::PhaseExecutor::Phase::kSoftmax);
+    enter_phase();
+    for (size_t b = 0; b < B; ++b) {
+      for (size_t h = 0; h < H; ++h) {
+        const size_t head_base = (b * H + h) * T * Dh;
+        const size_t prob_base = (b * H + h) * T * T;
+        const size_t out_base = (b * H + h) * T * Dh;
+        MatmulTripleKey tri_key;
+        tri_key.is_gpu = is_gpu;
+        tri_key.frac_bits = fb;
+        tri_key.M = static_cast<int>(T);
+        tri_key.K = static_cast<int>(T);
+        tri_key.N = static_cast<int>(Dh);
+        tri_key.w_transposed = false;
+        tri_key.domain = 0x63747874ull;  // "ctxt"
+        const auto& tri = get_cached_matmul_triple(tri_key, party);
+        pe->add_task(std::make_unique<Matmul2DTask>(
+            static_cast<int>(T),
+            static_cast<int>(T),
+            static_cast<int>(Dh),
+            std::span<const uint64_t>(prob_shares.data() + prob_base, T * T),
+            std::span<const uint64_t>(V_all.data() + head_base, T * Dh),
+            std::span<uint64_t>(ctx_q2f.data() + out_base, T * Dh),
+            std::span<const uint64_t>(tri.A_share.data(), tri.A_share.size()),
+            std::span<const uint64_t>(tri.B_share.data(), tri.B_share.size()),
+            std::span<const uint64_t>(tri.C_share.data(), tri.C_share.size()),
+            /*w_transposed=*/false));
+      }
+    }
+    pe->run(phase_R);
+    barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
+                                                     .drain_pfss_coeff = true,
+                                                     .drain_pfss_trunc = true});
+    record_phase_plan(phase_planner);
+
+    {
+      pe->begin_phase(runtime::PhaseExecutor::Phase::kSoftmax);
+      enter_phase();
+      pe->add_task(std::make_unique<runtime::TruncTask>(
+          ctx_trunc_bundle.get(),
+          std::span<const uint64_t>(ctx_q2f.data(), ctx_q2f.size()),
+          std::span<uint64_t>(ctx_qf.data(), ctx_qf.size())));
+      pe->run(phase_R);
+      barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
+                                                       .drain_pfss_coeff = true,
+                                                       .drain_pfss_trunc = true});
+      record_phase_plan(phase_planner);
+    }
+
+    // Scatter into ctx_shares [B x T x H x Dh].
+    for (size_t b = 0; b < B; ++b) {
+      for (size_t t = 0; t < T; ++t) {
+        for (size_t h = 0; h < H; ++h) {
+          const size_t src_base = (b * H + h) * T * Dh + t * Dh;
+          const size_t dst_base = ((b * T + t) * H + h) * Dh;
+          std::memcpy(ctx_shares.data() + dst_base, ctx_qf.data() + src_base, Dh * sizeof(uint64_t));
+        }
+      }
+    }
+  } else {
+    std::vector<uint64_t> stepK(B * H * Dh, 0), stepV(B * H * Dh, 0);
+    for (size_t t = 0; t < T; ++t) {
     // Slice K/V for this token.
     for (size_t b = 0; b < B; ++b) {
       size_t base = (b * T + t) * 3 * D;
@@ -702,7 +1234,7 @@ void attention_forward(const AttentionConfig& cfg,
         compiler::matmul_accum_range(q_range, q_range, Dh);
     score_trunc_p.kind = compiler::GateKind::AutoTrunc;
     score_trunc_p.range_hint = score_acc_range;
-    score_trunc_p.per_element_masks = true;
+    score_trunc_p.per_element_masks = per_element_masks_enabled();
     compiler::AbsBound q_abs = have_qkv_abs ? qkv_abs_hint : compiler::abs_from_range(q_range, true);
     compiler::AbsBound score_acc_abs = compiler::matmul_accum_abs(q_abs, q_abs, Dh);
     score_trunc_p.abs_hint = score_acc_abs;
@@ -999,6 +1531,7 @@ void attention_forward(const AttentionConfig& cfg,
                                                        .drain_pfss_trunc = true});
       record_phase_plan(phase_planner);
     }
+  }
   }
 
   std::vector<uint64_t> merged(B * T * D, 0);

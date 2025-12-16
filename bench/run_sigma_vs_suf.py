@@ -82,11 +82,28 @@ def sigma_output_dir(sigma_root: Path, party: int, model: str, seq_len: int) -> 
     # SIGMA writes to output/P<party>/models/<model>-<seq_len>/
     return sigma_root / "output" / f"P{party}" / "models" / f"{model}-{seq_len}"
 
+def sigma_model_name(cfg: Dict[str, Any], model: str) -> str:
+    # Allow config overrides for mismatched naming between this repo and SIGMA's CLI.
+    overrides = cfg.get("sigma_model_map", {})
+    if isinstance(overrides, dict) and model in overrides:
+        return str(overrides[model])
+    default = {
+        # SIGMA CLI names (see EzPC GPU-MPC/experiments/sigma/sigma.cu).
+        "gpt-neo-1.3b": "gpt-neo",
+        "gpt-neo": "gpt-neo",
+        "llama-7b": "llama7b",
+        "llama2-7b": "llama7b",
+        "llama-13b": "llama13b",
+        "llama2-13b": "llama13b",
+    }
+    return default.get(model, model)
+
 
 def run_sigma_local(
     sigma_root: Path,
     sigma_bin: Path,
     model: str,
+    model_label: Optional[str],
     seq_len: int,
     cpu_threads: int,
     timeout_s: int,
@@ -138,7 +155,8 @@ def run_sigma_local(
     info: Dict[str, Any] = {
         "system": "sigma",
         "backend": "gpu",
-        "model": model,
+        "model": model_label or model,
+        "sigma_model": model,
         "seq_len": seq_len,
         "paths": {"p0_log": str(p0_log), "p1_log": str(p1_log)},
         "timing": {"wall_time_s": time.time() - started},
@@ -243,14 +261,16 @@ def main() -> None:
     for model in models:
         for seq_len in seq_lens:
             # SIGMA: one run per (model, seq_len)
+            sigma_cli_model = sigma_model_name(cfg, model)
             sigma_log = results_dir / f"sigma_{model}_L{seq_len}.json"
             if args.dry_run:
-                print(f"[dry] sigma: {sigma_bin} {model} {seq_len} 0/1 127.0.0.1 {sigma_cpu_threads}")
+                print(f"[dry] sigma: {sigma_bin} {sigma_cli_model} {seq_len} 0/1 127.0.0.1 {sigma_cpu_threads}")
             else:
                 ok, sigma_row = run_sigma_local(
                     sigma_root=sigma_root,
                     sigma_bin=sigma_bin,
-                    model=model,
+                    model=sigma_cli_model,
+                    model_label=model,
                     seq_len=seq_len,
                     cpu_threads=sigma_cpu_threads,
                     timeout_s=args.timeout_sigma_s,

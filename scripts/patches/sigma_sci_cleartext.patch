@@ -1,0 +1,14 @@
+diff --git a/GPU-MPC/ext/sytorch/ext/sci/src/cleartext_library_float.h b/GPU-MPC/ext/sytorch/ext/sci/src/cleartext_library_float.h
+index 1e317cf..14a7a45 100644
+--- a/GPU-MPC/ext/sytorch/ext/sci/src/cleartext_library_float.h
++++ b/GPU-MPC/ext/sytorch/ext/sci/src/cleartext_library_float.h
+@@ -22,8 +22,9 @@ SOFTWARE.
+ #ifndef LIBRARY_CLEARTEXT_FLOAT_H__
+ #define LIBRARY_CLEARTEXT_FLOAT_H__
+ 
++#include <cstdint>
+ #include <vector>
+ #include <math.h>
+ #include <cstdlib>
+ #include <iostream>
+ #include <fstream>

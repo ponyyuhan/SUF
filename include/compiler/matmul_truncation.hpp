@@ -2,12 +2,25 @@
 
 #include <random>
 #include <optional>
+#include <algorithm>
+#include <cctype>
+#include <cstdlib>
+#include <string>
 
 #include "compiler/range_analysis.hpp"
 #include "compiler/truncation_lowering.hpp"
 #include "proto/pfss_backend_batch.hpp"
 
 namespace compiler {
+
+inline bool per_element_masks_enabled_from_env() {
+  const char* env = std::getenv("SUF_PER_ELEMENT_MASKS");
+  if (!env) return true;
+  std::string v(env);
+  std::transform(v.begin(), v.end(), v.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return !(v == "0" || v == "false" || v == "off" || v == "no");
+}
 
 // Bundle capturing truncation lowering + metadata for a single matmul.
 struct MatmulTruncationPlan {
@@ -46,7 +59,7 @@ inline MatmulTruncationPlan compile_matmul_truncation(proto::PfssBackendBatch& b
     accum_abs.kind = RangeKind::Proof;
   }
   // Matmul outputs: opt in to per-element masks for better masking hygiene.
-  params.per_element_masks = true;
+  params.per_element_masks = per_element_masks_enabled_from_env();
   params.abs_hint = accum_abs;
   params.gap_hint = gap_cert;
   params.kind = select_trunc_kind(accum_abs, frac_bits, gap_cert);

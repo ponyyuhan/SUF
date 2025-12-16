@@ -1,0 +1,16 @@
+{
+  "models": ["bert-base", "bert-large", "gpt2", "gpt-neo-1.3b"],
+  "seq_lens": [128],
+  "batch_sizes": [1],
+  "backends": ["gpu"],
+  "n_iters": 2,
+  "sigma_root": "external/sigma_ezpc/GPU-MPC/experiments/sigma",
+  "sigma_binary": "sigma",
+  "sigma_cpu_threads": 64,
+  "sigma_model_map": {
+    "gpt-neo-1.3b": "gpt-neo"
+  },
+  "results_dir": "bench/results/large_models",
+  "suf_binary": "build_ninja/bench_suf_transformer",
+  "notes": "End-to-end transformer forward-pass comparison (time + online comm + offline key material). Sigma runs two local parties on 127.0.0.1."
+}

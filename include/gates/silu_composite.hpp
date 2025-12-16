@@ -51,7 +51,8 @@ inline SiluTaskMaterial dealer_make_silu_task_material(proto::PfssBackendBatch& 
                                                        size_t batch_N = 1) {
   auto spec = make_silu_spec({frac_bits, 16});
   static bool logged = false;
-  if (!logged) {
+  const bool trace = std::getenv("SUF_BENCH_TRACE") != nullptr;
+  if (trace && !logged) {
     logged = true;
     std::cerr << "SiLU intervals (first 32): ";
     for (size_t i = 0; i < spec.intervals.size() && i < 32; ++i) {
@@ -62,10 +63,12 @@ inline SiluTaskMaterial dealer_make_silu_task_material(proto::PfssBackendBatch& 
     std::cerr << "\n";
   }
   auto suf_gate = suf::build_silu_suf_from_piecewise(spec);
-  std::cerr << "dealer_make_silu_task_material suf ptr=" << static_cast<const void*>(&suf_gate)
-            << " frac_bits=" << frac_bits << " alpha_size=" << suf_gate.alpha.size() << "\n";
+  if (trace) {
+    std::cerr << "dealer_make_silu_task_material suf ptr=" << static_cast<const void*>(&suf_gate)
+              << " frac_bits=" << frac_bits << " alpha_size=" << suf_gate.alpha.size() << "\n";
+  }
   static bool logged_alpha = false;
-  if (!logged_alpha) {
+  if (trace && !logged_alpha) {
     logged_alpha = true;
     std::cerr << "SiLU SUF alpha (first 32): ";
     for (size_t i = 0; i < suf_gate.alpha.size() && i < 32; ++i) {

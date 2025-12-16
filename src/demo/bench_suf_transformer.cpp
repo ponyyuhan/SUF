@@ -8,12 +8,14 @@
 #include <csignal>
 #include <execinfo.h>
 #include <cstdlib>
+#include <atomic>
 #include <mutex>
 #include <queue>
 #include <random>
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <algorithm>
 #include <vector>
 #include <cstring>
 #if __has_include(<span>)
@@ -126,33 +128,137 @@ struct CountingChan : proto::IChannel {
 };
 
 struct CountingNetChan : net::Chan {
+  struct Ring {
+    explicit Ring(size_t cap_pow2 = (1ull << 20)) : buf(cap_pow2, 0), mask(cap_pow2 - 1) {
+      if ((cap_pow2 & (cap_pow2 - 1)) != 0) throw std::runtime_error("Ring: capacity must be power of two");
+    }
+    std::vector<uint64_t> buf;
+    size_t mask = 0;
+    std::atomic<uint64_t> head{0};
+    std::atomic<uint64_t> tail{0};
+
+    void reset() {
+      head.store(0, std::memory_order_relaxed);
+      tail.store(0, std::memory_order_relaxed);
+    }
+
+    static inline void spin_pause() {
+#if defined(__x86_64__) || defined(_M_X64)
+      for (int i = 0; i < 64; ++i) __builtin_ia32_pause();
+#else
+      std::this_thread::yield();
+#endif
+    }
+
+    void push(uint64_t v) {
+      uint64_t h = head.load(std::memory_order_relaxed);
+      for (;;) {
+        uint64_t t = tail.load(std::memory_order_acquire);
+        if (h - t < buf.size()) break;
+        spin_pause();
+      }
+      buf[static_cast<size_t>(h) & mask] = v;
+      head.store(h + 1, std::memory_order_release);
+    }
+
+    void push_many(const uint64_t* src, size_t n) {
+      if (n == 0) return;
+      const uint64_t cap = static_cast<uint64_t>(buf.size());
+      size_t off = 0;
+      uint64_t h = head.load(std::memory_order_relaxed);
+      while (off < n) {
+        size_t chunk = std::min(n - off, static_cast<size_t>(cap));
+        for (;;) {
+          uint64_t t = tail.load(std::memory_order_acquire);
+          if (h + static_cast<uint64_t>(chunk) - t <= cap) break;
+          spin_pause();
+        }
+        size_t idx = static_cast<size_t>(h) & mask;
+        size_t first = std::min(chunk, buf.size() - idx);
+        std::memcpy(&buf[idx], src + off, first * sizeof(uint64_t));
+        if (first < chunk) {
+          std::memcpy(&buf[0], src + off + first, (chunk - first) * sizeof(uint64_t));
+        }
+        h += static_cast<uint64_t>(chunk);
+        head.store(h, std::memory_order_release);
+        off += chunk;
+      }
+    }
+
+    uint64_t pop() {
+      uint64_t t = tail.load(std::memory_order_relaxed);
+      for (;;) {
+        uint64_t h = head.load(std::memory_order_acquire);
+        if (t < h) break;
+        spin_pause();
+      }
+      uint64_t v = buf[static_cast<size_t>(t) & mask];
+      tail.store(t + 1, std::memory_order_release);
+      return v;
+    }
+
+    void pop_many(uint64_t* dst, size_t n) {
+      if (n == 0) return;
+      const uint64_t cap = static_cast<uint64_t>(buf.size());
+      size_t off = 0;
+      uint64_t t = tail.load(std::memory_order_relaxed);
+      while (off < n) {
+        size_t chunk = std::min(n - off, static_cast<size_t>(cap));
+        for (;;) {
+          uint64_t h = head.load(std::memory_order_acquire);
+          if (static_cast<uint64_t>(chunk) <= (h - t)) break;
+          spin_pause();
+        }
+        size_t idx = static_cast<size_t>(t) & mask;
+        size_t first = std::min(chunk, buf.size() - idx);
+        std::memcpy(dst + off, &buf[idx], first * sizeof(uint64_t));
+        if (first < chunk) {
+          std::memcpy(dst + off + first, &buf[0], (chunk - first) * sizeof(uint64_t));
+        }
+        t += static_cast<uint64_t>(chunk);
+        tail.store(t, std::memory_order_release);
+        off += chunk;
+      }
+    }
+  };
+
   struct Shared {
-    std::mutex mu;
-    std::condition_variable cv;
-    std::queue<uint64_t> q0to1;
-    std::queue<uint64_t> q1to0;
-    uint64_t sent0 = 0;
-    uint64_t sent1 = 0;
+    Ring q0to1;
+    Ring q1to0;
+    std::atomic<uint64_t> sent0{0};
+    std::atomic<uint64_t> sent1{0};
   };
   Shared* sh = nullptr;
   bool is0 = false;
   CountingNetChan(Shared* s, bool p0) : sh(s), is0(p0) {}
   void send_u64(uint64_t v) override {
-    {
-      std::lock_guard<std::mutex> lk(sh->mu);
-      auto& q = is0 ? sh->q0to1 : sh->q1to0;
-      q.push(v);
-      if (is0) sh->sent0 += sizeof(uint64_t); else sh->sent1 += sizeof(uint64_t);
+    if (is0) {
+      sh->q0to1.push(v);
+      sh->sent0.fetch_add(sizeof(uint64_t), std::memory_order_relaxed);
+    } else {
+      sh->q1to0.push(v);
+      sh->sent1.fetch_add(sizeof(uint64_t), std::memory_order_relaxed);
     }
-    sh->cv.notify_all();
   }
   uint64_t recv_u64() override {
-    std::unique_lock<std::mutex> lk(sh->mu);
-    auto& q = is0 ? sh->q1to0 : sh->q0to1;
-    sh->cv.wait(lk, [&]{ return !q.empty(); });
-    uint64_t v = q.front();
-    q.pop();
-    return v;
+    return is0 ? sh->q1to0.pop() : sh->q0to1.pop();
+  }
+
+  void send_u64s(const uint64_t* data, size_t n) override {
+    if (n == 0) return;
+    if (is0) {
+      sh->q0to1.push_many(data, n);
+      sh->sent0.fetch_add(n * sizeof(uint64_t), std::memory_order_relaxed);
+    } else {
+      sh->q1to0.push_many(data, n);
+      sh->sent1.fetch_add(n * sizeof(uint64_t), std::memory_order_relaxed);
+    }
+  }
+
+  void recv_u64s(uint64_t* data, size_t n) override {
+    if (n == 0) return;
+    if (is0) sh->q1to0.pop_many(data, n);
+    else sh->q0to1.pop_many(data, n);
   }
 };
 
@@ -171,11 +277,14 @@ static void composite_keygen_hook(const gates::CompositeKeyPair& kp) {
 void write_json(const Args& a,
                 const nn::ModelSpec& spec,
                 int n_layers_run,
+                double keygen_s,
                 double elapsed_s_mean,
                 double elapsed_s_max,
                 uint64_t pfss_bytes_mean,
                 uint64_t net_bytes_mean,
                 uint64_t key_bytes,
+                double wall_time_s,
+                int n_iters,
                 const runtime::PhaseExecutor::Stats& stats0,
                 const runtime::PhaseExecutor::Stats& stats1) {
   const uint64_t coeff_jobs = stats0.pfss_coeff_jobs + stats1.pfss_coeff_jobs;
@@ -202,12 +311,18 @@ void write_json(const Args& a,
   f << "  \"batch_size\": " << a.batch_size << ",\n";
   f << "  \"n_layers\": " << spec.n_layers << ",\n";
   f << "  \"n_layers_run\": " << n_layers_run << ",\n";
+  f << "  \"n_iters\": " << n_iters << ",\n";
   f << "  \"n_heads\": " << spec.n_heads << ",\n";
   f << "  \"d_model\": " << spec.d_model << ",\n";
   f << "  \"n_bits\": " << spec.n_bits << ",\n";
   f << "  \"frac_bits\": " << spec.frac_bits << ",\n";
-  f << "  \"timing\": { \"online_time_s_mean\": " << elapsed_s_mean
-    << ", \"online_time_s_max\": " << elapsed_s_max << " },\n";
+  f << "  \"timing\": { "
+    << "\"keygen_time_s\": " << keygen_s
+    << ", \"online_time_s\": " << elapsed_s_mean
+    << ", \"online_time_s_mean\": " << elapsed_s_mean
+    << ", \"online_time_s_max\": " << elapsed_s_max
+    << ", \"wall_time_s\": " << wall_time_s
+    << " },\n";
   f << "  \"preprocessing\": { \"key_bytes\": " << key_bytes << " },\n";
   f << "  \"communication\": { \"pfss_bytes\": " << pfss_bytes_mean
     << ", \"net_bytes\": " << net_bytes_mean
@@ -244,6 +359,13 @@ int main(int argc, char** argv) {
     // For performance benchmarking, drive the full PFSS pipeline even when the
     // underlying backend is a clear/reference implementation.
     ::setenv("SUF_FORCE_PFSS", "1", /*overwrite=*/0);
+    // Cache expensive dealer-generated task materials (activation/softmax) so
+    // we can separate one-time keygen from steady-state online time.
+    ::setenv("SUF_BENCH_CACHE_MATERIAL", "1", /*overwrite=*/0);
+    // Per-element trunc/ARS masks prevent batching and massively increase both
+    // key size and runtime overhead for large vectors. Disable by default for
+    // end-to-end transformer benchmarking (can be re-enabled by exporting it).
+    ::setenv("SUF_PER_ELEMENT_MASKS", "0", /*overwrite=*/0);
     auto args = parse(argc, argv);
     const auto& spec = nn::get_model_spec(args.model);
     const int n_layers_run = (args.n_layers > 0) ? args.n_layers : static_cast<int>(spec.n_layers);
@@ -313,10 +435,15 @@ int main(int argc, char** argv) {
       }
       runtime::PhaseExecutor pe;
       if (args.backend == "gpu") {
-        pe.set_device_pipeline(true);
-        pe.set_device_pipeline_materialize(false);
-        pe.pfss_coeff_batch().set_device_outputs(true);
-        pe.pfss_trunc_batch().set_device_outputs(true);
+        // Default benchmark path materializes PFSS outputs to host immediately.
+        // Keeping PFSS outputs on device is only beneficial when downstream tasks
+        // can consume device pointers; otherwise it adds extra staging overhead.
+        if (std::getenv("SUF_BENCH_DEVICE_PIPELINE")) {
+          pe.set_device_pipeline(true);
+          pe.set_device_pipeline_materialize(false);
+          pe.pfss_coeff_batch().set_device_outputs(true);
+          pe.pfss_trunc_batch().set_device_outputs(true);
+        }
       }
 
       nn::LayerContext ctx;
@@ -375,6 +502,7 @@ int main(int argc, char** argv) {
       cfg.attn.Dh = Dh;
       cfg.attn.S_max = rows;
       cfg.attn.frac_bits = fb;
+      cfg.attn.causal = spec.causal;
       cfg.mlp.D = cols;
       cfg.mlp.frac_bits = fb;
       cfg.mlp.Hidden = Dff;
@@ -417,10 +545,13 @@ int main(int argc, char** argv) {
     };
 
     runtime::PhaseExecutor::Stats st0, st1;
-    double sum_s = 0.0;
-    double max_s = 0.0;
+    std::vector<double> it_s;
+    it_s.reserve(static_cast<size_t>(std::max(1, args.n_iters)));
+    double wall_start_s = 0.0;
+    double wall_end_s = 0.0;
     uint64_t sum_pfss_bytes = 0;
     uint64_t sum_net_bytes = 0;
+    auto wall_start = std::chrono::steady_clock::now();
     for (int it = 0; it < std::max(1, args.n_iters); ++it) {
       tl_iter = it;
       // Reset comm counters between iterations.
@@ -431,10 +562,10 @@ int main(int argc, char** argv) {
         std::queue<std::vector<uint8_t>>().swap(pfss_sh.q1to0);
       }
       {
-        std::lock_guard<std::mutex> lk(net_sh.mu);
-        net_sh.sent0 = net_sh.sent1 = 0;
-        std::queue<uint64_t>().swap(net_sh.q0to1);
-        std::queue<uint64_t>().swap(net_sh.q1to0);
+        net_sh.sent0.store(0, std::memory_order_relaxed);
+        net_sh.sent1.store(0, std::memory_order_relaxed);
+        net_sh.q0to1.reset();
+        net_sh.q1to0.reset();
       }
 
       auto start = std::chrono::steady_clock::now();
@@ -455,22 +586,53 @@ int main(int argc, char** argv) {
       if (exc0) std::rethrow_exception(exc0);
       auto end = std::chrono::steady_clock::now();
       double elapsed_s = std::chrono::duration<double>(end - start).count();
-      sum_s += elapsed_s;
-      if (elapsed_s > max_s) max_s = elapsed_s;
+      it_s.push_back(elapsed_s);
 
       uint64_t pfss_bytes = pfss_sh.sent0 + pfss_sh.sent1;
       uint64_t net_bytes = net_sh.sent0 + net_sh.sent1;
       sum_pfss_bytes += pfss_bytes;
       sum_net_bytes += net_bytes;
     }
-    double mean_s = sum_s / static_cast<double>(std::max(1, args.n_iters));
-    uint64_t mean_pfss_bytes = sum_pfss_bytes / static_cast<uint64_t>(std::max(1, args.n_iters));
-    uint64_t mean_net_bytes = sum_net_bytes / static_cast<uint64_t>(std::max(1, args.n_iters));
+    auto wall_end = std::chrono::steady_clock::now();
+    wall_start_s = 0.0;
+    wall_end_s = std::chrono::duration<double>(wall_end - wall_start).count();
+
+    const int n_meas = std::max(1, args.n_iters);
+    double max_s = 0.0;
+    for (double v : it_s) max_s = std::max(max_s, v);
+    double mean_all = 0.0;
+    for (double v : it_s) mean_all += v;
+    mean_all /= static_cast<double>(n_meas);
+
+    // Treat the first iteration as (keygen+online); steady-state online is mean over iters[1:].
+    double online_mean = mean_all;
+    double keygen_s = 0.0;
+    if (it_s.size() >= 2) {
+      online_mean = 0.0;
+      for (size_t i = 1; i < it_s.size(); ++i) online_mean += it_s[i];
+      online_mean /= static_cast<double>(it_s.size() - 1);
+      keygen_s = std::max(0.0, it_s[0] - online_mean);
+    }
+
+    uint64_t mean_pfss_bytes = sum_pfss_bytes / static_cast<uint64_t>(n_meas);
+    uint64_t mean_net_bytes = sum_net_bytes / static_cast<uint64_t>(n_meas);
 
     uint64_t key_bytes = g_key_bytes.load(std::memory_order_relaxed);
     gates::set_composite_keygen_hook(nullptr);
 
-    write_json(args, spec, n_layers_run, mean_s, max_s, mean_pfss_bytes, mean_net_bytes, key_bytes, st0, st1);
+    write_json(args,
+               spec,
+               n_layers_run,
+               keygen_s,
+               online_mean,
+               max_s,
+               mean_pfss_bytes,
+               mean_net_bytes,
+               key_bytes,
+               wall_end_s,
+               n_meas,
+               st0,
+               st1);
     std::cout << "Wrote bench log to " << args.log_json << "\n";
   } catch (const std::exception& e) {
     std::cerr << "bench_suf_transformer error: " << e.what() << "\n";

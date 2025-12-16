@@ -10,6 +10,7 @@ struct ModelSpec {
   std::string name;
   std::string hf_id;
   std::string mlp_activation = "silu";  // "silu" (LLaMA) or "gelu" (BERT/GPT2)
+  bool causal = true;  // true for decoder-style causal attention (GPT/LLaMA), false for encoder (BERT)
   std::size_t n_layers = 0;
   std::size_t n_heads = 0;
   std::size_t d_model = 0;

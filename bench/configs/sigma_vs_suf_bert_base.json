@@ -1,13 +1,14 @@
 {
-  "models": ["bert-tiny"],
+  "models": ["bert-base"],
   "seq_lens": [128],
   "batch_sizes": [1],
-  "backends": ["cpu", "gpu"],
-  "n_iters": 3,
+  "backends": ["cpu"],
+  "n_iters": 2,
   "sigma_root": "external/sigma_ezpc/GPU-MPC/experiments/sigma",
   "sigma_binary": "sigma",
   "sigma_cpu_threads": 64,
-  "results_dir": "bench/results/bert_tiny",
+  "results_dir": "bench/results/bert_base",
   "suf_binary": "build_ninja/bench_suf_transformer",
-  "notes": "Smoke end-to-end run on a small-memory machine (Sigma large models will not fit)."
+  "notes": "End-to-end comparison on BERT-base (seq=128): Sigma GPU vs SUF CPU."
 }
+

@@ -11,39 +11,46 @@
 #include <iostream>
 #include "proto/reference_backend.hpp"
 #include "proto/backend_gpu.hpp"
-#if !defined(SUF_SPAN_FALLBACK_DEFINED)
-  #define SUF_SPAN_FALLBACK_DEFINED
-  namespace std {
-    template<typename T>
-    class span {
-     public:
-      span() : data_(nullptr), size_(0) {}
-      span(const T* ptr, std::size_t n) : data_(ptr), size_(n) {}
-      template <typename U, typename = std::enable_if_t<std::is_same_v<std::remove_const_t<T>, U>>>
-      span(const std::vector<U>& v) : data_(v.data()), size_(v.size()) {}
-      span(std::initializer_list<T> il) : data_(il.begin()), size_(il.size()) {}
-      std::size_t size() const { return size_; }
-      bool empty() const { return size_ == 0; }
-      const T* data() const { return data_; }
-      T* data() { return const_cast<T*>(data_); }
-      const T& operator[](std::size_t i) const { return data_[i]; }
-      T& operator[](std::size_t i) { return const_cast<T&>(data_[i]); }
-      span subspan(std::size_t off, std::size_t n) const {
-        if (off > size_) return span();
-        std::size_t len = (off + n > size_) ? (size_ - off) : n;
-        return span(data_ + off, len);
-      }
-      const T* begin() const { return data_; }
-      const T* end() const { return data_ + size_; }
-     private:
-      const T* data_;
-      std::size_t size_;
-    };
-    template <typename T>
-    const T* begin(span<T> s) { return s.data(); }
-    template <typename T>
-    const T* end(span<T> s) { return s.data() + s.size(); }
-  }
+#if __has_include(<span>)
+  #include <span>
+#elif __has_include(<experimental/span>)
+  #include <experimental/span>
+  namespace std { using std::experimental::span; }
+#else
+  #if !defined(SUF_SPAN_FALLBACK_DEFINED)
+    #define SUF_SPAN_FALLBACK_DEFINED
+    namespace std {
+      template<typename T>
+      class span {
+       public:
+        span() : data_(nullptr), size_(0) {}
+        span(const T* ptr, std::size_t n) : data_(ptr), size_(n) {}
+        template <typename U, typename = std::enable_if_t<std::is_same_v<std::remove_const_t<T>, U>>>
+        span(const std::vector<U>& v) : data_(v.data()), size_(v.size()) {}
+        span(std::initializer_list<T> il) : data_(il.begin()), size_(il.size()) {}
+        std::size_t size() const { return size_; }
+        bool empty() const { return size_ == 0; }
+        const T* data() const { return data_; }
+        T* data() { return const_cast<T*>(data_); }
+        const T& operator[](std::size_t i) const { return data_[i]; }
+        T& operator[](std::size_t i) { return const_cast<T&>(data_[i]); }
+        span subspan(std::size_t off, std::size_t n) const {
+          if (off > size_) return span();
+          std::size_t len = (off + n > size_) ? (size_ - off) : n;
+          return span(data_ + off, len);
+        }
+        const T* begin() const { return data_; }
+        const T* end() const { return data_ + size_; }
+       private:
+        const T* data_;
+        std::size_t size_;
+      };
+      template <typename T>
+      const T* begin(span<T> s) { return s.data(); }
+      template <typename T>
+      const T* end(span<T> s) { return s.data() + s.size(); }
+    }
+  #endif
 #endif
 #include <vector>
 #include "compiler/suf_to_pfss.hpp"
@@ -234,13 +241,74 @@ inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t
   if (r_out.size() != static_cast<size_t>(F.r_out)) {
     throw std::runtime_error("composite_gen_backend_with_masks: r_out size mismatch");
   }
-  auto compiled = compiler::compile_suf_to_pfss_two_programs(
-      F, r_in, r_out, compiler::CoeffMode::kStepDcf, gate_kind);
+  compiler::CoeffMode coeff_mode = compiler::CoeffMode::kStepDcf;
+  // Auto-select interval LUT mode when:
+  // - the SUF emits payload-only outputs (degree=0)
+  // - there are no boolean outputs (ell=0)
+  // - the backend supports interval LUT evaluation
+  //
+  // This avoids expensive Beaver-based selector networks and makes coeff selection
+  // communication-free (keys-only).
+  if (F.degree == 0 && F.l_out == 0) {
+    if (dynamic_cast<proto::PfssIntervalLutExt*>(&backend) != nullptr) {
+      coeff_mode = compiler::CoeffMode::kIntervalLut;
+    }
+  }
+  if (const char* env = std::getenv("SUF_COEFF_MODE")) {
+    std::string s(env);
+    if (s == "step" || s == "step_dcf" || s == "dcf") coeff_mode = compiler::CoeffMode::kStepDcf;
+    if (s == "interval" || s == "lut" || s == "interval_lut") coeff_mode = compiler::CoeffMode::kIntervalLut;
+  }
+  auto compiled = compiler::compile_suf_to_pfss_two_programs(F, r_in, r_out, coeff_mode, gate_kind);
   if (pred_eff_bits_hint > 0 && pred_eff_bits_hint <= compiled.pred.n) {
     compiled.pred.eff_bits = pred_eff_bits_hint;
   }
   if (coeff_eff_bits_hint > 0 && coeff_eff_bits_hint <= compiled.coeff.n) {
     compiled.coeff.eff_bits = coeff_eff_bits_hint;
+  }
+  if (compiled.coeff.mode == compiler::CoeffMode::kIntervalLut) {
+    auto* lut_backend = dynamic_cast<proto::PfssIntervalLutExt*>(&backend);
+    bool ok = (lut_backend != nullptr);
+    ok = ok && !compiled.coeff.intervals.empty();
+    ok = ok && compiled.coeff.out_words > 0;
+    ok = ok && compiled.coeff.intervals.front().lo == 0ull;
+    if (ok) {
+      uint64_t prev = compiled.coeff.intervals.front().lo;
+      for (size_t idx = 0; idx < compiled.coeff.intervals.size(); ++idx) {
+        const auto& iv = compiled.coeff.intervals[idx];
+        if (iv.lo != prev) {
+          ok = false;
+          break;
+        }
+        const bool is_last = (idx + 1 == compiled.coeff.intervals.size());
+        if (iv.hi == 0ull) {
+          if (!is_last) {
+            ok = false;
+            break;
+          }
+        } else if (iv.hi <= iv.lo) {
+          ok = false;
+          break;
+        }
+        if (iv.payload_words.size() != static_cast<size_t>(compiled.coeff.out_words)) {
+          ok = false;
+          break;
+        }
+        prev = iv.hi;
+      }
+    }
+    if (!ok) {
+      // Fallback to the baseline step-DCF coeff program when interval-LUT
+      // compilation yields a wrapping/non-contiguous partition (common when r_in rotates).
+      compiled = compiler::compile_suf_to_pfss_two_programs(
+          F, r_in, r_out, compiler::CoeffMode::kStepDcf, gate_kind);
+      if (pred_eff_bits_hint > 0 && pred_eff_bits_hint <= compiled.pred.n) {
+        compiled.pred.eff_bits = pred_eff_bits_hint;
+      }
+      if (coeff_eff_bits_hint > 0 && coeff_eff_bits_hint <= compiled.coeff.n) {
+        compiled.coeff.eff_bits = coeff_eff_bits_hint;
+      }
+    }
   }
 
   auto split_add = [&](uint64_t v) {
@@ -295,24 +363,6 @@ inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t
   out.k1.coeff_meta.bit_order = bit_order;
   out.k0.coeff_meta.sem = proto::ShareSemantics::AddU64;
   out.k1.coeff_meta.sem = proto::ShareSemantics::AddU64;
-
-  // Pre-generate Beaver triples for postproc hooks (conservative sizing).
-  size_t triple_need = batch_N * std::max<size_t>(compiled.r, compiled.ell);
-  out.k0.triples.resize(triple_need);
-  out.k1.triples.resize(triple_need);
-  for (size_t i = 0; i < triple_need; ++i) {
-    uint64_t a = rng();
-    uint64_t b = rng();
-    uint64_t c = proto::mul_mod(a, b);
-    uint64_t a0 = rng();
-    uint64_t a1 = a - a0;
-    uint64_t b0 = rng();
-    uint64_t b1 = b - b0;
-    uint64_t c0 = rng();
-    uint64_t c1 = c - c0;
-    out.k0.triples[i] = {a0, b0, c0};
-    out.k1.triples[i] = {a1, b1, c1};
-  }
 
   // Pred keys: payload=1 byte (XOR bit). If backend is SigmaFast, also emit packed key.
   auto* packed_backend = dynamic_cast<proto::PackedLtBackend*>(&backend);
@@ -399,27 +449,74 @@ inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t
     out.k1.cut_pred_keys.push_back(kp.k1);
   }
 
-  // Coeff step: party0 carries payload, party1 zeros (backend convention)
-  out.k0.base_coeff_share = compiled.coeff.base_payload_words;
-  out.k1.base_coeff_share.assign(out.k0.base_coeff_share.size(), 0);
-  // Precompute total delta sum (public) and share it (party0 holds, party1 zero)
-  out.k0.total_delta_share.assign(out.k0.base_coeff_share.size(), 0);
-  out.k1.total_delta_share.assign(out.k0.base_coeff_share.size(), 0);
-  for (const auto& delta : compiled.coeff.deltas_words) {
-    for (size_t j = 0; j < delta.size(); j++) {
-      out.k0.total_delta_share[j] = proto::add_mod(out.k0.total_delta_share[j], delta[j]);
+  if (compiled.coeff.mode == compiler::CoeffMode::kIntervalLut) {
+    auto* lut_backend = dynamic_cast<proto::PfssIntervalLutExt*>(&backend);
+    if (!lut_backend) {
+      throw std::runtime_error("composite_gen_backend_with_masks: interval LUT requested but backend lacks PfssIntervalLutExt");
     }
-  }
-  for (size_t i = 0; i < compiled.coeff.cutpoints_ge.size(); i++) {
-    auto& delta = compiled.coeff.deltas_words[i];
-    auto payload0 = core::pack_u64_vec_le(delta);
-    int bits = (compiled.coeff.eff_bits > 0 && compiled.coeff.eff_bits <= compiled.coeff.n)
-                   ? compiled.coeff.eff_bits
-                   : compiled.coeff.n;
-    auto thr_bits = backend.u64_to_bits_msb(compiled.coeff.cutpoints_ge[i], bits);
-    auto kp = backend.gen_dcf(bits, thr_bits, payload0);
-    out.k0.coeff_keys.push_back(kp.k0);
-    out.k1.coeff_keys.push_back(kp.k1);
+    if (compiled.coeff.intervals.empty()) {
+      throw std::runtime_error("composite_gen_backend_with_masks: interval LUT has no intervals");
+    }
+    proto::IntervalLutDesc desc;
+    desc.in_bits = compiled.coeff.n;
+    desc.out_words = compiled.coeff.out_words;
+    desc.cutpoints.reserve(compiled.coeff.intervals.size() + 1);
+    desc.payload_flat.reserve(compiled.coeff.intervals.size() * static_cast<size_t>(compiled.coeff.out_words));
+    desc.cutpoints.push_back(compiled.coeff.intervals.front().lo);
+    uint64_t prev_hi = compiled.coeff.intervals.front().lo;
+    for (size_t idx = 0; idx < compiled.coeff.intervals.size(); ++idx) {
+      const auto& iv = compiled.coeff.intervals[idx];
+      // Interval LUT backend expects non-wrapping, monotonically increasing cutpoints.
+      if (iv.lo != prev_hi) {
+        throw std::runtime_error("composite_gen_backend_with_masks: interval LUT intervals are not contiguous");
+      }
+      const bool is_last = (idx + 1 == compiled.coeff.intervals.size());
+      if (iv.hi == 0ull) {
+        if (!is_last) {
+          throw std::runtime_error("composite_gen_backend_with_masks: interval LUT wrap sentinel appears before last interval");
+        }
+      } else if (iv.hi <= iv.lo) {
+        throw std::runtime_error("composite_gen_backend_with_masks: interval LUT interval wraps or is empty");
+      }
+      if (iv.payload_words.size() != static_cast<size_t>(compiled.coeff.out_words)) {
+        throw std::runtime_error("composite_gen_backend_with_masks: interval LUT payload_words size mismatch");
+      }
+      desc.cutpoints.push_back(iv.hi);
+      desc.payload_flat.insert(desc.payload_flat.end(), iv.payload_words.begin(), iv.payload_words.end());
+      prev_hi = iv.hi;
+    }
+    auto kp = lut_backend->gen_interval_lut(desc);
+    out.k0.coeff_keys.clear();
+    out.k1.coeff_keys.clear();
+    out.k0.coeff_keys.push_back(std::move(kp.k0));
+    out.k1.coeff_keys.push_back(std::move(kp.k1));
+    out.k0.base_coeff_share.clear();
+    out.k1.base_coeff_share.clear();
+    out.k0.total_delta_share.clear();
+    out.k1.total_delta_share.clear();
+  } else {
+    // Coeff step: party0 carries payload, party1 zeros (backend convention)
+    out.k0.base_coeff_share = compiled.coeff.base_payload_words;
+    out.k1.base_coeff_share.assign(out.k0.base_coeff_share.size(), 0);
+    // Precompute total delta sum (public) and share it (party0 holds, party1 zero)
+    out.k0.total_delta_share.assign(out.k0.base_coeff_share.size(), 0);
+    out.k1.total_delta_share.assign(out.k0.base_coeff_share.size(), 0);
+    for (const auto& delta : compiled.coeff.deltas_words) {
+      for (size_t j = 0; j < delta.size(); j++) {
+        out.k0.total_delta_share[j] = proto::add_mod(out.k0.total_delta_share[j], delta[j]);
+      }
+    }
+    for (size_t i = 0; i < compiled.coeff.cutpoints_ge.size(); i++) {
+      auto& delta = compiled.coeff.deltas_words[i];
+      auto payload0 = core::pack_u64_vec_le(delta);
+      int bits = (compiled.coeff.eff_bits > 0 && compiled.coeff.eff_bits <= compiled.coeff.n)
+                     ? compiled.coeff.eff_bits
+                     : compiled.coeff.n;
+      auto thr_bits = backend.u64_to_bits_msb(compiled.coeff.cutpoints_ge[i], bits);
+      auto kp = backend.gen_dcf(bits, thr_bits, payload0);
+      out.k0.coeff_keys.push_back(kp.k0);
+      out.k1.coeff_keys.push_back(kp.k1);
+    }
   }
 
   // Triples: bool DAG + selectors + Horner
@@ -430,12 +527,22 @@ inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t
     bool_mul_max = std::max(bool_mul_max, cnt);
   }
   size_t horner_mul = static_cast<size_t>(compiled.r) * static_cast<size_t>(compiled.degree);
-  size_t cut_count = compiled.coeff.cutpoints_ge.size();
-  size_t piece_count = cut_count + 1;
-  size_t conv_bits = compiled.pred.queries.size() + cut_count; // b2a for preds + cut bits
-  size_t selector_chain_mul = (cut_count > 0) ? (cut_count - 1) : 0; // not_prev * cut_k
-  size_t coeff_select_mul = piece_count * static_cast<size_t>(compiled.coeff.out_words);
-  size_t bool_select_mul = piece_count * static_cast<size_t>(compiled.ell);
+  size_t cut_count = 0;
+  size_t piece_count = 0;
+  if (compiled.coeff.mode == compiler::CoeffMode::kStepDcf) {
+    cut_count = compiled.coeff.cutpoints_ge.size();
+    piece_count = cut_count + 1;
+  } else {
+    piece_count = compiled.coeff.intervals.size();
+  }
+  size_t conv_bits = compiled.pred.queries.size() + (compiled.coeff.mode == compiler::CoeffMode::kStepDcf ? cut_count : 0);
+  size_t selector_chain_mul = (compiled.coeff.mode == compiler::CoeffMode::kStepDcf && cut_count > 0) ? (cut_count - 1) : 0;
+  size_t coeff_select_mul = (compiled.coeff.mode == compiler::CoeffMode::kStepDcf)
+                                ? (piece_count * static_cast<size_t>(compiled.coeff.out_words))
+                                : 0;
+  size_t bool_select_mul = (compiled.coeff.mode == compiler::CoeffMode::kStepDcf)
+                               ? (piece_count * static_cast<size_t>(compiled.ell))
+                               : 0;
   size_t need = (conv_bits + selector_chain_mul + coeff_select_mul + bool_select_mul + horner_mul) * batch_N;
   out.k0.triples.resize(need);
   out.k1.triples.resize(need);
@@ -1073,6 +1180,56 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     }
     (void)ch;
     (void)ref;
+    return out;
+  }
+  if (compiled.coeff.mode == compiler::CoeffMode::kIntervalLut) {
+    if (compiled.degree != 0 || compiled.ell != 0) {
+      throw std::runtime_error("composite_eval_batch_backend: interval LUT mode currently supports degree=0, ell=0 only");
+    }
+    auto* lut_backend = dynamic_cast<proto::PfssIntervalLutExt*>(&backend);
+    if (!lut_backend) {
+      throw std::runtime_error("composite_eval_batch_backend: interval LUT selected but backend lacks PfssIntervalLutExt");
+    }
+    if (k.coeff_keys.empty() || k.coeff_keys[0].bytes.empty()) {
+      throw std::runtime_error("composite_eval_batch_backend: interval LUT key missing");
+    }
+    if (compiled.coeff.out_words != compiled.r) {
+      throw std::runtime_error("composite_eval_batch_backend: interval LUT out_words must equal r when degree=0");
+    }
+    const size_t out_words = static_cast<size_t>(compiled.coeff.out_words);
+    std::vector<uint64_t> coeff_flat(N * out_words, 0);
+    if (staged && in.hatx_device) {
+      staged->eval_interval_lut_many_device_broadcast(
+          k.coeff_keys[0].bytes.size(),
+          k.coeff_keys[0].bytes.data(),
+          reinterpret_cast<const uint64_t*>(in.hatx_device),
+          N,
+          static_cast<int>(out_words),
+          coeff_flat.data());
+    } else {
+      std::vector<uint64_t> xs_vec(in.hatx, in.hatx + N);
+      const size_t key_bytes = k.coeff_keys[0].bytes.size();
+      std::vector<uint8_t> keys_flat(N * key_bytes);
+      for (size_t i = 0; i < N; ++i) {
+        std::memcpy(keys_flat.data() + i * key_bytes, k.coeff_keys[0].bytes.data(), key_bytes);
+      }
+      lut_backend->eval_interval_lut_many_u64(key_bytes, keys_flat.data(), xs_vec, static_cast<int>(out_words), coeff_flat.data());
+    }
+    // Apply per-output mask shares (to match step-DCF semantics); caller later subtracts r_out.
+    for (size_t i = 0; i < N; ++i) {
+      for (size_t j = 0; j < out_words; ++j) {
+        uint64_t v = coeff_flat[i * out_words + j];
+        if (j < k.r_out_share.size()) {
+          v = proto::add_mod(v, k.r_out_share[j]);
+        }
+        out.haty_share[i * out_words + j] = v;
+      }
+    }
+    if (want_device_out && staged && in.hatx_device) {
+      // Surface backend-owned device output pointer for callers that want device-only flows.
+      out.haty_device = staged->last_device_output();
+      out.haty_device_words = N * out_words;
+    }
     return out;
   }
   if (k.pred_meta.sem != proto::ShareSemantics::XorBytes) {

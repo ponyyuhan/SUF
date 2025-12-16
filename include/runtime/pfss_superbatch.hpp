@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <type_traits>
@@ -61,27 +62,32 @@ class ProtoChanFromNet final : public proto::IChannel {
   explicit ProtoChanFromNet(net::Chan& c) : ch_(c) {}
   void send_bytes(const void* data, size_t n) override {
     ch_.send_u64(static_cast<uint64_t>(n));
+    if (n == 0) return;
     const uint8_t* p = static_cast<const uint8_t*>(data);
-    size_t off = 0;
-    while (off < n) {
-      uint64_t word = 0;
-      size_t chunk = std::min<size_t>(8, n - off);
-      std::memcpy(&word, p + off, chunk);
-      ch_.send_u64(word);
-      off += chunk;
+    const size_t words = (n + 7) / 8;
+    const bool aligned = (reinterpret_cast<uintptr_t>(p) % alignof(uint64_t)) == 0;
+    if (aligned && (n % 8) == 0) {
+      ch_.send_u64s(reinterpret_cast<const uint64_t*>(p), words);
+      return;
     }
+    std::vector<uint64_t> tmp(words, 0);
+    std::memcpy(tmp.data(), p, n);
+    ch_.send_u64s(tmp.data(), tmp.size());
   }
   void recv_bytes(void* data, size_t n) override {
     uint64_t expect = ch_.recv_u64();
     if (expect != n) throw std::runtime_error("ProtoChanFromNet: length mismatch");
+    if (n == 0) return;
     uint8_t* p = static_cast<uint8_t*>(data);
-    size_t off = 0;
-    while (off < n) {
-      uint64_t word = ch_.recv_u64();
-      size_t chunk = std::min<size_t>(8, n - off);
-      std::memcpy(p + off, &word, chunk);
-      off += chunk;
+    const size_t words = (n + 7) / 8;
+    const bool aligned = (reinterpret_cast<uintptr_t>(p) % alignof(uint64_t)) == 0;
+    if (aligned && (n % 8) == 0) {
+      ch_.recv_u64s(reinterpret_cast<uint64_t*>(p), words);
+      return;
     }
+    std::vector<uint64_t> tmp(words, 0);
+    ch_.recv_u64s(tmp.data(), tmp.size());
+    std::memcpy(p, tmp.data(), n);
   }
 
  private:

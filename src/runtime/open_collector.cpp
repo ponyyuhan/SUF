@@ -108,7 +108,6 @@ OpenHandle OpenCollector::enqueue(const std::vector<uint64_t>& diff) {
 void OpenCollector::flush(int party, net::Chan& ch) {
   if (requests_.empty()) return;
   auto t0 = std::chrono::steady_clock::now();
-  size_t total_words = 0;
   const bool want_pack = (std::getenv("SUF_OPEN_PACK_EFFBITS") != nullptr);
   const int max_pack_bits = []() {
     const char* env = std::getenv("SUF_OPEN_PACK_MAX_BITS");
@@ -129,6 +128,50 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     }
     return want_pack && (remote != 0);
   }();
+
+  size_t total_words = 0;
+  if (!pack) {
+    // Fast-path: one bulk exchange per flush, then scatter results.
+    for (const auto& req : requests_) {
+      if (!req.slot) {
+        throw std::runtime_error("OpenCollector: missing result slot");
+      }
+      if (req.offset + req.len > req.slot->opened.size()) {
+        throw std::runtime_error("OpenCollector: request out of range");
+      }
+      total_words += req.len;
+    }
+    std::vector<uint64_t> send_flat;
+    send_flat.reserve(total_words);
+    for (const auto& req : requests_) {
+      send_flat.insert(send_flat.end(), req.diff.begin(), req.diff.end());
+    }
+    std::vector<uint64_t> recv_flat(total_words, 0);
+    if (party == 0) {
+      if (!send_flat.empty()) ch.send_u64s(send_flat.data(), send_flat.size());
+      if (!recv_flat.empty()) ch.recv_u64s(recv_flat.data(), recv_flat.size());
+    } else {
+      if (!recv_flat.empty()) ch.recv_u64s(recv_flat.data(), recv_flat.size());
+      if (!send_flat.empty()) ch.send_u64s(send_flat.data(), send_flat.size());
+    }
+    size_t off = 0;
+    for (const auto& req : requests_) {
+      for (size_t i = 0; i < req.len; ++i) {
+        req.slot->opened[req.offset + i] = static_cast<int64_t>(req.diff[i] + recv_flat[off + i]);
+      }
+      req.slot->ready.store(true);
+      off += req.len;
+    }
+    requests_.clear();
+    stats_.flushes += 1;
+    stats_.opened_words += total_words;
+    pending_words_ = 0;
+    auto t1 = std::chrono::steady_clock::now();
+    stats_.flush_ns += static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+    return;
+  }
+
   for (const auto& req : requests_) {
     if (!req.slot) {
       throw std::runtime_error("OpenCollector: missing result slot");
@@ -155,40 +198,40 @@ void OpenCollector::flush(int party, net::Chan& ch) {
         std::vector<uint64_t> packed_local = pack_eff_bits_host(req.diff, eff);
         std::vector<uint64_t> packed_remote(packed_local.size(), 0);
         if (party == 0) {
-          for (auto w : packed_local) ch.send_u64(w);
-          for (size_t i = 0; i < packed_remote.size(); ++i) packed_remote[i] = ch.recv_u64();
+          if (!packed_local.empty()) ch.send_u64s(packed_local.data(), packed_local.size());
+          if (!packed_remote.empty()) ch.recv_u64s(packed_remote.data(), packed_remote.size());
         } else {
-          for (size_t i = 0; i < packed_remote.size(); ++i) packed_remote[i] = ch.recv_u64();
-          for (auto w : packed_local) ch.send_u64(w);
+          if (!packed_remote.empty()) ch.recv_u64s(packed_remote.data(), packed_remote.size());
+          if (!packed_local.empty()) ch.send_u64s(packed_local.data(), packed_local.size());
         }
         auto other = unpack_eff_bits_host(packed_remote, eff, req.len);
         for (size_t i = 0; i < req.len; ++i) {
           req.slot->opened[req.offset + i] = static_cast<int64_t>(req.diff[i] + other[i]);
         }
       } else {
+        std::vector<uint64_t> other(req.len, 0);
         if (party == 0) {
-          for (auto v : req.diff) ch.send_u64(v);
-          for (size_t i = 0; i < req.len; ++i) {
-            req.slot->opened[req.offset + i] = static_cast<int64_t>(req.diff[i] + ch.recv_u64());
-          }
+          if (!req.diff.empty()) ch.send_u64s(req.diff.data(), req.diff.size());
+          if (!other.empty()) ch.recv_u64s(other.data(), other.size());
         } else {
-          for (size_t i = 0; i < req.len; ++i) {
-            req.slot->opened[req.offset + i] = static_cast<int64_t>(req.diff[i] + ch.recv_u64());
-          }
-          for (auto v : req.diff) ch.send_u64(v);
+          if (!other.empty()) ch.recv_u64s(other.data(), other.size());
+          if (!req.diff.empty()) ch.send_u64s(req.diff.data(), req.diff.size());
+        }
+        for (size_t i = 0; i < req.len; ++i) {
+          req.slot->opened[req.offset + i] = static_cast<int64_t>(req.diff[i] + other[i]);
         }
       }
     } else {
+      std::vector<uint64_t> other(req.len, 0);
       if (party == 0) {
-        for (auto v : req.diff) ch.send_u64(v);
-        for (size_t i = 0; i < req.len; ++i) {
-          req.slot->opened[req.offset + i] = static_cast<int64_t>(req.diff[i] + ch.recv_u64());
-        }
+        if (!req.diff.empty()) ch.send_u64s(req.diff.data(), req.diff.size());
+        if (!other.empty()) ch.recv_u64s(other.data(), other.size());
       } else {
-        for (size_t i = 0; i < req.len; ++i) {
-          req.slot->opened[req.offset + i] = static_cast<int64_t>(req.diff[i] + ch.recv_u64());
-        }
-        for (auto v : req.diff) ch.send_u64(v);
+        if (!other.empty()) ch.recv_u64s(other.data(), other.size());
+        if (!req.diff.empty()) ch.send_u64s(req.diff.data(), req.diff.size());
+      }
+      for (size_t i = 0; i < req.len; ++i) {
+        req.slot->opened[req.offset + i] = static_cast<int64_t>(req.diff[i] + other[i]);
       }
     }
     req.slot->ready.store(true);
