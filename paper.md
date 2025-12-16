@@ -1061,3 +1061,19 @@ To make the perspective crystal‑clear:
 In short, SUF is the “language of non‑linearity” our system speaks. Composite‑FSS is the “calling convention” that connects SUFs to the PFSS‑style backend and to the secret‑sharing arithmetic layer. Together they give a clean, theoretically justified way to say:
 
 > **Any univariate, piecewise‑polynomial non‑linearity used in transformers can be described once as a SUF, compiled automatically to a small number of FSS programs built from standard DPF/DCF templates, and then plugged into a generic Composite‑FSS gate whose correctness and privacy reduce to standard FSS assumptions.**
+
+---
+
+## 7 Prototype Mapping (This Repository)
+
+This paper is accompanied by a prototype implementation in this repo. The main conceptual components map to code as follows:
+
+- **SUF IR + semantics**: `include/suf/` (IR, mask rewrite, `ref_eval`, validation)
+- **SUF→PFSS compiler + analyses**: `include/compiler/`, `src/compiler/` (PFSS program descriptions, range/gap analysis, trunc lowering, layer graph passes)
+- **Composite‑FSS gates**: `include/gates/` (nonlinear gates and post-processing) and `include/gates/composite_fss.hpp`
+- **Runtime scheduling + batching**: `include/runtime/`, `src/runtime/` (`PhaseExecutor`, `PfssSuperBatch`, `OpenCollector`, planners, async/staged execution)
+- **Transformer stack**: `include/nn/`, `src/nn/` (attention/MLP/transformer layer, `LayerContext`)
+- **Backends**: `include/proto/` (clear, myl7/fss adapter, SigmaFast, GPU) and `cuda/` (CUDA PFSS kernels + backend)
+- **Tests/benches**: `src/demo/`, `src/bench/`
+
+Build and test instructions are kept in `README.md`.
