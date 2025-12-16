@@ -14,6 +14,8 @@ struct MLPConfig {
   size_t D = 0;
   size_t Hidden = 0;
   int frac_bits = 16;
+  enum class Activation : uint8_t { SiLU = 0, GeLU = 1 };
+  Activation activation = Activation::SiLU;
 };
 
 void mlp_forward(const MLPConfig& cfg,

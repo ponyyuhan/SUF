@@ -7,13 +7,15 @@ namespace {
 
 // Starter table using common HF configs and the bitwidth guidance from bench.md.
 static const std::vector<ModelSpec> kSpecs = {
-    {"bert-base", "bert-base-uncased", 12, 12, 768, 3072, 512, 50, 12},
-    {"bert-large", "bert-large-uncased", 24, 16, 1024, 4096, 512, 51, 12},
-    {"gpt2", "gpt2", 12, 12, 768, 3072, 1024, 50, 12},
-    {"gpt-neo-1.3b", "EleutherAI/gpt-neo-1.3B", 24, 20, 2048, 8192, 2048, 51, 12},
+    {"bert-tiny", "prajjwal1/bert-tiny", "gelu", 2, 2, 128, 512, 512, 50, 12},
+    {"bert-base", "bert-base-uncased", "gelu", 12, 12, 768, 3072, 512, 50, 12},
+    {"bert-large", "bert-large-uncased", "gelu", 24, 16, 1024, 4096, 512, 51, 12},
+    {"gpt2", "gpt2", "gelu", 12, 12, 768, 3072, 1024, 50, 12},
+    // Paper Table 1: n_head=16, d_model=2048.
+    {"gpt-neo-1.3b", "EleutherAI/gpt-neo-1.3B", "gelu", 24, 16, 2048, 8192, 2048, 51, 12},
     // Optional heavier models; keep bitwidths conservative.
-    {"llama2-7b", "meta-llama/Llama-2-7b-hf", 32, 32, 4096, 11008, 2048, 51, 12},
-    {"llama2-13b", "meta-llama/Llama-2-13b-hf", 40, 40, 5120, 13824, 2048, 51, 12},
+    {"llama2-7b", "meta-llama/Llama-2-7b-hf", "silu", 32, 32, 4096, 11008, 2048, 51, 12},
+    {"llama2-13b", "meta-llama/Llama-2-13b-hf", "silu", 40, 40, 5120, 13824, 2048, 51, 12},
 };
 
 }  // namespace

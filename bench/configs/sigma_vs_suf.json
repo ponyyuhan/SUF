@@ -1,12 +1,13 @@
 {
-  "models": ["bert-base", "bert-large", "gpt2", "gpt-neo-1.3b"],
+  "models": ["bert-tiny", "bert-base", "bert-large", "gpt2", "gpt-neo-1.3b"],
   "seq_lens": [128],
   "batch_sizes": [1],
   "backends": ["cpu", "gpu"],
   "n_iters": 5,
-  "sigma_root": "external/sigma_ezpc/GPU-MPC",
+  "sigma_root": "external/sigma_ezpc/GPU-MPC/experiments/sigma",
+  "sigma_binary": "sigma",
+  "sigma_cpu_threads": 16,
   "results_dir": "bench/results",
   "suf_binary": "build_ninja/bench_suf_transformer",
-  "sigma_binary": "build_gpu/bin/sigma_run_model",
-  "notes": "Adjust paths/backends as needed; this is a starter config generated from bench.md."
+  "notes": "Sigma uses two local parties on 127.0.0.1; supported models: bert-tiny/base/large, gpt2, llama-7b/13b."
 }

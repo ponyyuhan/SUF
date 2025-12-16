@@ -6,7 +6,9 @@
 #include <optional>
 #include "nn/matmul_publicW.hpp"
 #include "nn/matmul_gpu.hpp"
+#include "gates/tables/gelu_spline_table.hpp"
 #include "gates/tables/silu_spline_table.hpp"
+#include "gates/gelu_composite.hpp"
 #include "gates/silu_composite.hpp"
 #include "runtime/pfss_superbatch.hpp"
 #include "runtime/phase_tasks.hpp"
@@ -119,8 +121,13 @@ void mlp_forward(const MLPConfig& cfg,
     std::vector<int64_t> w1(W1_public.data, W1_public.data + W1_public.numel());
     std::vector<int64_t> w2(W2_public.data, W2_public.data + W2_public.numel());
     auto hidden = matmul_ref(x_plain, w1, X_share.shape[0], X_share.shape[1], cfg.D, cfg.Hidden, cfg.frac_bits);
-    auto silu_spec = gates::make_silu_spec({cfg.frac_bits, 16});
-    for (auto& v : hidden) v = gates::ref_silu_fixed(silu_spec, v);
+    if (cfg.activation == MLPConfig::Activation::GeLU) {
+      auto gelu_spec = gates::make_gelu_spline_spec(cfg.frac_bits, 16);
+      for (auto& v : hidden) v = gates::eval_piecewise_poly_ref(gelu_spec, v);
+    } else {
+      auto silu_spec = gates::make_silu_spec({cfg.frac_bits, 16});
+      for (auto& v : hidden) v = gates::ref_silu_fixed(silu_spec, v);
+    }
     auto out_plain = matmul_ref(hidden, w2, X_share.shape[0], X_share.shape[1], cfg.Hidden, cfg.D, cfg.frac_bits);
     for (size_t i = 0; i < out_plain.size(); ++i) {
       Y_share.data[i] = (party == 0) ? to_ring(out_plain[i]) : 0;
@@ -141,8 +148,8 @@ void mlp_forward(const MLPConfig& cfg,
   compiler::AbsBound x_abs_hint{};
   std::optional<compiler::GapCert> x_gap_hint = std::nullopt;
   bool have_x_abs = false;
-  compiler::AbsBound silu_abs_hint{};
-  bool have_silu_abs = false;
+  compiler::AbsBound act_abs_hint{};
+  bool have_act_abs = false;
   net::Chan* pfss_nc = (ctx && ctx->pfss_net_chan) ? ctx->pfss_net_chan : &ch;
   auto record_phase_plan = [&](runtime::PfssPhasePlanner& planner) {
     if (!ctx || !ctx->pfss_layer_planner) return;
@@ -227,17 +234,18 @@ void mlp_forward(const MLPConfig& cfg,
     r1.to_frac = cfg.frac_bits;
     auto hidden_t = record_rescale(ctx, acc1, r1, q_scale, hidden_range,
                                    view2(hidden.data(), B * T, H));
-    // SiLU is tightly bounded; record a clamp so downstream matmul can exploit the gap cert.
-    compiler::RangeInterval silu_range = clamp_silu_range(cfg.frac_bits);
-    auto silu_t = record_clamp(ctx, hidden_t, silu_range, q_scale);
-    if (silu_t.valid() && static_cast<size_t>(silu_t.tid) < ctx->graph.tensors().size()) {
-      const auto& tf = ctx->graph.tensors()[static_cast<size_t>(silu_t.tid)];
-      silu_abs_hint = tf.abs;
-      have_silu_abs = true;
+    compiler::RangeInterval act_range = (cfg.activation == MLPConfig::Activation::GeLU)
+        ? clamp_gelu_range(cfg.frac_bits)
+        : clamp_silu_range(cfg.frac_bits);
+    auto act_t = record_clamp(ctx, hidden_t, act_range, q_scale);
+    if (act_t.valid() && static_cast<size_t>(act_t.tid) < ctx->graph.tensors().size()) {
+      const auto& tf = ctx->graph.tensors()[static_cast<size_t>(act_t.tid)];
+      act_abs_hint = tf.abs;
+      have_act_abs = true;
     } else {
-      silu_abs_hint = compiler::abs_from_range(silu_range, silu_range.is_signed);
-      silu_abs_hint.kind = compiler::RangeKind::Proof;
-      have_silu_abs = true;
+      act_abs_hint = compiler::abs_from_range(act_range, act_range.is_signed);
+      act_abs_hint.kind = compiler::RangeKind::Proof;
+      have_act_abs = true;
     }
 
     compiler::MatmulAttrs mat2;
@@ -250,18 +258,18 @@ void mlp_forward(const MLPConfig& cfg,
     mat2.row_l1_max = row_l1_max(W2_public, mp.w_transposed);
     row_l1_max2 = mat2.row_l1_max;
     mat2.w_range = range_from_public_weights(W2_public);
-    mat2.x_range = silu_t.range;
+    mat2.x_range = act_t.range;
     mat2_x_range = mat2.x_range;
     mat2_w_range = mat2.w_range;
     auto acc2 =
-        record_matmul(ctx, silu_t, mat2, make_scale(2 * cfg.frac_bits, true),
+        record_matmul(ctx, act_t, mat2, make_scale(2 * cfg.frac_bits, true),
                       mat2.row_l1_max > 0
-                          ? compiler::propagate_matmul_accum_rowl1(silu_t.range, mat2.row_l1_max)
-                          : compiler::propagate_matmul_accum(silu_t.range, mat2.w_range, mat2.K),
+                          ? compiler::propagate_matmul_accum_rowl1(act_t.range, mat2.row_l1_max)
+                          : compiler::propagate_matmul_accum(act_t.range, mat2.w_range, mat2.K),
                       Y_share);
 
     compiler::RangeInterval out_range =
-        compiler::propagate_matmul_out(silu_t.range, mat2.w_range, mat2.K, cfg.frac_bits);
+        compiler::propagate_matmul_out(act_t.range, mat2.w_range, mat2.K, cfg.frac_bits);
     mat2_out_range = out_range;
     compiler::RescaleAttrs r2;
     r2.matmul_op = acc2.producer_op;
@@ -385,23 +393,58 @@ void mlp_forward(const MLPConfig& cfg,
         &plan1.bundle, std::span<const uint64_t>(hidden.data(), hidden.size()),
         std::span<uint64_t>(hidden_scaled.data(), hidden_scaled.size()));
     std::mt19937_64 rng2(0);
-    std::cerr << "mlp_forward: building silu task material frac_bits=" << cfg.frac_bits
-              << " elems=" << hidden_scaled.size() << "\n";
-    auto mat = gates::dealer_make_silu_task_material(
-        ctx->trunc_backend(),
-        cfg.frac_bits,
-        rng2,
-        3 * hidden_scaled.size(),
-        hidden_scaled.size());
-    runtime::CubicPolyBundle bundle{
-        &mat.suf, &mat.keys.k0, &mat.keys.k1, &mat.trunc_f, &mat.trunc_2f, cfg.frac_bits};
-    auto silu_task = std::make_unique<runtime::CubicPolyTask>(
-        bundle,
-        std::span<const uint64_t>(hidden_scaled.data(), hidden_scaled.size()),
-        std::span<uint64_t>(hidden_scaled.data(), hidden_scaled.size()));
-    // Update hidden range to the clamped SiLU range for downstream matmul planning.
-    compiler::RangeInterval silu_range = clamp_silu_range(cfg.frac_bits);
-    mat2_x_range = silu_range;
+    std::unique_ptr<runtime::CubicPolyTask> act_task;
+    std::optional<gates::SiluTaskMaterial> silu_mat;
+    std::optional<gates::GeluTaskMaterial> gelu_mat;
+    if (cfg.activation == MLPConfig::Activation::GeLU) {
+      std::cerr << "mlp_forward: building gelu task material frac_bits=" << cfg.frac_bits
+                << " elems=" << hidden_scaled.size() << "\n";
+      gelu_mat.emplace(gates::dealer_make_gelu_task_material(
+          ctx->trunc_backend(),
+          cfg.frac_bits,
+          rng2,
+          3 * hidden_scaled.size(),
+          hidden_scaled.size()));
+      auto& mat = *gelu_mat;
+      runtime::CubicPolyBundle bundle{
+          &mat.suf,
+          &mat.keys.k0,
+          &mat.keys.k1,
+          &mat.trunc_f,
+          &mat.trunc_2f,
+          cfg.frac_bits,
+          compiler::GateKind::GeLUSpline,
+          &mat.spec};
+      act_task = std::make_unique<runtime::CubicPolyTask>(
+          bundle,
+          std::span<const uint64_t>(hidden_scaled.data(), hidden_scaled.size()),
+          std::span<uint64_t>(hidden_scaled.data(), hidden_scaled.size()));
+      mat2_x_range = clamp_gelu_range(cfg.frac_bits);
+    } else {
+      std::cerr << "mlp_forward: building silu task material frac_bits=" << cfg.frac_bits
+                << " elems=" << hidden_scaled.size() << "\n";
+      silu_mat.emplace(gates::dealer_make_silu_task_material(
+          ctx->trunc_backend(),
+          cfg.frac_bits,
+          rng2,
+          3 * hidden_scaled.size(),
+          hidden_scaled.size()));
+      auto& mat = *silu_mat;
+      runtime::CubicPolyBundle bundle{
+          &mat.suf,
+          &mat.keys.k0,
+          &mat.keys.k1,
+          &mat.trunc_f,
+          &mat.trunc_2f,
+          cfg.frac_bits,
+          compiler::GateKind::SiLUSpline,
+          &mat.spec};
+      act_task = std::make_unique<runtime::CubicPolyTask>(
+          bundle,
+          std::span<const uint64_t>(hidden_scaled.data(), hidden_scaled.size()),
+          std::span<uint64_t>(hidden_scaled.data(), hidden_scaled.size()));
+      mat2_x_range = clamp_silu_range(cfg.frac_bits);
+    }
 
     // First wave: trunc hidden matmul accum to Qf.
     pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
@@ -416,7 +459,7 @@ void mlp_forward(const MLPConfig& cfg,
     // Second wave: apply SiLU cubic on the truncated hidden.
     pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
     enter_phase();
-    pe->add_task(std::move(silu_task));
+    pe->add_task(std::move(act_task));
     pe->run(R);
     barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
                                                      .drain_pfss_coeff = true,
@@ -441,7 +484,7 @@ void mlp_forward(const MLPConfig& cfg,
     // Second wave: trunc output matmul accum.
     std::mt19937_64 rng_out(1);
     auto plan2 = make_plan(B * T, H, D, mat2_x_range, mat2_w_range, row_l1_max2,
-                           have_silu_abs ? std::optional<compiler::AbsBound>(silu_abs_hint) : std::nullopt);
+                           have_act_abs ? std::optional<compiler::AbsBound>(act_abs_hint) : std::nullopt);
     if (std::getenv("MLP_TRUNC_DEBUG")) {
       std::cerr << "[mlp] plan2 kind=" << static_cast<int>(plan2.kind)
                 << " batch=" << plan2.batch << "\n";

@@ -41,6 +41,7 @@ struct SiluTaskMaterial {
   gates::CompositeKeyPair keys;
   compiler::TruncationLoweringResult trunc_f;
   compiler::TruncationLoweringResult trunc_2f;
+  gates::PiecewisePolySpec spec;
 };
 
 inline SiluTaskMaterial dealer_make_silu_task_material(proto::PfssBackendBatch& backend,
@@ -98,6 +99,7 @@ inline SiluTaskMaterial dealer_make_silu_task_material(proto::PfssBackendBatch& 
   }
 
   SiluTaskMaterial out;
+  out.spec = std::move(spec);
   out.suf = std::move(suf_gate);
   out.keys = std::move(kp);
   out.trunc_f = std::move(trunc_f);

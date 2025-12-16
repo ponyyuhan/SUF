@@ -116,6 +116,7 @@ struct CoeffKeyMeta {
 
 enum class GateKind : uint8_t {
   SiLUSpline,
+  GeLUSpline,
   NExp,
   Reciprocal,
   Rsqrt,

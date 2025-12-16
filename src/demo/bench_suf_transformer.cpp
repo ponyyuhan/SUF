@@ -2,10 +2,12 @@
 #include <condition_variable>
 #include <cstdio>
 #include <fstream>
+#include <filesystem>
 #include <iostream>
 #include <map>
 #include <csignal>
 #include <execinfo.h>
+#include <cstdlib>
 #include <mutex>
 #include <queue>
 #include <random>
@@ -39,6 +41,7 @@ namespace std { using std::experimental::span; }
 #include "runtime/pfss_phase_planner.hpp"
 #include "runtime/pfss_superbatch.hpp"
 #include "mpc/net.hpp"
+#include "gates/composite_fss.hpp"
 
 namespace {
 
@@ -48,6 +51,7 @@ struct Args {
   int seq_len = 128;
   int batch_size = 1;
   int n_iters = 1;
+  int n_layers = 0;  // 0 => use model spec
   std::string log_json;
 };
 
@@ -67,16 +71,18 @@ Args parse(int argc, char** argv) {
     else if (s == "--seq-len") a.seq_len = std::stoi(next_val(i));
     else if (s == "--batch-size") a.batch_size = std::stoi(next_val(i));
     else if (s == "--n-iters") a.n_iters = std::stoi(next_val(i));
+    else if (s == "--n-layers") a.n_layers = std::stoi(next_val(i));
     else if (s == "--log-json") a.log_json = next_val(i);
     else if (s.rfind("--model=", 0) == 0) a.model = take_val("--model=");
     else if (s.rfind("--backend=", 0) == 0) a.backend = take_val("--backend=");
     else if (s.rfind("--seq-len=", 0) == 0) a.seq_len = std::stoi(take_val("--seq-len="));
     else if (s.rfind("--batch-size=", 0) == 0) a.batch_size = std::stoi(take_val("--batch-size="));
     else if (s.rfind("--n-iters=", 0) == 0) a.n_iters = std::stoi(take_val("--n-iters="));
+    else if (s.rfind("--n-layers=", 0) == 0) a.n_layers = std::stoi(take_val("--n-layers="));
     else if (s.rfind("--log-json=", 0) == 0) a.log_json = take_val("--log-json=");
     else if (s == "--help" || s == "-h") {
       std::cerr << "Usage: bench_suf_transformer --model NAME [--backend cpu|gpu] "
-                << "[--seq-len L] [--batch-size B] [--n-iters N] [--log-json PATH]\n";
+                << "[--seq-len L] [--batch-size B] [--n-iters N] [--n-layers LAYERS] [--log-json PATH]\n";
       std::exit(0);
     }
   }
@@ -150,11 +156,26 @@ struct CountingNetChan : net::Chan {
   }
 };
 
+thread_local int tl_party = -1;
+thread_local int tl_iter = -1;
+static std::atomic<uint64_t> g_key_bytes{0};
+
+static void composite_keygen_hook(const gates::CompositeKeyPair& kp) {
+  // Our unit-test/bench harness generates full key pairs inside each party thread.
+  // Count keys once (party 0) and only on the first iteration.
+  if (tl_party != 0 || tl_iter != 0) return;
+  auto tapes = gates::composite_write_tapes(kp);
+  g_key_bytes.fetch_add(tapes.t0.bytes.size() + tapes.t1.bytes.size(), std::memory_order_relaxed);
+}
+
 void write_json(const Args& a,
                 const nn::ModelSpec& spec,
-                double elapsed_s,
-                uint64_t pfss_bytes,
-                uint64_t net_bytes,
+                int n_layers_run,
+                double elapsed_s_mean,
+                double elapsed_s_max,
+                uint64_t pfss_bytes_mean,
+                uint64_t net_bytes_mean,
+                uint64_t key_bytes,
                 const runtime::PhaseExecutor::Stats& stats0,
                 const runtime::PhaseExecutor::Stats& stats1) {
   const uint64_t coeff_jobs = stats0.pfss_coeff_jobs + stats1.pfss_coeff_jobs;
@@ -166,6 +187,11 @@ void write_json(const Args& a,
   const uint64_t open_flushes = stats0.open_flushes + stats1.open_flushes;
   const uint64_t opened_words = stats0.opened_words + stats1.opened_words;
 
+  std::filesystem::path out_path(a.log_json);
+  if (out_path.has_parent_path()) {
+    std::error_code ec;
+    std::filesystem::create_directories(out_path.parent_path(), ec);
+  }
   std::ofstream f(a.log_json);
   if (!f) throw std::runtime_error("failed to open log json: " + a.log_json);
   f << "{\n";
@@ -175,14 +201,17 @@ void write_json(const Args& a,
   f << "  \"seq_len\": " << a.seq_len << ",\n";
   f << "  \"batch_size\": " << a.batch_size << ",\n";
   f << "  \"n_layers\": " << spec.n_layers << ",\n";
+  f << "  \"n_layers_run\": " << n_layers_run << ",\n";
   f << "  \"n_heads\": " << spec.n_heads << ",\n";
   f << "  \"d_model\": " << spec.d_model << ",\n";
   f << "  \"n_bits\": " << spec.n_bits << ",\n";
   f << "  \"frac_bits\": " << spec.frac_bits << ",\n";
-  f << "  \"timing\": { \"online_time_s_mean\": " << elapsed_s << " },\n";
-  f << "  \"communication\": { \"pfss_bytes\": " << pfss_bytes
-    << ", \"net_bytes\": " << net_bytes
-    << ", \"online_bytes\": " << (pfss_bytes + net_bytes) << " },\n";
+  f << "  \"timing\": { \"online_time_s_mean\": " << elapsed_s_mean
+    << ", \"online_time_s_max\": " << elapsed_s_max << " },\n";
+  f << "  \"preprocessing\": { \"key_bytes\": " << key_bytes << " },\n";
+  f << "  \"communication\": { \"pfss_bytes\": " << pfss_bytes_mean
+    << ", \"net_bytes\": " << net_bytes_mean
+    << ", \"online_bytes\": " << (pfss_bytes_mean + net_bytes_mean) << " },\n";
   f << "  \"pfss\": {\n";
   f << "    \"num_jobs\": " << (coeff_jobs + trunc_jobs) << ",\n";
   f << "    \"num_flushes\": " << (coeff_flushes + trunc_flushes) << ",\n";
@@ -194,7 +223,7 @@ void write_json(const Args& a,
   f << "    \"open_flushes\": " << open_flushes << ",\n";
   f << "    \"opened_words\": " << opened_words << "\n";
   f << "  },\n";
-  f << "  \"notes\": \"single-layer transformer forward (PFSS-backed)\"\n";
+  f << "  \"notes\": \"transformer forward (PFSS-backed)\"\n";
   f << "}\n";
 }
 
@@ -212,8 +241,12 @@ int main(int argc, char** argv) {
   std::signal(SIGSEGV, dump_bt);
   std::signal(SIGILL, dump_bt);
   try {
+    // For performance benchmarking, drive the full PFSS pipeline even when the
+    // underlying backend is a clear/reference implementation.
+    ::setenv("SUF_FORCE_PFSS", "1", /*overwrite=*/0);
     auto args = parse(argc, argv);
     const auto& spec = nn::get_model_spec(args.model);
+    const int n_layers_run = (args.n_layers > 0) ? args.n_layers : static_cast<int>(spec.n_layers);
 
     const int B = args.batch_size;
     const int rows = args.seq_len;
@@ -263,6 +296,9 @@ int main(int argc, char** argv) {
     compiler::TruncationPassContext trunc_ctx0(*be0, 0x77726c3064756c6cull);
     compiler::TruncationPassContext trunc_ctx1(*be1, 0x77726c3164756c6cull);
 
+    gates::set_composite_keygen_hook(&composite_keygen_hook);
+    g_key_bytes.store(0, std::memory_order_relaxed);
+
     auto run_party = [&](int party,
                          proto::PfssBackendBatch& be,
                          CountingChan& pfss_ch,
@@ -270,6 +306,7 @@ int main(int argc, char** argv) {
                          compiler::TruncationPassContext& trunc_ctx,
                          runtime::PhaseExecutor::Stats& stats_out,
                          std::vector<uint64_t>& Xshare) {
+      tl_party = party;
       if (std::getenv("SUF_BENCH_TRACE")) {
         std::fprintf(stderr, "[bench_suf] party %d start backend=%s rows=%d cols=%d\n",
                      party, args.backend.c_str(), rows, cols);
@@ -286,6 +323,26 @@ int main(int argc, char** argv) {
       ctx.trunc_ctx = &trunc_ctx;
       ctx.pfss_backend_override = &be;
       ctx.frac_bits = fb;
+      runtime::PfssLayerPlanner bench_layer_planner;
+      {
+        runtime::PfssLayerPlanner::Limits lim;
+        // Be generous: end-to-end runs can easily exceed the conservative defaults.
+        lim.max_phases = 1ull << 20;
+        lim.max_coeff_jobs = 1ull << 22;
+        lim.max_trunc_jobs = 1ull << 22;
+        lim.max_coeff_hatx_words = 1ull << 26;
+        lim.max_trunc_hatx_words = 1ull << 26;
+        lim.max_coeff_hatx_bytes = lim.max_coeff_hatx_words * sizeof(uint64_t);
+        lim.max_trunc_hatx_bytes = lim.max_trunc_hatx_words * sizeof(uint64_t);
+        lim.max_coeff_flushes = 1ull << 16;
+        lim.max_trunc_flushes = 1ull << 16;
+        lim.max_coeff_active_elems = 1ull << 26;
+        lim.max_trunc_active_elems = 1ull << 26;
+        lim.max_coeff_cost_effbits = 1ull << 62;
+        lim.max_trunc_cost_effbits = 1ull << 62;
+        bench_layer_planner.set_limits(lim);
+      }
+      ctx.pfss_layer_planner = &bench_layer_planner;
       if (args.backend == "gpu" && std::getenv("SUF_BENCH_EAGER_PFSS")) {
         // Optional: eager PFSS flushing for GPU stress benches.
         ctx.force_eager_pfss = true;
@@ -321,26 +378,37 @@ int main(int argc, char** argv) {
       cfg.mlp.D = cols;
       cfg.mlp.frac_bits = fb;
       cfg.mlp.Hidden = Dff;
+      cfg.mlp.activation = (spec.mlp_activation == "gelu")
+          ? nn::MLPConfig::Activation::GeLU
+          : nn::MLPConfig::Activation::SiLU;
 
-      std::vector<uint64_t> Y(static_cast<size_t>(rows * cols), 0ull);
-      nn::KVCache cache(/*B=*/B, /*H=*/H, /*S_max=*/rows, /*Dh=*/Dh);
+      std::vector<uint64_t> Y(static_cast<size_t>(B * rows * cols), 0ull);
+      std::vector<nn::KVCache> caches;
+      caches.reserve(static_cast<size_t>(n_layers_run));
+      for (int l = 0; l < n_layers_run; ++l) {
+        caches.emplace_back(/*B=*/B, /*H=*/H, /*S_max=*/rows, /*Dh=*/Dh);
+      }
 
       if (std::getenv("SUF_BENCH_TRACE")) {
         std::fprintf(stderr, "[bench_suf] party %d entering transformer_layer_forward\n", party);
       }
-      nn::transformer_layer_forward(
-          cfg,
-          party,
-          net_ch,
-          nn::view3(Xshare.data(), B, rows, cols),
-          nn::view2(Wqkv.data(), cols, cols * 3),
-          nn::view2(Wout.data(), cols, cols),
-          nn::view2(W1.data(), cols, Dff),
-          nn::view2(W2.data(), Dff, cols),
-          cache,
-          nn::view3(Y.data(), B, rows, cols),
-          &ctx,
-          &pe);
+      for (int l = 0; l < n_layers_run; ++l) {
+        std::fill(Y.begin(), Y.end(), 0ull);
+        nn::transformer_layer_forward(
+            cfg,
+            party,
+            net_ch,
+            nn::view3(Xshare.data(), B, rows, cols),
+            nn::view2(Wqkv.data(), cols, cols * 3),
+            nn::view2(Wout.data(), cols, cols),
+            nn::view2(W1.data(), cols, Dff),
+            nn::view2(W2.data(), Dff, cols),
+            caches[static_cast<size_t>(l)],
+            nn::view3(Y.data(), B, rows, cols),
+            &ctx,
+            &pe);
+        Xshare.swap(Y);
+      }
       if (std::getenv("SUF_BENCH_TRACE")) {
         std::fprintf(stderr, "[bench_suf] party %d finished transformer_layer_forward\n", party);
       }
@@ -349,28 +417,60 @@ int main(int argc, char** argv) {
     };
 
     runtime::PhaseExecutor::Stats st0, st1;
-    auto start = std::chrono::steady_clock::now();
-    std::exception_ptr exc1;
-    std::exception_ptr exc0;
-    std::thread t([&] {
-      try {
-        run_party(1, *be1, ch1, nch1, trunc_ctx1, st1, X1);
-      } catch (...) { exc1 = std::current_exception(); }
-    });
-    try {
-      run_party(0, *be0, ch0, nch0, trunc_ctx0, st0, X0);
-    } catch (...) {
-      exc0 = std::current_exception();
-    }
-    if (t.joinable()) t.join();
-    if (exc1) std::rethrow_exception(exc1);
-    if (exc0) std::rethrow_exception(exc0);
-    auto end = std::chrono::steady_clock::now();
-    double elapsed_s = std::chrono::duration<double>(end - start).count();
+    double sum_s = 0.0;
+    double max_s = 0.0;
+    uint64_t sum_pfss_bytes = 0;
+    uint64_t sum_net_bytes = 0;
+    for (int it = 0; it < std::max(1, args.n_iters); ++it) {
+      tl_iter = it;
+      // Reset comm counters between iterations.
+      {
+        std::lock_guard<std::mutex> lk(pfss_sh.mu);
+        pfss_sh.sent0 = pfss_sh.sent1 = 0;
+        std::queue<std::vector<uint8_t>>().swap(pfss_sh.q0to1);
+        std::queue<std::vector<uint8_t>>().swap(pfss_sh.q1to0);
+      }
+      {
+        std::lock_guard<std::mutex> lk(net_sh.mu);
+        net_sh.sent0 = net_sh.sent1 = 0;
+        std::queue<uint64_t>().swap(net_sh.q0to1);
+        std::queue<uint64_t>().swap(net_sh.q1to0);
+      }
 
-    uint64_t pfss_bytes = pfss_sh.sent0 + pfss_sh.sent1;
-    uint64_t net_bytes = net_sh.sent0 + net_sh.sent1;
-    write_json(args, spec, elapsed_s, pfss_bytes, net_bytes, st0, st1);
+      auto start = std::chrono::steady_clock::now();
+      std::exception_ptr exc1;
+      std::exception_ptr exc0;
+      std::thread t([&] {
+        try {
+          run_party(1, *be1, ch1, nch1, trunc_ctx1, st1, X1);
+        } catch (...) { exc1 = std::current_exception(); }
+      });
+      try {
+        run_party(0, *be0, ch0, nch0, trunc_ctx0, st0, X0);
+      } catch (...) {
+        exc0 = std::current_exception();
+      }
+      if (t.joinable()) t.join();
+      if (exc1) std::rethrow_exception(exc1);
+      if (exc0) std::rethrow_exception(exc0);
+      auto end = std::chrono::steady_clock::now();
+      double elapsed_s = std::chrono::duration<double>(end - start).count();
+      sum_s += elapsed_s;
+      if (elapsed_s > max_s) max_s = elapsed_s;
+
+      uint64_t pfss_bytes = pfss_sh.sent0 + pfss_sh.sent1;
+      uint64_t net_bytes = net_sh.sent0 + net_sh.sent1;
+      sum_pfss_bytes += pfss_bytes;
+      sum_net_bytes += net_bytes;
+    }
+    double mean_s = sum_s / static_cast<double>(std::max(1, args.n_iters));
+    uint64_t mean_pfss_bytes = sum_pfss_bytes / static_cast<uint64_t>(std::max(1, args.n_iters));
+    uint64_t mean_net_bytes = sum_net_bytes / static_cast<uint64_t>(std::max(1, args.n_iters));
+
+    uint64_t key_bytes = g_key_bytes.load(std::memory_order_relaxed);
+    gates::set_composite_keygen_hook(nullptr);
+
+    write_json(args, spec, n_layers_run, mean_s, max_s, mean_pfss_bytes, mean_net_bytes, key_bytes, st0, st1);
     std::cout << "Wrote bench log to " << args.log_json << "\n";
   } catch (const std::exception& e) {
     std::cerr << "bench_suf_transformer error: " << e.what() << "\n";

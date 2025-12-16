@@ -1,0 +1,102 @@
+diff --git a/GPU-MPC/experiments/sigma/sigma.cu b/GPU-MPC/experiments/sigma/sigma.cu
+index 0f758b7..b4a7a3a 100644
+--- a/GPU-MPC/experiments/sigma/sigma.cu
++++ b/GPU-MPC/experiments/sigma/sigma.cu
+@@ -19,6 +19,9 @@
+ // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ // SOFTWARE.
+ 
++// Work around an NVCC 11.5 parsing issue triggered when PRNG.h is first
++// included transitively via Sytorch headers: include it early.
++#include <cryptoTools/Crypto/PRNG.h>
+ #include <sytorch/module.h>
+ #include <sytorch/utils.h>
+ #include "gpt2.h"
+@@ -245,4 +248,4 @@ int main(int __argc, char **__argv)
+     statsFile << ss.rdbuf();
+     statsFile.close();
+     return 0;
+-}
+\ No newline at end of file
++}
+diff --git a/GPU-MPC/utils/gpu_mem.cu b/GPU-MPC/utils/gpu_mem.cu
+index f241ad4..c99b82c 100644
+--- a/GPU-MPC/utils/gpu_mem.cu
++++ b/GPU-MPC/utils/gpu_mem.cu
+@@ -31,6 +31,7 @@
+ // #include <sys/types.h>
+ 
+ cudaMemPool_t mempool;
++static bool g_use_async_alloc = true;
+ 
+ extern "C" void initGPUMemPool()
+ {
+@@ -39,27 +40,42 @@ extern "C" void initGPUMemPool()
+     // is it okay to use device=0?
+     checkCudaErrors(cudaDeviceGetAttribute(&isMemPoolSupported,
+                                            cudaDevAttrMemoryPoolsSupported, device));
+-    // printf("%d\n", isMemPoolSupported);
+-    assert(isMemPoolSupported);
++    if (!isMemPoolSupported) {
++        printf("CUDA mempools not supported; falling back to cudaMalloc/cudaFree.\n");
++        g_use_async_alloc = false;
++        return;
++    }
+     /* implicitly assumes that the device is 0 */
+ 
+     checkCudaErrors(cudaDeviceGetDefaultMemPool(&mempool, device));
+     uint64_t threshold = UINT64_MAX;
+     checkCudaErrors(cudaMemPoolSetAttribute(mempool, cudaMemPoolAttrReleaseThreshold, &threshold));
+-    uint64_t *d_dummy_ptr;
+-    uint64_t bytes = 40 * (1ULL << 30);
+-    checkCudaErrors(cudaMallocAsync(&d_dummy_ptr, bytes, 0));
++    uint64_t *d_dummy_ptr = nullptr;
++    uint64_t bytes = 256ull * (1ULL << 20);  // small probe allocation
++    cudaError_t st = cudaMallocAsync(&d_dummy_ptr, bytes, 0);
++    if (st == cudaErrorNotSupported) {
++        printf("cudaMallocAsync not supported; falling back to cudaMalloc/cudaFree.\n");
++        g_use_async_alloc = false;
++        return;
++    }
++    checkCudaErrors(st);
+     checkCudaErrors(cudaFreeAsync(d_dummy_ptr, 0));
+-    uint64_t reserved_read, threshold_read;
+-    checkCudaErrors(cudaMemPoolGetAttribute(mempool, cudaMemPoolAttrReservedMemCurrent, &reserved_read));
+-    checkCudaErrors(cudaMemPoolGetAttribute(mempool, cudaMemPoolAttrReleaseThreshold, &threshold_read));
+-    printf("reserved memory: %lu %lu\n", reserved_read, threshold_read);
+ }
+ 
+ extern "C" uint8_t *gpuMalloc(size_t size_in_bytes)
+ {
+     uint8_t *d_a;
+-    checkCudaErrors(cudaMallocAsync(&d_a, size_in_bytes, 0));
++    if (g_use_async_alloc) {
++        cudaError_t st = cudaMallocAsync(&d_a, size_in_bytes, 0);
++        if (st == cudaErrorNotSupported) {
++            g_use_async_alloc = false;
++            checkCudaErrors(cudaMalloc(&d_a, size_in_bytes));
++        } else {
++            checkCudaErrors(st);
++        }
++    } else {
++        checkCudaErrors(cudaMalloc(&d_a, size_in_bytes));
++    }
+     return d_a;
+ }
+@@ -76,7 +92,17 @@ extern "C" uint8_t *cpuMalloc(size_t size_in_bytes, bool pin)
+ 
+ extern "C" void gpuFree(void *d_a)
+ {
+-    checkCudaErrors(cudaFreeAsync(d_a, 0));
++    if (g_use_async_alloc) {
++        cudaError_t st = cudaFreeAsync(d_a, 0);
++        if (st == cudaErrorNotSupported) {
++            g_use_async_alloc = false;
++            checkCudaErrors(cudaFree(d_a));
++        } else {
++            checkCudaErrors(st);
++        }
++    } else {
++        checkCudaErrors(cudaFree(d_a));
++    }
+ }

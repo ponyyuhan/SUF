@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <algorithm>
 #include <functional>
@@ -66,6 +67,22 @@
 #endif
 
 namespace gates {
+
+struct CompositeKeyPair;
+
+namespace detail {
+using KeygenHookFn = void (*)(const CompositeKeyPair&);
+inline std::atomic<KeygenHookFn> g_keygen_hook{nullptr};
+
+inline void maybe_record_keygen(const CompositeKeyPair& kp) {
+  auto fn = g_keygen_hook.load(std::memory_order_relaxed);
+  if (fn) fn(kp);
+}
+}  // namespace detail
+
+inline void set_composite_keygen_hook(detail::KeygenHookFn fn) {
+  detail::g_keygen_hook.store(fn, std::memory_order_relaxed);
+}
 
 // Minimal composite gate key (per instance) for PFSS + Beaver evaluation.
 struct CompositePartyKey {
@@ -446,6 +463,7 @@ inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t
     out.k0.bit_triples[i] = {a0, b0, c0};
     out.k1.bit_triples[i] = {a1, b1, c1};
   }
+  detail::maybe_record_keygen(out);
   return out;
 }
 
@@ -680,6 +698,7 @@ inline CompositeKeyPair composite_gen_trunc_gate(proto::PfssBackend& backend,
     out.k0.bit_triples[i] = proto::BeaverTripleBitShare{a0, b0, c0};
     out.k1.bit_triples[i] = proto::BeaverTripleBitShare{a1, b1, c1};
   }
+  detail::maybe_record_keygen(out);
   return out;
 }
 

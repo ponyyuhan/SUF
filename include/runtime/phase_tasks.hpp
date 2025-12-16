@@ -8,6 +8,7 @@
 #include <type_traits>
 #include <random>
 #include <cstring>
+#include <cstdlib>
 #ifdef SUF_HAVE_CUDA
 #include <cuda_runtime.h>
 #endif
@@ -402,7 +403,9 @@ class TruncTask final : public detail::PhaseTask {
           if (!R.opens->ready(h_open_)) return detail::Need::Open;
           auto v = R.opens->view(h_open_);
           opened_.assign(v.begin(), v.end());
-          if (R.pfss_backend && dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) != nullptr) {
+          if (R.pfss_backend &&
+              dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) != nullptr &&
+              !std::getenv("SUF_FORCE_PFSS")) {
             if (per_element_) {
               for (size_t i = 0; i < opened_.size(); ++i) {
                 int shift = 0;
@@ -1518,7 +1521,7 @@ class LayerNormTask final : public detail::PhaseTask {
     if (st_ == St::Mean) {
       auto* ref_backend =
           (R.pfss_backend) ? dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) : nullptr;
-      if (ref_backend) {
+      if (ref_backend && !std::getenv("SUF_FORCE_PFSS")) {
         if (!R.net_chan) throw std::runtime_error("LayerNormTask: net channel missing");
         std::vector<uint64_t> other(x_.size(), 0);
         if (R.party == 0) {
@@ -2099,11 +2102,15 @@ class CubicPolyTask final : public detail::PhaseTask {
           std::cerr << "CubicPolyTask coeffs: c0=" << c0_[0] << " c1=" << c1_[0]
                     << " c2=" << c2_[0] << " c3=" << c3_[0] << " r=" << v.r << "\n";
         }
-        if (R.pfss_backend && dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) != nullptr) {
+        if (R.pfss_backend &&
+            dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) != nullptr &&
+            !std::getenv("SUF_FORCE_PFSS")) {
           // Reference backend: evaluate directly using the reference polynomial/spec.
           auto eval_ref = [&](int64_t x_plain, size_t idx) -> int64_t {
             if (bundle_.spec && bundle_.gate_kind == compiler::GateKind::SiLUSpline) {
               return gates::ref_silu_fixed(*bundle_.spec, x_plain);
+            } else if (bundle_.spec && bundle_.gate_kind == compiler::GateKind::GeLUSpline) {
+              return gates::eval_piecewise_poly_ref(*bundle_.spec, x_plain);
             } else if (bundle_.spec && bundle_.gate_kind == compiler::GateKind::NExp) {
               return gates::ref_nexp_fixed(*bundle_.spec, x_plain);
             }
@@ -2411,7 +2418,8 @@ class RecipTask final : public detail::PhaseTask {
           if (!force_ref_full_ &&
               R.pfss_backend &&
               dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) != nullptr &&
-              bundle_.init_spec) {
+              bundle_.init_spec &&
+              !std::getenv("SUF_FORCE_PFSS")) {
             y_.assign(opened_.size(), 0);
             for (size_t i = 0; i < opened_.size(); ++i) {
               uint64_t x_plain_ring = proto::sub_mod(static_cast<uint64_t>(opened_[i]), key_->compiled.r_in);
