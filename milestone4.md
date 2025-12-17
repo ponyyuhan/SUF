@@ -555,10 +555,3 @@ To keep momentum and avoid refactors:
 This will give you an end-to-end path:
 **SUF → compiler → PFSS keys → online eval**
 with correctness validated at each boundary.
-
----
-
-If you want, in the next message I can give you:
-
-* a concrete `CompiledBoolDag` representation that is **evaluation-friendly on arithmetic bit shares** (with a cost model that reuses your `BeaverMul64Batch`), and
-* the exact key-blob formats + parsing code snippets for `Myl7FssBackend` so your adapter becomes “drop-in” rather than conceptual.
