@@ -4,10 +4,12 @@
 #include <cmath>
 #include <stdexcept>
 
+#include "proto/common.hpp"
+
 namespace nn {
 
-static inline int64_t to_signed(uint64_t v) { return static_cast<int64_t>(v); }
-static inline uint64_t to_ring(int64_t v) { return static_cast<uint64_t>(v); }
+static inline int64_t to_signed(uint64_t v) { return proto::to_signed(v); }
+static inline uint64_t to_ring(int64_t v) { return proto::from_signed(v); }
 
 static void matmul2d(const uint64_t* X,
                      const int64_t* W,

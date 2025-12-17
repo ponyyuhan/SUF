@@ -78,9 +78,10 @@ inline NexpCompositeKeys dealer_make_nexp_composite_keys(proto::PfssBackend& bac
     return std::max(bits, 1);
   };
   int eff_bits = std::min(bits_mag(max_end) + 1, 64);
+  const uint64_t r_in = rng();
   std::vector<uint64_t> r_out(static_cast<size_t>(suf_gate.r_out), 0ull);
   auto kp = gates::composite_gen_backend_with_masks(
-      suf_gate, backend, rng, /*r_in=*/0ull, r_out, /*batch_N=*/1, compiler::GateKind::NExp,
+      suf_gate, backend, rng, r_in, r_out, /*batch_N=*/1, compiler::GateKind::NExp,
       /*pred_eff_bits_hint=*/eff_bits,
       /*coeff_eff_bits_hint=*/eff_bits);
   NexpCompositeKeys out;
@@ -110,9 +111,10 @@ inline NexpTaskMaterial dealer_make_nexp_task_material(proto::PfssBackendBatch& 
     return std::max(bits, 1);
   };
   int eff_bits = std::min(bits_mag(max_end) + 1, 64);
+  const uint64_t r_in = rng();
   std::vector<uint64_t> r_out(static_cast<size_t>(suf_gate.r_out), 0ull);
   auto kp = gates::composite_gen_backend_with_masks(
-      suf_gate, backend, rng, /*r_in=*/0ull, r_out, batch_N, compiler::GateKind::NExp,
+      suf_gate, backend, rng, r_in, r_out, batch_N, compiler::GateKind::NExp,
       /*pred_eff_bits_hint=*/eff_bits,
       /*coeff_eff_bits_hint=*/eff_bits);
   kp.k0.compiled.gate_kind = compiler::GateKind::NExp;

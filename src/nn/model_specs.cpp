@@ -7,7 +7,8 @@ namespace {
 
 // Starter table using common HF configs and the bitwidth guidance from bench.md.
 static const std::vector<ModelSpec> kSpecs = {
-    {"bert-tiny", "prajjwal1/bert-tiny", "gelu", /*causal=*/false, 2, 2, 128, 512, 512, 50, 12},
+    // Match SIGMA's bert-tiny bitwidth (see EzPC GPU-MPC experiments/sigma/sigma.cu).
+    {"bert-tiny", "prajjwal1/bert-tiny", "gelu", /*causal=*/false, 2, 2, 128, 512, 512, 37, 12},
     {"bert-base", "bert-base-uncased", "gelu", /*causal=*/false, 12, 12, 768, 3072, 512, 50, 12},
     {"bert-large", "bert-large-uncased", "gelu", /*causal=*/false, 24, 16, 1024, 4096, 512, 51, 12},
     {"gpt2", "gpt2", "gelu", /*causal=*/true, 12, 12, 768, 3072, 1024, 50, 12},

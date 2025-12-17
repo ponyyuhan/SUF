@@ -18,6 +18,10 @@
 #include "proto/backend_factory.hpp"
 #include "mpc/net.hpp"
 
+namespace proto {
+struct IChannel;
+}
+
 namespace nn {
 
 // Simple per-layer builder context that records ops/ranges/scales and allows
@@ -31,6 +35,7 @@ struct LayerContext {
   runtime::PfssGpuStager* pfss_gpu_stager = nullptr;         // optional device staging surface
   proto::PfssBackendBatch* pfss_backend_override = nullptr;  // optional backend (e.g., GPU) override
   std::unique_ptr<proto::PfssBackendBatch> owned_pfss_backend;  // managed override if set
+  proto::IChannel* pfss_chan = nullptr;  // optional dedicated PFSS byte channel
   net::Chan* pfss_net_chan = nullptr;  // optional dedicated PFSS channel; defaults to main chan
   int frac_bits = 16;
   // Enable a layer-wide super-plan: suppress inner PFSS/Open drains inside attention/MLP

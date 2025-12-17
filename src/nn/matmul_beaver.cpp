@@ -13,8 +13,8 @@ namespace nn {
 
 namespace {
 
-inline int64_t to_signed(uint64_t v) { return static_cast<int64_t>(v); }
-inline uint64_t to_ring(int64_t v) { return static_cast<uint64_t>(v); }
+inline int64_t to_signed(uint64_t v) { return proto::to_signed(v); }
+inline uint64_t to_ring(int64_t v) { return proto::from_signed(v); }
 inline size_t b_offset(size_t k, size_t n, size_t K, size_t N, bool w_transposed) {
   return w_transposed ? (n * K + k) : (k * N + n);
 }
@@ -191,17 +191,12 @@ void matmul_beaver_finalize(PreparedMatmulBeaver& prep,
   }
   const auto& bundle = *bundle_ptr;
   const auto& key = (party == 0) ? bundle.keys.k0 : bundle.keys.k1;
-  if (key.triples.size() < total) {
-    throw std::runtime_error("matmul_beaver_finalize: truncation triples exhausted");
-  }
 
   // Build masked hatx shares and open them to both parties.
   std::vector<uint64_t> hatx_share(total);
-  if (key.r_in_share_vec.empty() || key.r_in_share_vec.size() < total) {
-    throw std::runtime_error("matmul_beaver: r_in_share_vec missing or too small");
-  }
   for (size_t i = 0; i < total; ++i) {
-    hatx_share[i] = proto::add_mod(acc_share[i], key.r_in_share_vec[i]);
+    uint64_t rin = (key.r_in_share_vec.size() > i) ? key.r_in_share_vec[i] : key.r_in_share;
+    hatx_share[i] = proto::add_mod(acc_share[i], rin);
   }
   std::vector<uint64_t> hatx_public;
   open_public_hatx(party, ch, hatx_share, hatx_public);
@@ -257,9 +252,10 @@ std::pair<MatmulBeaverTriple, MatmulBeaverTriple> dealer_gen_matmul_triple(
   auto split_vec = [&](const std::vector<int64_t>& src) {
     std::vector<uint64_t> s0(src.size()), s1(src.size());
     for (size_t i = 0; i < src.size(); ++i) {
-      uint64_t r = static_cast<uint64_t>(dist(rng));
+      uint64_t r = to_ring(dist(rng));
+      uint64_t src_ring = to_ring(src[i]);
       s0[i] = r;
-      s1[i] = to_ring(src[i] - static_cast<int64_t>(r));
+      s1[i] = proto::sub_mod(src_ring, r);
     }
     return std::make_pair(std::move(s0), std::move(s1));
   };
@@ -401,9 +397,6 @@ static void matmul_beaver2d(const MatmulBeaverParams& params,
   }
   const auto& bundle = *bundle_ptr;
   const auto& key = (party == 0) ? bundle.keys.k0 : bundle.keys.k1;
-  if (key.triples.size() < total) {
-    throw std::runtime_error("matmul_beaver: truncation triples exhausted");
-  }
 
   // Build masked hatx shares and open them to both parties.
   std::vector<uint64_t> hatx_share(total);

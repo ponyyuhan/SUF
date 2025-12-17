@@ -271,7 +271,6 @@ inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t
     bool ok = (lut_backend != nullptr);
     ok = ok && !compiled.coeff.intervals.empty();
     ok = ok && compiled.coeff.out_words > 0;
-    ok = ok && compiled.coeff.intervals.front().lo == 0ull;
     if (ok) {
       uint64_t prev = compiled.coeff.intervals.front().lo;
       for (size_t idx = 0; idx < compiled.coeff.intervals.size(); ++idx) {
@@ -299,7 +298,9 @@ inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t
     }
     if (!ok) {
       // Fallback to the baseline step-DCF coeff program when interval-LUT
-      // compilation yields a wrapping/non-contiguous partition (common when r_in rotates).
+      // compilation yields a non-contiguous partition. Note: partitions are
+      // allowed to start at non-zero `lo` (the LUT evaluator defaults to the
+      // last interval for x < cutpoints[0], matching ring wrap-around).
       compiled = compiler::compile_suf_to_pfss_two_programs(
           F, r_in, r_out, compiler::CoeffMode::kStepDcf, gate_kind);
       if (pred_eff_bits_hint > 0 && pred_eff_bits_hint <= compiled.pred.n) {
@@ -323,8 +324,7 @@ inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t
   auto [r0, r1] = split_add(r_in);
   out.k0.r_in_share = r0;
   out.k1.r_in_share = r1;
-  out.k0.r_in_share_vec.assign(batch_N, r0);
-  out.k1.r_in_share_vec.assign(batch_N, r1);
+  // Keep per-element r_in optional; tasks fall back to scalar `r_in_share` when unset.
   out.k0.r_out_share.resize(F.r_out);
   out.k1.r_out_share.resize(F.r_out);
   for (int i = 0; i < F.r_out; i++) {
@@ -618,6 +618,8 @@ inline CompositeKeyPair composite_gen_trunc_gate(proto::PfssBackend& backend,
   // host unmasking pass.
   std::vector<uint64_t> r_out = {0ull};
   auto compiled = compiler::compile_suf_to_pfss_two_programs(F, r, r_out, compiler::CoeffMode::kStepDcf, kind);
+  // Ensure gate kind is preserved for runtime dispatch/fast paths.
+  compiled.gate_kind = kind;
   compiled.layout.arith_ports = {"y"};
   compiled.layout.bool_ports.clear();
   if (frac_bits > 0) compiled.layout.bool_ports.push_back("carry");
@@ -641,8 +643,7 @@ inline CompositeKeyPair composite_gen_trunc_gate(proto::PfssBackend& backend,
   auto [r0, r1] = split_add(r);
   out.k0.r_in_share = r0;
   out.k1.r_in_share = r1;
-  out.k0.r_in_share_vec.assign(batch_N, r0);
-  out.k1.r_in_share_vec.assign(batch_N, r1);
+  // Keep per-element r_in optional; tasks fall back to scalar `r_in_share` when unset.
   out.k0.r_out_share.resize(1);
   out.k1.r_out_share.resize(1);
   auto [rout0, rout1] = split_add(r_out[0]);
@@ -680,10 +681,10 @@ inline CompositeKeyPair composite_gen_trunc_gate(proto::PfssBackend& backend,
   proto::BitOrder bit_order = backend.bit_order();
   out.k0.pred_meta.bit_order = bit_order;
   out.k1.pred_meta.bit_order = bit_order;
-  out.k0.pred_meta.sem = proto::ShareSemantics::XorBytes;
-  out.k1.pred_meta.sem = proto::ShareSemantics::XorBytes;
-  out.k0.pred_meta.out_bytes = 1;
-  out.k1.pred_meta.out_bytes = 1;
+  out.k0.pred_meta.sem = proto::ShareSemantics::AddU64;
+  out.k1.pred_meta.sem = proto::ShareSemantics::AddU64;
+  out.k0.pred_meta.out_bytes = 8;
+  out.k1.pred_meta.out_bytes = 8;
   out.k0.cut_pred_meta = out.k0.pred_meta;
   out.k1.cut_pred_meta = out.k1.pred_meta;
   out.k0.coeff_meta.bit_order = bit_order;
@@ -726,7 +727,10 @@ inline CompositeKeyPair composite_gen_trunc_gate(proto::PfssBackend& backend,
     }
     total_words = static_cast<int>((qs.size() + 63) / 64);
   };
-  if (packed_backend2 && !compiled.pred.queries.empty()) {
+  // Packed-lt compare only supports XOR-bitmask outputs; truncation predicates
+  // are emitted as additive shares, so keep the DCF path even when packed is available.
+  if (out.k0.pred_meta.sem == proto::ShareSemantics::XorBytes &&
+      packed_backend2 && !compiled.pred.queries.empty()) {
     out.k0.use_packed_pred = out.k1.use_packed_pred = true;
     make_groups(compiled.pred.queries, compiled.pred.n,
                 out.k0.packed_pred_groups, out.k1.packed_pred_groups,
@@ -737,7 +741,10 @@ inline CompositeKeyPair composite_gen_trunc_gate(proto::PfssBackend& backend,
     uint64_t thr = q.theta;
     int bits = (q.kind == compiler::RawPredKind::kLtU64) ? compiled.pred.n : q.f;
     auto thr_bits = backend.u64_to_bits_msb(thr, bits);
-    std::vector<proto::u8> payload{1u};
+    std::vector<proto::u8> payload =
+        (out.k0.pred_meta.sem == proto::ShareSemantics::AddU64)
+            ? proto::pack_u64_le(1ull)
+            : std::vector<proto::u8>{1u};
     auto kp = backend.gen_dcf(bits, thr_bits, payload);
     out.k0.pred_keys.push_back(kp.k0);
     out.k1.pred_keys.push_back(kp.k1);
@@ -759,52 +766,13 @@ inline CompositeKeyPair composite_gen_trunc_gate(proto::PfssBackend& backend,
   out.k0.total_delta_share = total_delta;
   out.k1.total_delta_share.assign(total_delta.size(), 0ull);
 
-  // Triples: selectors + bool DAG + coeff selection + Horner.
-  //
-  // Note: trunc/ARS gates still run through the generic composite evaluator
-  // (selector-weighted coeff/bool + Horner). So triple provisioning must
-  // cover *all* Beaver multiplies in that path, not only the bool DAG.
-  size_t cut_count = compiled.coeff.cutpoints_ge.size();
-  size_t piece_count = cut_count + 1;
-  size_t cut_b2a_mul = cut_count;                       // b2a for cut bits
-  size_t selector_chain_mul = (cut_count > 0) ? (cut_count - 1) : 0;  // (1-cut_{k-1})*cut_k
-  size_t coeff_select_mul = piece_count * static_cast<size_t>(compiled.coeff.out_words);
-  // For each piece and bool output: b2a(bit) + selector*bit
-  size_t bool_b2a_mul = piece_count * static_cast<size_t>(compiled.ell);
-  size_t bool_select_mul = piece_count * static_cast<size_t>(compiled.ell);
-  size_t horner_mul = static_cast<size_t>(compiled.r) * static_cast<size_t>(compiled.degree);
-  size_t triple_need =
-      (cut_b2a_mul + selector_chain_mul + coeff_select_mul + bool_b2a_mul + bool_select_mul + horner_mul) *
-      std::max<size_t>(1, batch_N);
-
-  // selectors_from_cutbits uses (cuts + 1) multiplications when cuts>0; here cuts==0.
-  out.k0.triples.resize(triple_need);
-  out.k1.triples.resize(triple_need);
-  for (size_t i = 0; i < triple_need; i++) {
-    uint64_t a = rng(), b = rng(), c = proto::mul_mod(a, b);
-    auto [a0, a1] = split_add(a);
-    auto [b0, b1] = split_add(b);
-    auto [c0, c1] = split_add(c);
-    out.k0.triples[i] = proto::BeaverTriple64Share{a0, b0, c0};
-    out.k1.triples[i] = proto::BeaverTriple64Share{a1, b1, c1};
-  }
-
-  size_t bit_and = triple_need;  // reuse count for bit triples
-  out.k0.bit_triples.resize(bit_and);
-  out.k1.bit_triples.resize(bit_and);
-  for (size_t i = 0; i < bit_and; i++) {
-    uint8_t a = static_cast<uint8_t>(rng() & 1u);
-    uint8_t b = static_cast<uint8_t>(rng() & 1u);
-    uint8_t c = static_cast<uint8_t>(a & b);
-    uint8_t a0 = static_cast<uint8_t>(rng() & 1u);
-    uint8_t a1 = static_cast<uint8_t>(a ^ a0);
-    uint8_t b0 = static_cast<uint8_t>(rng() & 1u);
-    uint8_t b1 = static_cast<uint8_t>(b ^ b0);
-    uint8_t c0 = static_cast<uint8_t>(rng() & 1u);
-    uint8_t c1 = static_cast<uint8_t>(c ^ c0);
-    out.k0.bit_triples[i] = proto::BeaverTripleBitShare{a0, b0, c0};
-    out.k1.bit_triples[i] = proto::BeaverTripleBitShare{a1, b1, c1};
-  }
+  // Truncation evaluation uses a specialized non-interactive path when predicate
+  // shares are additive (see composite_eval_batch_backend AddU64 path), so no
+  // Beaver triples are required here.
+  out.k0.triples.clear();
+  out.k1.triples.clear();
+  out.k0.bit_triples.clear();
+  out.k1.bit_triples.clear();
   detail::maybe_record_keygen(out);
   return out;
 }
@@ -1151,6 +1119,11 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
   auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(&backend);
   bool want_device_out = staged && in.device_outputs;
   if (auto* ref = dynamic_cast<proto::ReferenceBackend*>(&backend)) {
+    // Benchmarking may request the full PFSS pipeline even when using the
+    // deterministic reference backend; in that case, do not short-circuit.
+    if (std::getenv("SUF_FORCE_PFSS")) {
+      // fall through to PFSS path below.
+    } else {
     // Deterministic path: evaluate SUF ref and mask with r_out; booleans additive on party0.
     for (size_t i = 0; i < N; ++i) {
       uint64_t x_plain = proto::sub_mod(in.hatx[i], compiled.r_in);
@@ -1181,6 +1154,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     (void)ch;
     (void)ref;
     return out;
+    }
   }
   if (compiled.coeff.mode == compiler::CoeffMode::kIntervalLut) {
     if (compiled.degree != 0 || compiled.ell != 0) {
@@ -1229,6 +1203,172 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       // Surface backend-owned device output pointer for callers that want device-only flows.
       out.haty_device = staged->last_device_output();
       out.haty_device_words = N * out_words;
+    }
+    return out;
+  }
+  if (k.pred_meta.sem == proto::ShareSemantics::AddU64) {
+    if (!(compiled.gate_kind == compiler::GateKind::FaithfulTR ||
+          compiled.gate_kind == compiler::GateKind::FaithfulARS ||
+          compiled.gate_kind == compiler::GateKind::GapARS)) {
+      throw std::runtime_error(
+          "composite_eval_batch_backend: AddU64 predicates only supported for truncation gates (gate_kind=" +
+          std::to_string(static_cast<int>(compiled.gate_kind)) + ")");
+    }
+    if (k.pred_meta.out_bytes != 8) {
+      throw std::runtime_error("composite_eval_batch_backend: AddU64 predicates require out_bytes=8");
+    }
+    if (compiled.coeff.mode != compiler::CoeffMode::kStepDcf) {
+      throw std::runtime_error("composite_eval_batch_backend: truncation AddU64 path requires step-DCF coeff mode");
+    }
+    if (!compiled.coeff.cutpoints_ge.empty()) {
+      throw std::runtime_error("composite_eval_batch_backend: truncation AddU64 path expects no cutpoints");
+    }
+    // Evaluate primitive predicate bits as additive-u64 shares (0/1).
+    std::vector<uint64_t> pred_add(compiled.pred.queries.size() * N, 0ull);
+    std::vector<uint64_t> xs_vec(in.hatx, in.hatx + N);
+    for (size_t qi = 0; qi < compiled.pred.queries.size(); ++qi) {
+      int bits_in = (compiled.pred.queries[qi].kind == compiler::RawPredKind::kLtU64)
+                        ? ((compiled.pred.eff_bits > 0 && compiled.pred.eff_bits <= compiled.pred.n)
+                               ? compiled.pred.eff_bits
+                               : compiled.pred.n)
+                        : compiled.pred.queries[qi].f;
+      const size_t key_bytes = k.pred_keys[qi].bytes.size();
+      std::vector<uint8_t> outs_flat(N * 8);
+      if (staged && in.hatx_device) {
+        staged->eval_dcf_many_u64_device_broadcast(bits_in,
+                                                   key_bytes,
+                                                   k.pred_keys[qi].bytes.data(),
+                                                   reinterpret_cast<const uint64_t*>(in.hatx_device),
+                                                   N,
+                                                   /*out_bytes=*/8,
+                                                   outs_flat.data());
+      } else {
+        std::vector<uint8_t> keys_flat(N * key_bytes);
+        for (size_t i = 0; i < N; ++i) {
+          std::memcpy(keys_flat.data() + i * key_bytes, k.pred_keys[qi].bytes.data(), key_bytes);
+        }
+        backend.eval_dcf_many_u64(bits_in,
+                                  key_bytes,
+                                  keys_flat.data(),
+                                  xs_vec,
+                                  /*out_bytes=*/8,
+                                  outs_flat.data());
+      }
+      for (size_t i = 0; i < N; ++i) {
+        pred_add[qi * N + i] = proto::unpack_u64_le(outs_flat.data() + i * 8);
+      }
+    }
+
+    const uint64_t one = (party == 0) ? 1ull : 0ull;
+    auto eval_bool_add = [&](const suf::BoolExpr& e, size_t i, const auto& self) -> uint64_t {
+      return std::visit([&](auto&& n) -> uint64_t {
+        using T = std::decay_t<decltype(n)>;
+        if constexpr (std::is_same_v<T, suf::BConst>) {
+          return n.v ? one : 0ull;
+        } else if constexpr (std::is_same_v<T, suf::BVar>) {
+          int idx = n.pred_idx;
+          if (idx >= 0) {
+            size_t u = static_cast<size_t>(idx);
+            if (u >= compiled.pred.queries.size()) return 0ull;
+            return pred_add[u * N + i];
+          }
+          size_t w = static_cast<size_t>(-1 - idx);
+          if (w < k.wrap_share.size()) return k.wrap_share[w];
+          return 0ull;
+        } else if constexpr (std::is_same_v<T, suf::BNot>) {
+          uint64_t v = self(*n.a, i, self);
+          return proto::sub_mod(one, v);
+        } else if constexpr (std::is_same_v<T, suf::BXor>) {
+          // Special-case the rotated-interval expression produced by rewrite_pred:
+          //   a XOR b XOR w, where:
+          //     a = 1[hatx < theta0], b = 1[hatx < theta1], w = 1[theta1 < theta0]
+          // In the additive ring, this can be computed without multiplication as:
+          //   b - a + w  (mod 2^64).
+          auto as_var = [](const suf::BoolExpr& x) -> const suf::BVar* {
+            return std::get_if<suf::BVar>(&x.node);
+          };
+          auto as_xor = [](const suf::BoolExpr& x) -> const suf::BXor* {
+            return std::get_if<suf::BXor>(&x.node);
+          };
+          const suf::BXor* ab = as_xor(*n.a);
+          const suf::BoolExpr* wexpr = n.b.get();
+          if (!ab) {
+            ab = as_xor(*n.b);
+            wexpr = n.a.get();
+          }
+          const suf::BVar* wv = (wexpr) ? as_var(*wexpr) : nullptr;
+          const suf::BVar* av = (ab && ab->a) ? as_var(*ab->a) : nullptr;
+          const suf::BVar* bv = (ab && ab->b) ? as_var(*ab->b) : nullptr;
+          if (ab && wv && av && bv && wv->pred_idx < 0 && av->pred_idx >= 0 && bv->pred_idx >= 0) {
+            const size_t wrap_idx = static_cast<size_t>(-1 - wv->pred_idx);
+            const size_t a_idx = static_cast<size_t>(av->pred_idx);
+            const size_t b_idx = static_cast<size_t>(bv->pred_idx);
+            const uint64_t a = (a_idx < compiled.pred.queries.size()) ? pred_add[a_idx * N + i] : 0ull;
+            const uint64_t b = (b_idx < compiled.pred.queries.size()) ? pred_add[b_idx * N + i] : 0ull;
+            const uint64_t w = (wrap_idx < k.wrap_share.size()) ? k.wrap_share[wrap_idx] : 0ull;
+            return proto::add_mod(proto::sub_mod(b, a), w);
+          }
+          throw std::runtime_error(
+              "composite_eval_batch_backend: truncation AddU64 BXor only supports rotated interval form");
+        } else {
+          throw std::runtime_error(
+              "composite_eval_batch_backend: truncation AddU64 bool expr unsupported (only Const/Var/Not/Xor)");
+        }
+      }, e.node);
+    };
+
+    // Truncation coeff program is constant in this build; return base+r_out as arith payload.
+    for (size_t i = 0; i < N; ++i) {
+      for (int j = 0; j < compiled.r; ++j) {
+        size_t jj = static_cast<size_t>(j);
+        uint64_t base = (jj < k.base_coeff_share.size()) ? k.base_coeff_share[jj] : 0ull;
+        uint64_t rout = (jj < k.r_out_share.size()) ? k.r_out_share[jj] : 0ull;
+        out.haty_share[i * static_cast<size_t>(compiled.r) + jj] = proto::add_mod(base, rout);
+      }
+    }
+
+    if (!compiled.bool_per_piece.empty()) {
+      const auto& exprs = compiled.bool_per_piece[0];
+      if (static_cast<int>(exprs.size()) != compiled.ell) {
+        throw std::runtime_error("composite_eval_batch_backend: bool_per_piece size mismatch for truncation");
+      }
+      for (size_t i = 0; i < N; ++i) {
+        for (int j = 0; j < compiled.ell; ++j) {
+          out.bool_share[i * static_cast<size_t>(compiled.ell) + static_cast<size_t>(j)] =
+              eval_bool_add(exprs[static_cast<size_t>(j)], i, eval_bool_add);
+        }
+      }
+    }
+
+    if (want_device_out && staged && in.hatx_device) {
+#ifdef SUF_HAVE_CUDA
+      auto* stream_ptr = staged->device_stream();
+      if (stream_ptr != nullptr) {
+        auto* stream = reinterpret_cast<cudaStream_t>(stream_ptr);
+        staged->ensure_output_buffers(out.haty_share.size(), out.bool_share.size());
+        if (!out.haty_share.empty() && staged->last_device_output()) {
+          size_t bytes = out.haty_share.size() * sizeof(uint64_t);
+          cudaMemcpyAsync(const_cast<uint64_t*>(staged->last_device_output()),
+                          out.haty_share.data(), bytes,
+                          cudaMemcpyHostToDevice, stream);
+          out.haty_device = staged->last_device_output();
+          out.haty_device_words = out.haty_share.size();
+        }
+        if (!out.bool_share.empty() && staged->last_device_bools()) {
+          size_t bytes = out.bool_share.size() * sizeof(uint64_t);
+          cudaMemcpyAsync(const_cast<uint64_t*>(staged->last_device_bools()),
+                          out.bool_share.data(), bytes,
+                          cudaMemcpyHostToDevice, stream);
+          out.bool_device = staged->last_device_bools();
+          out.bool_device_words = out.bool_share.size();
+        }
+        cudaStreamSynchronize(stream);
+        out.haty_device = staged->last_device_output();
+        out.haty_device_words = N * static_cast<size_t>(compiled.r);
+        out.bool_device = staged->last_device_bools();
+        out.bool_device_words = N * static_cast<size_t>(compiled.ell);
+      }
+#endif
     }
     return out;
   }
@@ -1396,8 +1536,70 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
   }
   if (dbg) std::cerr << "[party " << party << "] cut eval done\n";
 
-  auto coeff_table = build_coeff_table(compiled, k, /*add_deltas=*/(party == 0));
-  if (dbg) std::cerr << "[party " << party << "] coeff table built\n";
+  // Step-DCF coefficient selection (Beaver-free):
+  //   coeff(x) = base + total_delta - Σ_i DCF_i(x),
+  // where DCF_i outputs delta_i when x < cutpoint_i.
+  const size_t out_words = static_cast<size_t>(compiled.coeff.out_words);
+  if (out_words == 0) {
+    throw std::runtime_error("composite_eval_batch_backend: coeff out_words must be >0");
+  }
+  if (compiled.coeff.mode != compiler::CoeffMode::kStepDcf) {
+    throw std::runtime_error("composite_eval_batch_backend: unexpected coeff mode (expected step-DCF)");
+  }
+  if (k.base_coeff_share.size() != out_words || k.total_delta_share.size() != out_words) {
+    throw std::runtime_error("composite_eval_batch_backend: base/total coeff share size mismatch");
+  }
+  if (k.coeff_keys.size() != k.cut_pred_keys.size()) {
+    throw std::runtime_error("composite_eval_batch_backend: coeff_keys size mismatch vs cut_pred_keys");
+  }
+  std::vector<uint64_t> coeff_selected_soa(out_words * N, 0);
+  {
+    std::vector<uint64_t> base_plus_total(out_words, 0);
+    for (size_t j = 0; j < out_words; ++j) {
+      base_plus_total[j] = proto::add_mod(k.base_coeff_share[j], k.total_delta_share[j]);
+    }
+    for (size_t j = 0; j < out_words; ++j) {
+      uint64_t v = base_plus_total[j];
+      uint64_t* dst = coeff_selected_soa.data() + j * N;
+      for (size_t i = 0; i < N; ++i) dst[i] = v;
+    }
+    const int coeff_bits_in = (compiled.coeff.eff_bits > 0 && compiled.coeff.eff_bits <= compiled.coeff.n)
+                                  ? compiled.coeff.eff_bits
+                                  : compiled.coeff.n;
+    const int out_bytes = static_cast<int>(out_words * sizeof(uint64_t));
+    std::vector<uint64_t> dcf_out_aos(out_words * N, 0);
+    for (size_t ci = 0; ci < k.coeff_keys.size(); ++ci) {
+      const size_t key_bytes = k.coeff_keys[ci].bytes.size();
+      if (key_bytes == 0) {
+        throw std::runtime_error("composite_eval_batch_backend: empty coeff DCF key");
+      }
+      std::fill(dcf_out_aos.begin(), dcf_out_aos.end(), 0ull);
+      if (staged && in.hatx_device) {
+        staged->eval_dcf_many_u64_device_broadcast(
+            coeff_bits_in,
+            key_bytes,
+            k.coeff_keys[ci].bytes.data(),
+            reinterpret_cast<const uint64_t*>(in.hatx_device),
+            N,
+            out_bytes,
+            reinterpret_cast<uint8_t*>(dcf_out_aos.data()));
+      } else {
+        std::vector<uint8_t> keys_flat(N * key_bytes);
+        for (size_t i = 0; i < N; ++i) {
+          std::memcpy(keys_flat.data() + i * key_bytes, k.coeff_keys[ci].bytes.data(), key_bytes);
+        }
+        backend.eval_dcf_many_u64(coeff_bits_in, key_bytes, keys_flat.data(), xs_vec,
+                                  out_bytes, reinterpret_cast<uint8_t*>(dcf_out_aos.data()));
+      }
+      for (size_t i = 0; i < N; ++i) {
+        const uint64_t* row = dcf_out_aos.data() + i * out_words;
+        for (size_t j = 0; j < out_words; ++j) {
+          coeff_selected_soa[j * N + i] = proto::sub_mod(coeff_selected_soa[j * N + i], row[j]);
+        }
+      }
+    }
+  }
+  if (dbg) std::cerr << "[party " << party << "] coeff eval done\n";
 
   // Use offline-provisioned triples from the key. These are sized in keygen
   // per batch_N to cover selectors, bool DAG, and Horner.
@@ -1410,33 +1612,33 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
   if (dbg) std::cerr << "[party " << party << "] enter packed composite path\n";
   if (k.use_packed_pred && !pred_masks.empty() && k.packed_pred_words > 0) {
     const size_t block_sz = 64;
-    size_t pieces = coeff_table.size();
+    size_t pieces = k.cut_pred_keys.size() + 1;
     size_t stride = compiled.degree + 1;
     std::vector<uint64_t> selectors_block(pieces * block_sz, 0);
     std::vector<uint64_t> bool_block;
     for (size_t blk = 0; blk < N; blk += block_sz) {
       size_t bsize = std::min(block_sz, N - blk);
-      std::fill(selectors_block.begin(), selectors_block.end(), 0ull);
-      if (dbg) std::cerr << "[party " << party << "] block " << blk << " size " << bsize << " selectors\n";
-      selectors_from_cutbits_block(cut_bits_xor.data(), k.cut_pred_keys.size(), N, blk, bsize,
-                                   party, mul_single, selectors_block.data(), block_sz);
-      if (dbg) std::cerr << "[party " << party << "] block " << blk << " selectors done mul_idx=" << mul_single.idx << "\n";
-      for (size_t p = 0; p < pieces && p < compiled.bool_per_piece.size(); p++) {
-        const auto& exprs = compiled.bool_per_piece[p];
-        if (exprs.empty()) continue;
-        if (dbg) std::cerr << "[party " << party << "] block " << blk << " piece " << p << " bool eval\n";
-        gates::eval_bool_xor_packed_block_soa(exprs,
-                                              pred_masks.data() + blk * static_cast<size_t>(k.packed_pred_words),
-                                              static_cast<size_t>(k.packed_pred_words),
-                                              bsize, k.wrap_share, party, mul_single,
-                                              bit_ptr, 0, bool_block);
-        if (compiled.ell > 0) {
+      std::vector<uint64_t> prod_vec;
+      if (compiled.ell > 0) {
+        std::fill(selectors_block.begin(), selectors_block.end(), 0ull);
+        if (dbg) std::cerr << "[party " << party << "] block " << blk << " size " << bsize << " selectors\n";
+        selectors_from_cutbits_block(cut_bits_xor.data(), k.cut_pred_keys.size(), N, blk, bsize,
+                                     party, mul_single, selectors_block.data(), block_sz);
+        if (dbg) std::cerr << "[party " << party << "] block " << blk << " selectors done mul_idx=" << mul_single.idx << "\n";
+        for (size_t p = 0; p < pieces && p < compiled.bool_per_piece.size(); p++) {
+          const auto& exprs = compiled.bool_per_piece[p];
+          if (exprs.empty()) continue;
+          if (dbg) std::cerr << "[party " << party << "] block " << blk << " piece " << p << " bool eval\n";
+          gates::eval_bool_xor_packed_block_soa(exprs,
+                                                pred_masks.data() + blk * static_cast<size_t>(k.packed_pred_words),
+                                                static_cast<size_t>(k.packed_pred_words),
+                                                bsize, k.wrap_share, party, mul_single,
+                                                bit_ptr, 0, bool_block);
           std::vector<uint64_t> sel_vec(bsize);
           for (size_t off = 0; off < bsize; off++) {
             sel_vec[off] = selectors_block[p * block_sz + off];
           }
           std::vector<uint64_t> rhs_vec(bsize);
-          std::vector<uint64_t> prod_vec;
           for (int j = 0; j < compiled.ell; j++) {
             for (size_t off = 0; off < bsize; off++) {
               rhs_vec[off] = bool_block[static_cast<size_t>(j) * bsize + off];
@@ -1448,26 +1650,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
             }
           }
         }
-      }
-      if (dbg) std::cerr << "[party " << party << "] block " << blk << " bools done mul_idx=" << mul_single.idx << "\n";
-      // Selector-weighted coefficient selection in batch to reduce Beaver rounds.
-      std::vector<uint64_t> coeff_sel_block(static_cast<size_t>(compiled.coeff.out_words) * bsize, 0);
-      std::vector<uint64_t> sel_vec(bsize);
-      std::vector<uint64_t> rhs_vec(bsize);
-      std::vector<uint64_t> prod_vec;
-      for (size_t p = 0; p < pieces; p++) {
-        for (size_t off = 0; off < bsize; off++) {
-          sel_vec[off] = selectors_block[p * block_sz + off];
-        }
-        for (int j = 0; j < compiled.coeff.out_words; j++) {
-          uint64_t cshare = coeff_table[p][static_cast<size_t>(j)];
-          for (size_t off = 0; off < bsize; off++) rhs_vec[off] = cshare;
-          mul_single.mul_batch(sel_vec, rhs_vec, prod_vec);
-          for (size_t off = 0; off < bsize; off++) {
-            coeff_sel_block[static_cast<size_t>(j) * bsize + off] =
-                proto::add_mod(coeff_sel_block[static_cast<size_t>(j) * bsize + off], prod_vec[off]);
-          }
-        }
+        if (dbg) std::cerr << "[party " << party << "] block " << blk << " bools done mul_idx=" << mul_single.idx << "\n";
       }
       // Batched Horner over the block to amortize Beaver rounds.
       std::vector<uint64_t> x_share_vec(bsize);
@@ -1481,14 +1664,14 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
         size_t base = static_cast<size_t>(j * stride);
         for (size_t off = 0; off < bsize; off++) {
           acc_vec[off] =
-              coeff_sel_block[(base + static_cast<size_t>(compiled.degree)) * bsize + off];
+              coeff_selected_soa[(base + static_cast<size_t>(compiled.degree)) * N + (blk + off)];
         }
         for (int d = compiled.degree - 1; d >= 0; d--) {
           mul_single.mul_batch(acc_vec, x_share_vec, prod_vec);
           for (size_t off = 0; off < bsize; off++) {
             acc_vec[off] =
                 proto::add_mod(prod_vec[off],
-                               coeff_sel_block[(base + static_cast<size_t>(d)) * bsize + off]);
+                               coeff_selected_soa[(base + static_cast<size_t>(d)) * N + (blk + off)]);
           }
         }
         for (size_t off = 0; off < bsize; off++) {
@@ -1505,7 +1688,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
   // Fallback scalar path (no packed predicates). We still batch selector-weighted
   // bool/coeff selection over blocks to amortize Beaver rounds.
   const size_t block_sz = 64;
-  size_t pieces = coeff_table.size();
+  size_t pieces = k.cut_pred_keys.size() + 1;
   size_t stride = compiled.degree + 1;
   std::vector<uint64_t> preds_i(compiled.pred.queries.size(), 0);
   std::vector<uint64_t> selectors_block(pieces * block_sz, 0);
@@ -1576,25 +1759,6 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       }
     }
 
-    // Selector-weighted coefficient selection (batched over block).
-    std::vector<uint64_t> coeff_sel_block(static_cast<size_t>(compiled.coeff.out_words) * bsize, 0ull);
-    sel_vec.resize(bsize);
-    rhs_vec.resize(bsize);
-    for (size_t p = 0; p < pieces; p++) {
-      for (size_t off = 0; off < bsize; off++) {
-        sel_vec[off] = selectors_block[p * block_sz + off];
-      }
-      for (int j = 0; j < compiled.coeff.out_words; j++) {
-        uint64_t cshare = coeff_table[p][static_cast<size_t>(j)];
-        for (size_t off = 0; off < bsize; off++) rhs_vec[off] = cshare;
-        mul_single.mul_batch(sel_vec, rhs_vec, prod_vec);
-        for (size_t off = 0; off < bsize; off++) {
-          coeff_sel_block[static_cast<size_t>(j) * bsize + off] =
-              proto::add_mod(coeff_sel_block[static_cast<size_t>(j) * bsize + off], prod_vec[off]);
-        }
-      }
-    }
-
     // Batched Horner over the block.
     std::vector<uint64_t> x_share_vec(bsize);
     for (size_t off = 0; off < bsize; off++) {
@@ -1608,14 +1772,14 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       size_t base = static_cast<size_t>(j * stride);
       for (size_t off = 0; off < bsize; off++) {
         acc_vec[off] =
-            coeff_sel_block[(base + static_cast<size_t>(compiled.degree)) * bsize + off];
+            coeff_selected_soa[(base + static_cast<size_t>(compiled.degree)) * N + (blk + off)];
       }
       for (int d = compiled.degree - 1; d >= 0; d--) {
         mul_single.mul_batch(acc_vec, x_share_vec, prod_vec);
         for (size_t off = 0; off < bsize; off++) {
           acc_vec[off] =
               proto::add_mod(prod_vec[off],
-                             coeff_sel_block[(base + static_cast<size_t>(d)) * bsize + off]);
+                             coeff_selected_soa[(base + static_cast<size_t>(d)) * N + (blk + off)]);
         }
       }
       for (size_t off = 0; off < bsize; off++) {
@@ -1666,6 +1830,8 @@ inline CompositeTape write_composite_tape(const CompositePartyKey& k) {
   CompositeTape t;
   auto& v = t.bytes;
   tape_append_u64(v, k.r_in_share);
+  tape_append_u32(v, static_cast<uint32_t>(k.r_in_share_vec.size()));
+  for (auto x : k.r_in_share_vec) tape_append_u64(v, x);
   tape_append_u32(v, static_cast<uint32_t>(k.r_out_share.size()));
   for (auto x : k.r_out_share) tape_append_u64(v, x);
   tape_append_u32(v, static_cast<uint32_t>(k.wrap_share.size()));
@@ -1724,6 +1890,12 @@ inline CompositePartyKey read_composite_tape(const uint8_t* data, size_t len) {
   };
   need(8);
   k.r_in_share = tape_read_u64(p);
+
+  need(4);
+  uint32_t r_in_vec_len = tape_read_u32(p);
+  need(static_cast<size_t>(r_in_vec_len) * 8);
+  k.r_in_share_vec.resize(r_in_vec_len);
+  for (uint32_t i = 0; i < r_in_vec_len; i++) k.r_in_share_vec[i] = tape_read_u64(p);
 
   need(4);
   uint32_t r_out_len = tape_read_u32(p);

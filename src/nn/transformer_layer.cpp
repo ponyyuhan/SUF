@@ -20,8 +20,8 @@ namespace nn {
 
 namespace {
 
-inline int64_t to_signed(uint64_t v) { return static_cast<int64_t>(v); }
-inline uint64_t to_ring(int64_t v) { return static_cast<uint64_t>(v); }
+inline int64_t to_signed(uint64_t v) { return proto::to_signed(v); }
+inline uint64_t to_ring(int64_t v) { return proto::from_signed(v); }
 
 static bool per_element_masks_enabled() {
   const char* env = std::getenv("SUF_PER_ELEMENT_MASKS");
@@ -54,9 +54,9 @@ RowBroadcastTripleMaterial make_row_broadcast_triples(int rows, int cols, std::m
 
   std::vector<uint64_t> B(rows);
   for (int r = 0; r < rows; ++r) {
-    uint64_t b = rng();
-    uint64_t b0 = rng();
-    uint64_t b1 = b - b0;
+    uint64_t b = proto::norm_mod(rng());
+    uint64_t b0 = proto::norm_mod(rng());
+    uint64_t b1 = proto::sub_mod(b, b0);
     B[static_cast<size_t>(r)] = b;
     mat.B0[static_cast<size_t>(r)] = b0;
     mat.B1[static_cast<size_t>(r)] = b1;
@@ -64,12 +64,12 @@ RowBroadcastTripleMaterial make_row_broadcast_triples(int rows, int cols, std::m
   for (int r = 0; r < rows; ++r) {
     for (int c = 0; c < cols; ++c) {
       size_t idx = static_cast<size_t>(r * cols + c);
-      uint64_t a = rng();
-      uint64_t a0 = rng();
-      uint64_t a1 = a - a0;
+      uint64_t a = proto::norm_mod(rng());
+      uint64_t a0 = proto::norm_mod(rng());
+      uint64_t a1 = proto::sub_mod(a, a0);
       uint64_t c_val = proto::mul_mod(a, B[static_cast<size_t>(r)]);
-      uint64_t c0 = rng();
-      uint64_t c1 = c_val - c0;
+      uint64_t c0 = proto::norm_mod(rng());
+      uint64_t c1 = proto::sub_mod(c_val, c0);
       mat.A0[idx] = a0;
       mat.A1[idx] = a1;
       mat.C0[idx] = c0;
@@ -117,14 +117,16 @@ static std::vector<proto::BeaverTriple64Share>& ensure_cached_triples(
   std::mt19937_64 rng(seed_base ^ static_cast<uint64_t>(count));
   std::vector<proto::BeaverTriple64Share> triples(count);
   for (auto& tri : triples) {
-    uint64_t a = rng();
-    uint64_t b = rng();
+    uint64_t a = proto::norm_mod(rng());
+    uint64_t b = proto::norm_mod(rng());
     uint64_t c = proto::mul_mod(a, b);
-    uint64_t a0 = rng();
-    uint64_t b0 = rng();
-    uint64_t c0 = rng();
+    uint64_t a0 = proto::norm_mod(rng());
+    uint64_t b0 = proto::norm_mod(rng());
+    uint64_t c0 = proto::norm_mod(rng());
     tri = (party == 0) ? proto::BeaverTriple64Share{a0, b0, c0}
-                       : proto::BeaverTriple64Share{a - a0, b - b0, c - c0};
+                       : proto::BeaverTriple64Share{proto::sub_mod(a, a0),
+                                                   proto::sub_mod(b, b0),
+                                                   proto::sub_mod(c, c0)};
   }
   auto [ins_it, _] = cache.emplace(count, std::move(triples));
   return ins_it->second;
@@ -134,13 +136,15 @@ inline void ensure_beaver_triples(gates::CompositeKeyPair& kp, size_t need, std:
   auto fill = [&](std::vector<proto::BeaverTriple64Share>& dst0,
                   std::vector<proto::BeaverTriple64Share>& dst1) {
     while (dst0.size() < need || dst1.size() < need) {
-      uint64_t a = rng(), b = rng(), c = proto::mul_mod(a, b);
-      uint64_t a0 = rng();
-      uint64_t a1 = a - a0;
-      uint64_t b0 = rng();
-      uint64_t b1 = b - b0;
-      uint64_t c0 = rng();
-      uint64_t c1 = c - c0;
+      uint64_t a = proto::norm_mod(rng());
+      uint64_t b = proto::norm_mod(rng());
+      uint64_t c = proto::mul_mod(a, b);
+      uint64_t a0 = proto::norm_mod(rng());
+      uint64_t a1 = proto::sub_mod(a, a0);
+      uint64_t b0 = proto::norm_mod(rng());
+      uint64_t b1 = proto::sub_mod(b, b0);
+      uint64_t c0 = proto::norm_mod(rng());
+      uint64_t c1 = proto::sub_mod(c, c0);
       dst0.push_back({a0, b0, c0});
       dst1.push_back({a1, b1, c1});
     }
@@ -148,11 +152,11 @@ inline void ensure_beaver_triples(gates::CompositeKeyPair& kp, size_t need, std:
   fill(kp.k0.triples, kp.k1.triples);
 }
 
-// Build a SUF that emits affine-init coefficients adjusted for fixed-point
-// evaluation: out0 = a0 - (a1 * offset >> fb), out1 = a1.
+  // Build a SUF that emits affine-init coefficients adjusted for fixed-point
+  // evaluation: out0 = a0 - (a1 * offset >> fb), out1 = a1.
 inline suf::SUF<uint64_t> build_rsqrt_affine_eval_suf(const gates::PiecewisePolySpec& spec) {
   suf::SUF<uint64_t> F;
-  F.n_bits = 64;
+  F.n_bits = proto::ring_bits();
   F.r_out = 2;
   F.l_out = 0;
   F.degree = 0;
@@ -165,7 +169,14 @@ inline suf::SUF<uint64_t> build_rsqrt_affine_eval_suf(const gates::PiecewisePoly
   if (intervals.empty()) return F;
   F.alpha.clear();
   F.alpha.reserve(intervals.size() + 1);
-  F.alpha.push_back(intervals.front().start);
+  const uint64_t domain_end = (F.n_bits == 64) ? std::numeric_limits<uint64_t>::max()
+                                               : (uint64_t(1) << F.n_bits);
+  auto clamp_bound = [&](uint64_t v) -> uint64_t {
+    if (F.n_bits < 64 && v == std::numeric_limits<uint64_t>::max()) return domain_end;
+    if (F.n_bits < 64 && v > domain_end) return domain_end;
+    return v;
+  };
+  F.alpha.push_back(clamp_bound(intervals.front().start));
 
   if (F.alpha.front() != 0) {
     suf::SufPiece<uint64_t> zero_piece;
@@ -183,7 +194,7 @@ inline suf::SUF<uint64_t> build_rsqrt_affine_eval_suf(const gates::PiecewisePoly
     if (v < static_cast<__int128>(std::numeric_limits<int64_t>::min())) {
       v = static_cast<__int128>(std::numeric_limits<int64_t>::min());
     }
-    return static_cast<uint64_t>(static_cast<int64_t>(v));
+    return proto::from_signed(static_cast<int64_t>(v));
   };
 
   for (const auto& iv : intervals) {
@@ -199,7 +210,7 @@ inline suf::SUF<uint64_t> build_rsqrt_affine_eval_suf(const gates::PiecewisePoly
     piece.polys[0].coeffs = {clamp_to_ring(adj)};
     piece.polys[1].coeffs = {clamp_to_ring(a1)};
     F.pieces.push_back(std::move(piece));
-    F.alpha.push_back(iv.end);
+    F.alpha.push_back(clamp_bound(iv.end));
   }
   return F;
 }
@@ -324,6 +335,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   ctx->open_collector = &pe->open_collector();
   proto::PfssBackendBatch& backend = ctx->trunc_backend();
   net::Chan* pfss_nc = (ctx && ctx->pfss_net_chan) ? ctx->pfss_net_chan : &ch;
+  proto::IChannel* pfss_chan_override = (ctx && ctx->pfss_chan) ? ctx->pfss_chan : nullptr;
   // Apply conservative limits to PFSS batches and opens to avoid runaway buffering.
   runtime::PfssSuperBatch::Limits pfss_lim;
   pfss_lim.max_pending_jobs = 1ull << 12;
@@ -360,7 +372,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   R.party = party;
   R.net_chan = &ch;
   R.pfss_backend = &backend;
-  R.pfss_chan = &pch;
+  R.pfss_chan = pfss_chan_override ? pfss_chan_override : &pch;
   R.pfss_coeff = &pe->pfss_coeff_batch();
   R.pfss_trunc = &pe->pfss_coeff_batch();  // share batch for trunc + coeff
   R.opens = &pe->open_collector();
@@ -397,9 +409,28 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   R.pfss_planner = &phase_planner;
   auto drain_barrier = [&](const runtime::PfssLayerPlanner::BarrierPolicy& pol) {
     if (layer_planner_ptr) {
-      runtime::ProtoChanFromNet pch_bar(*pfss_nc);
-      layer_planner_ptr->barrier(
-          party, backend, pe->pfss_coeff_batch(), pe->pfss_trunc_batch(), pch_bar, R.opens, R.net_chan, pol);
+      if (pfss_chan_override) {
+        layer_planner_ptr->barrier(
+            party,
+            backend,
+            pe->pfss_coeff_batch(),
+            pe->pfss_trunc_batch(),
+            *pfss_chan_override,
+            R.opens,
+            R.net_chan,
+            pol);
+      } else {
+        runtime::ProtoChanFromNet pch_bar(*pfss_nc);
+        layer_planner_ptr->barrier(
+            party,
+            backend,
+            pe->pfss_coeff_batch(),
+            pe->pfss_trunc_batch(),
+            pch_bar,
+            R.opens,
+            R.net_chan,
+            pol);
+      }
     }
   };
 
@@ -431,9 +462,9 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   auto norm_gap = compiler::lower_truncation_gate(
       backend, rng_trunc, p_gap, static_cast<size_t>(rows) * static_cast<size_t>(cols));
 
-  runtime::TruncChoice mean_choice{nullptr, &mean_faithful, fb, true};
-  runtime::TruncChoice var_choice{nullptr, &var_faithful, 2 * fb, true};
-  runtime::TruncChoice norm_choice{nullptr, &norm_faithful, fb, true};
+  runtime::TruncChoice mean_choice{&mean_gap, &mean_faithful, fb, true};
+  runtime::TruncChoice var_choice{&var_gap, &var_faithful, 2 * fb, true};
+  runtime::TruncChoice norm_choice{&norm_gap, &norm_faithful, fb, true};
 
   uint64_t inv_len_qf =
       static_cast<uint64_t>(std::llround((1.0 / static_cast<double>(cols)) * std::ldexp(1.0, fb)));
@@ -457,8 +488,6 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   ensure_beaver_triples(rsqrt_mat1.keys,
                         static_cast<size_t>(rows) * (3 * static_cast<size_t>(rsqrt_mat1.nr_iters) + 1),
                         rng_rsqrt1);
-  rsqrt_mat1.keys.k0.r_in_share_vec.assign(static_cast<size_t>(rows), rsqrt_mat1.keys.k0.r_in_share);
-  rsqrt_mat1.keys.k1.r_in_share_vec.assign(static_cast<size_t>(rows), rsqrt_mat1.keys.k1.r_in_share);
   auto rsqrt_bundle1 = make_rsqrt_bundle(rsqrt_mat1);
 
   std::mt19937_64 rng_rsqrt2(0x6c6e7274ull);
@@ -467,8 +496,6 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   ensure_beaver_triples(rsqrt_mat2.keys,
                         static_cast<size_t>(rows) * (3 * static_cast<size_t>(rsqrt_mat2.nr_iters) + 1),
                         rng_rsqrt2);
-  rsqrt_mat2.keys.k0.r_in_share_vec.assign(static_cast<size_t>(rows), rsqrt_mat2.keys.k0.r_in_share);
-  rsqrt_mat2.keys.k1.r_in_share_vec.assign(static_cast<size_t>(rows), rsqrt_mat2.keys.k1.r_in_share);
   auto rsqrt_bundle2 = make_rsqrt_bundle(rsqrt_mat2);
 
   auto build_ln_bundle = [&](const runtime::RsqrtTaskBundle& rsqrt_bundle,

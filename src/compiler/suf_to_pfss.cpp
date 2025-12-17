@@ -169,12 +169,19 @@ static void build_coeff_step(const suf::SUF<uint64_t>& F, uint64_t r_in, CoeffPr
   // Rotate intervals, split wrap, sort by start.
   struct Seg { uint64_t start; std::vector<uint64_t> payload; };
   std::vector<Seg> segs;
+  const uint64_t end_sentinel = std::numeric_limits<uint64_t>::max();
+  auto rot_end = [&](uint64_t b) -> uint64_t {
+    // Many piecewise specs in this repo use `UINT64_MAX` as a surrogate for the
+    // (unrepresentable) endpoint 2^64. Treat it as such when rotating: (2^64 + r) mod 2^64 = r.
+    if (b == end_sentinel) return r_in;
+    return b + r_in;
+  };
   for (size_t i = 0; i + 1 < F.alpha.size(); i++) {
     uint64_t a = F.alpha[i];
     uint64_t b = F.alpha[i + 1];
     auto payload = flatten_coeffs(F.pieces[i], F.degree, F.r_out);
     uint64_t s = a + r_in;
-    uint64_t e = b + r_in;
+    uint64_t e = rot_end(b);
     if (s < e) {
       segs.push_back(Seg{s, payload});
     } else {
@@ -210,7 +217,7 @@ CompiledSUFGate compile_suf_to_pfss_two_programs(
     const std::vector<uint64_t>& r_out,
     CoeffMode coeff_mode,
     GateKind gate_kind) {
-  if (gate_kind == GateKind::SiLUSpline) {
+  if (gate_kind == GateKind::SiLUSpline && std::getenv("SUF_PFSS_COMPILE_TRACE")) {
     bool monotonic = true;
     for (size_t i = 1; i < F.alpha.size(); ++i) {
       if (F.alpha[i - 1] >= F.alpha[i]) {
@@ -419,7 +426,7 @@ CompiledSUFGate compile_suf_to_pfss_two_programs(
       uint64_t b = Fn.alpha[i + 1];
       auto payload = flatten_coeffs(Fn.pieces[i], Fn.degree, Fn.r_out);
       uint64_t s = a + r_in;
-      uint64_t e = b + r_in;
+      uint64_t e = (b == std::numeric_limits<uint64_t>::max()) ? r_in : (b + r_in);
       if (s < e) {
         cd.intervals.push_back(IntervalPayload{s, e, payload});
       } else {

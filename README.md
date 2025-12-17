@@ -38,6 +38,7 @@ Prereqs:
 - CMake ≥ 3.15, a C++20-capable compiler
 - OpenSSL (`libcrypto`) (required)
 - OpenMP (recommended; required by some myl7/fss configs)
+- libsodium (required when building the optional myl7/fss adapter)
 - CUDA toolkit + device (optional, for GPU path)
 
 Recommended (Ninja):
@@ -103,9 +104,14 @@ Correctness note: trunc/ARS helper bits (`carry/sign/wrap`) are maintained as **
 - Benchmark toggles:
   - `SUF_PER_ELEMENT_MASKS=0|1` disables/enables per-element trunc/ARS masks (benchmark sets `0` by default for batching)
   - `SUF_BENCH_DEVICE_PIPELINE=1` keeps PFSS outputs on GPU when downstream can consume device pointers
+  - `SUF_BENCH_CACHE_MATERIAL=1` caches expensive dealer-generated materials (GeLU/SiLU/nExp/recip + trunc bundles)
+  - `SUF_FORCE_PFSS=1` forces the PFSS execution path even when a reference fast-path exists
 - Open batching/packing:
   - `SUF_OPEN_PACK_EFFBITS=1` enables packed opens when shares fit in small bitwidth
   - `SUF_OPEN_PACK_MAX_BITS` caps packing width (default 48)
+- BERT-Tiny activation tuning:
+  - `SUF_GELU_CONST=1` enables a fast piecewise-constant GeLU approximation
+  - `SUF_GELU_CONST_SEGMENTS` controls GeLU LUT granularity (default `256` in the benchmark)
 
 ## Docs
 
@@ -127,4 +133,40 @@ Smoke (bert-tiny):
 
 ```bash
 python3 bench/run_sigma_vs_suf.py --config bench/configs/sigma_vs_suf_bert_tiny.json --timeout-sigma-s 1800
+```
+
+### Benchmark Defaults (BERT-Tiny)
+
+`build_ninja/bench_suf_transformer` sets performance-focused defaults for end-to-end runs:
+
+- `proto::set_ring_bits(spec.n_bits)` (BERT-Tiny uses `n_bits=37`)
+- `SUF_OPEN_PACK_EFFBITS=1` (packed opens)
+- `SUF_PER_ELEMENT_MASKS=0` (avoid per-element trunc/ARS masks that prevent batching)
+- GPU runs: `SUF_FORCE_PFSS=1` (stable PFSS accounting); CPU runs keep the deterministic reference fast-path unless you export `SUF_FORCE_PFSS=1`
+- BERT-Tiny: `SUF_GELU_CONST=1` and `SUF_GELU_CONST_SEGMENTS=256`
+
+### Sigma (EzPC GPU-MPC) + SEAL Setup
+
+Recommended build (auto-detects `CUDA_VERSION` and `GPU_ARCH`, and applies local patches including a SEAL mutex-include fix):
+
+```bash
+bash scripts/build_sigma.sh
+```
+
+Manual overrides:
+
+```bash
+CUDA_VERSION=11.7 GPU_ARCH=86 bash scripts/build_sigma.sh
+```
+
+Outputs:
+- SIGMA binary: `external/sigma_ezpc/GPU-MPC/experiments/sigma/sigma`
+- SEAL source vendored under: `external/sigma_ezpc/GPU-MPC/ext/sytorch/ext/sci/extern/SEAL` (built as part of Sytorch/SCI)
+
+Host prerequisites (Ubuntu/Debian):
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential cmake ninja-build python3 python3-pip \\
+  libssl-dev libgmp-dev libmpfr-dev libsodium-dev
 ```

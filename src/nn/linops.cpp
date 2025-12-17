@@ -5,8 +5,8 @@
 
 namespace nn {
 
-static inline int64_t to_signed(uint64_t v) { return static_cast<int64_t>(v); }
-static inline uint64_t to_ring(int64_t v) { return static_cast<uint64_t>(v); }
+static inline int64_t to_signed(uint64_t v) { return proto::to_signed(v); }
+static inline uint64_t to_ring(int64_t v) { return proto::from_signed(v); }
 
 void add(const TensorView<uint64_t>& x,
          const TensorView<uint64_t>& y,

@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <stdexcept>
 
+#include "proto/common.hpp"
+
 namespace runtime {
 
 namespace {
@@ -16,6 +18,42 @@ int bits_needed_u64(uint64_t v) {
     bits++;
   }
   return std::max(bits, 1);
+}
+
+uint64_t mask_low_bits_u64(int bits) {
+  if (bits <= 0) return 0ull;
+  if (bits >= 64) return ~uint64_t(0);
+  return (uint64_t(1) << bits) - 1;
+}
+
+int bits_needed_twos_complement(uint64_t v, int n_bits) {
+  if (n_bits <= 0 || n_bits > 64) return 64;
+  const uint64_t nmask = mask_low_bits_u64(n_bits);
+  v &= nmask;
+  if (v == 0) return 1;
+  if (n_bits < 64 && v == nmask) return 1;  // -1 in n-bit two's complement
+  const bool neg = (n_bits == 64) ? (static_cast<int64_t>(v) < 0)
+                                  : ((v & (uint64_t(1) << (n_bits - 1))) != 0);
+  if (!neg) {
+    return std::min(64, bits_needed_u64(v) + 1);
+  }
+  uint64_t inv = (~v) & nmask;
+  if (inv == 0) return 1;
+  return std::min(64, bits_needed_u64(inv) + 1);
+}
+
+uint64_t sign_extend_to_nbits(uint64_t v, int from_bits, int n_bits) {
+  if (n_bits <= 0 || n_bits > 64) return v;
+  if (from_bits <= 0) return 0ull;
+  if (from_bits > 64) from_bits = 64;
+  const uint64_t from_mask = mask_low_bits_u64(from_bits);
+  v &= from_mask;
+  if (from_bits < 64) {
+    const uint64_t sign_bit = uint64_t(1) << (from_bits - 1);
+    if (v & sign_bit) v |= ~from_mask;
+  }
+  if (n_bits < 64) v &= mask_low_bits_u64(n_bits);
+  return v;
 }
 
 size_t packed_words_host(size_t elems, int eff_bits) {
@@ -109,6 +147,7 @@ void OpenCollector::flush(int party, net::Chan& ch) {
   if (requests_.empty()) return;
   auto t0 = std::chrono::steady_clock::now();
   const bool want_pack = (std::getenv("SUF_OPEN_PACK_EFFBITS") != nullptr);
+  const bool signed_pack = (std::getenv("SUF_OPEN_PACK_SIGNED") != nullptr);
   const int max_pack_bits = []() {
     const char* env = std::getenv("SUF_OPEN_PACK_MAX_BITS");
     if (!env) return 48;
@@ -157,7 +196,8 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     size_t off = 0;
     for (const auto& req : requests_) {
       for (size_t i = 0; i < req.len; ++i) {
-        req.slot->opened[req.offset + i] = static_cast<int64_t>(req.diff[i] + recv_flat[off + i]);
+        uint64_t opened = proto::add_mod(req.diff[i], recv_flat[off + i]);
+        req.slot->opened[req.offset + i] = proto::to_signed(opened);
       }
       req.slot->ready.store(true);
       off += req.len;
@@ -180,9 +220,20 @@ void OpenCollector::flush(int party, net::Chan& ch) {
       throw std::runtime_error("OpenCollector: request out of range");
     }
     if (pack) {
-      uint64_t or_acc = 0;
-      for (auto v : req.diff) or_acc |= v;
-      int eff_need = bits_needed_u64(or_acc);
+      int eff_need = 64;
+      if (!signed_pack) {
+        uint64_t or_acc = 0;
+        for (auto v : req.diff) or_acc |= v;
+        eff_need = bits_needed_u64(or_acc);
+      } else {
+        const int n_bits = proto::ring_bits();
+        int need = 1;
+        for (auto v : req.diff) {
+          need = std::max(need, bits_needed_twos_complement(v, n_bits));
+          if (need >= 64) break;
+        }
+        eff_need = need;
+      }
       int eff_local =
           (eff_need > 0 && eff_need < 64 && eff_need <= max_pack_bits) ? eff_need : 64;
       int eff_remote = 0;
@@ -205,8 +256,13 @@ void OpenCollector::flush(int party, net::Chan& ch) {
           if (!packed_local.empty()) ch.send_u64s(packed_local.data(), packed_local.size());
         }
         auto other = unpack_eff_bits_host(packed_remote, eff, req.len);
+        if (signed_pack) {
+          const int n_bits = proto::ring_bits();
+          for (auto& w : other) w = sign_extend_to_nbits(w, eff, n_bits);
+        }
         for (size_t i = 0; i < req.len; ++i) {
-          req.slot->opened[req.offset + i] = static_cast<int64_t>(req.diff[i] + other[i]);
+          uint64_t opened = proto::add_mod(req.diff[i], other[i]);
+          req.slot->opened[req.offset + i] = proto::to_signed(opened);
         }
       } else {
         std::vector<uint64_t> other(req.len, 0);
@@ -218,7 +274,8 @@ void OpenCollector::flush(int party, net::Chan& ch) {
           if (!req.diff.empty()) ch.send_u64s(req.diff.data(), req.diff.size());
         }
         for (size_t i = 0; i < req.len; ++i) {
-          req.slot->opened[req.offset + i] = static_cast<int64_t>(req.diff[i] + other[i]);
+          uint64_t opened = proto::add_mod(req.diff[i], other[i]);
+          req.slot->opened[req.offset + i] = proto::to_signed(opened);
         }
       }
     } else {
@@ -231,7 +288,8 @@ void OpenCollector::flush(int party, net::Chan& ch) {
         if (!req.diff.empty()) ch.send_u64s(req.diff.data(), req.diff.size());
       }
       for (size_t i = 0; i < req.len; ++i) {
-        req.slot->opened[req.offset + i] = static_cast<int64_t>(req.diff[i] + other[i]);
+        uint64_t opened = proto::add_mod(req.diff[i], other[i]);
+        req.slot->opened[req.offset + i] = proto::to_signed(opened);
       }
     }
     req.slot->ready.store(true);

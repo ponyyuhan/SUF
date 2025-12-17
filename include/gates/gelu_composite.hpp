@@ -32,9 +32,10 @@ inline GeluTaskMaterial dealer_make_gelu_task_material(proto::PfssBackendBatch& 
   auto spec = gates::make_gelu_spline_spec(frac_bits, segments);
   auto suf_gate = suf::build_gelu_suf_from_piecewise(spec);
 
+  const uint64_t r_in = rng();
   std::vector<uint64_t> r_out(static_cast<size_t>(suf_gate.r_out), 0ull);
   auto kp = gates::composite_gen_backend_with_masks(
-      suf_gate, backend, rng, /*r_in=*/0ull, r_out, batch_N, compiler::GateKind::GeLUSpline);
+      suf_gate, backend, rng, r_in, r_out, batch_N, compiler::GateKind::GeLUSpline);
   kp.k0.compiled.gate_kind = compiler::GateKind::GeLUSpline;
   kp.k1.compiled.gate_kind = compiler::GateKind::GeLUSpline;
 
@@ -62,6 +63,38 @@ inline GeluTaskMaterial dealer_make_gelu_task_material(proto::PfssBackendBatch& 
   out.keys = std::move(kp);
   out.trunc_f = std::move(trunc_f);
   out.trunc_2f = std::move(trunc_2f);
+  return out;
+}
+
+// Task-friendly bundle for a degree-0 GeLU approximation that emits the evaluated value directly
+// as a single arithmetic payload word (so CubicPolyTask can early-return after PFSS).
+struct GeluConstTaskMaterial {
+  suf::SUF<uint64_t> suf;
+  gates::CompositeKeyPair keys;
+  gates::PiecewisePolySpec spec;
+};
+
+inline GeluConstTaskMaterial dealer_make_gelu_const_task_material(proto::PfssBackendBatch& backend,
+                                                                  int eff_bits,
+                                                                  int frac_bits,
+                                                                  std::mt19937_64& rng,
+                                                                  size_t batch_N = 1,
+                                                                  int segments = 256) {
+  auto spec = gates::make_gelu_spline_spec(frac_bits, segments);
+  auto suf_gate = suf::build_gelu_suf_const_from_piecewise(spec, eff_bits);
+
+  uint64_t r_in = rng();
+  if (eff_bits > 0 && eff_bits < 64) r_in &= ((uint64_t(1) << eff_bits) - 1);
+  std::vector<uint64_t> r_out(static_cast<size_t>(suf_gate.r_out), 0ull);
+  auto kp = gates::composite_gen_backend_with_masks(
+      suf_gate, backend, rng, r_in, r_out, batch_N, compiler::GateKind::GeLUSpline);
+  kp.k0.compiled.gate_kind = compiler::GateKind::GeLUSpline;
+  kp.k1.compiled.gate_kind = compiler::GateKind::GeLUSpline;
+
+  GeluConstTaskMaterial out;
+  out.spec = std::move(spec);
+  out.suf = std::move(suf_gate);
+  out.keys = std::move(kp);
   return out;
 }
 

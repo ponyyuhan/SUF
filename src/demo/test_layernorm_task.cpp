@@ -264,8 +264,6 @@ RsqrtMaterial make_rsqrt_material(int frac_bits,
   fill(mat.keys.k0.triples, 0);
   fill(mat.keys.k1.triples, 1);
 
-  mat.keys.k0.r_in_share_vec.assign(static_cast<size_t>(rows), mat.keys.k0.r_in_share);
-  mat.keys.k1.r_in_share_vec.assign(static_cast<size_t>(rows), mat.keys.k1.r_in_share);
   return mat;
 }
 

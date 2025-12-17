@@ -5,6 +5,7 @@
 #include <limits>
 #include <optional>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include "nn/matmul_publicW.hpp"
 #include "nn/matmul_gpu.hpp"
@@ -25,14 +26,14 @@ namespace nn {
 using gates::make_silu_spec;
 using gates::ref_silu_fixed;
 
-static inline int64_t to_signed(uint64_t v) { return static_cast<int64_t>(v); }
-static inline uint64_t to_ring(int64_t v) { return static_cast<uint64_t>(v); }
+static inline int64_t to_signed(uint64_t v) { return proto::to_signed(v); }
+static inline uint64_t to_ring(int64_t v) { return proto::from_signed(v); }
 
 struct MlpActMatKey {
   bool is_gpu = false;
   int frac_bits = 0;
   size_t elems = 0;
-  int activation = 0;  // 0=silu, 1=gelu
+  int activation = 0;  // 0=silu, 1=gelu(spline), 2=gelu(const)
 
   bool operator==(const MlpActMatKey& o) const {
     return is_gpu == o.is_gpu && frac_bits == o.frac_bits && elems == o.elems && activation == o.activation;
@@ -149,7 +150,7 @@ void mlp_forward(const MLPConfig& cfg,
   if (std::getenv("DEBUG_MLP_TEST")) {
     std::cerr << "[mlp] ref_backend=" << ref_backend << "\n";
   }
-  if (ref_backend) {
+  if (ref_backend && !std::getenv("SUF_FORCE_PFSS")) {
     std::vector<int64_t> x_plain;
     open_to_plain(party, ch, X_share.data, X_share.numel(), x_plain);
     std::vector<int64_t> w1(W1_public.data, W1_public.data + W1_public.numel());
@@ -185,6 +186,7 @@ void mlp_forward(const MLPConfig& cfg,
   compiler::AbsBound act_abs_hint{};
   bool have_act_abs = false;
   net::Chan* pfss_nc = (ctx && ctx->pfss_net_chan) ? ctx->pfss_net_chan : &ch;
+  proto::IChannel* pfss_chan_override = (ctx && ctx->pfss_chan) ? ctx->pfss_chan : nullptr;
   auto record_phase_plan = [&](runtime::PfssPhasePlanner& planner) {
     if (!ctx || !ctx->pfss_layer_planner) return;
     const auto& st = planner.stats();
@@ -204,16 +206,28 @@ void mlp_forward(const MLPConfig& cfg,
   auto barrier = [&](const runtime::PfssLayerPlanner::BarrierPolicy& pol) {
     if (ctx && ctx->disable_inner_barriers) return;
     if (ctx && ctx->pfss_layer_planner) {
-      runtime::ProtoChanFromNet pch_bar(*pfss_nc);
-      ctx->pfss_layer_planner->barrier(
-          party,
-          ctx->trunc_backend(),
-          pe->pfss_coeff_batch(),
-          pe->pfss_trunc_batch(),
-          pch_bar,
-          &pe->open_collector(),
-          &ch,
-          pol);
+      if (pfss_chan_override) {
+        ctx->pfss_layer_planner->barrier(
+            party,
+            ctx->trunc_backend(),
+            pe->pfss_coeff_batch(),
+            pe->pfss_trunc_batch(),
+            *pfss_chan_override,
+            &pe->open_collector(),
+            &ch,
+            pol);
+      } else {
+        runtime::ProtoChanFromNet pch_bar(*pfss_nc);
+        ctx->pfss_layer_planner->barrier(
+            party,
+            ctx->trunc_backend(),
+            pe->pfss_coeff_batch(),
+            pe->pfss_trunc_batch(),
+            pch_bar,
+            &pe->open_collector(),
+            &ch,
+            pol);
+      }
     }
   };
   auto enter_phase = [&]() {
@@ -333,7 +347,7 @@ void mlp_forward(const MLPConfig& cfg,
   if (use_phase) {
     R.party = party;
     R.pfss_backend = &ctx->trunc_backend();
-    R.pfss_chan = &pch;
+    R.pfss_chan = pfss_chan_override ? pfss_chan_override : &pch;
     R.net_chan = &ch;
     R.pfss_coeff = &pe->pfss_coeff_batch();
     R.pfss_trunc = &pe->pfss_trunc_batch();
@@ -430,49 +444,104 @@ void mlp_forward(const MLPConfig& cfg,
     std::unique_ptr<runtime::CubicPolyTask> act_task;
     std::shared_ptr<gates::SiluTaskMaterial> silu_mat;
     std::shared_ptr<gates::GeluTaskMaterial> gelu_mat;
+    std::shared_ptr<gates::GeluConstTaskMaterial> gelu_const_mat;
     if (cfg.activation == MLPConfig::Activation::GeLU) {
+      const bool want_const = (std::getenv("SUF_GELU_CONST") != nullptr);
+      int const_segments = 256;
+      if (const char* env = std::getenv("SUF_GELU_CONST_SEGMENTS")) {
+        try {
+          const_segments = std::max(1, std::stoi(env));
+        } catch (...) {
+          const_segments = 256;
+        }
+      }
       if (bench_trace_enabled()) {
         std::cerr << "mlp_forward: building gelu task material frac_bits=" << cfg.frac_bits
                   << " elems=" << hidden_scaled.size() << "\n";
       }
-      if (bench_cache_enabled()) {
-        static std::mutex mu;
-        static std::unordered_map<MlpActMatKey, std::shared_ptr<gates::GeluTaskMaterial>, MlpActMatKeyHash> cache;
-        MlpActMatKey key{ctx && ctx->uses_gpu_backend(), cfg.frac_bits, hidden_scaled.size(), /*activation=*/1};
-        std::lock_guard<std::mutex> lk(mu);
-        auto it = cache.find(key);
-        if (it == cache.end()) {
-          auto mat = std::make_shared<gates::GeluTaskMaterial>(gates::dealer_make_gelu_task_material(
+      if (want_const) {
+        if (bench_cache_enabled()) {
+          static std::mutex mu;
+          static std::unordered_map<MlpActMatKey, std::shared_ptr<gates::GeluConstTaskMaterial>, MlpActMatKeyHash>
+              cache_const;
+          MlpActMatKey key{ctx && ctx->uses_gpu_backend(), cfg.frac_bits, hidden_scaled.size(), /*activation=*/2};
+          std::lock_guard<std::mutex> lk(mu);
+          auto it = cache_const.find(key);
+          if (it == cache_const.end()) {
+            auto mat = std::make_shared<gates::GeluConstTaskMaterial>(gates::dealer_make_gelu_const_task_material(
+                ctx->trunc_backend(),
+                proto::ring_bits(),
+                cfg.frac_bits,
+                rng2,
+                hidden_scaled.size(),
+                const_segments));
+            it = cache_const.emplace(key, std::move(mat)).first;
+          }
+          gelu_const_mat = it->second;
+        } else {
+          gelu_const_mat =
+              std::make_shared<gates::GeluConstTaskMaterial>(gates::dealer_make_gelu_const_task_material(
+                  ctx->trunc_backend(),
+                  proto::ring_bits(),
+                  cfg.frac_bits,
+                  rng2,
+                  hidden_scaled.size(),
+                  const_segments));
+        }
+        auto& mat = *gelu_const_mat;
+        runtime::CubicPolyBundle bundle{
+            &mat.suf,
+            &mat.keys.k0,
+            &mat.keys.k1,
+            /*trunc_f=*/nullptr,
+            /*trunc_2f=*/nullptr,
+            cfg.frac_bits,
+            compiler::GateKind::GeLUSpline,
+            &mat.spec};
+        act_task = std::make_unique<runtime::CubicPolyTask>(
+            bundle,
+            std::span<const uint64_t>(hidden_scaled.data(), hidden_scaled.size()),
+            std::span<uint64_t>(hidden_scaled.data(), hidden_scaled.size()));
+      } else {
+        if (bench_cache_enabled()) {
+          static std::mutex mu;
+          static std::unordered_map<MlpActMatKey, std::shared_ptr<gates::GeluTaskMaterial>, MlpActMatKeyHash> cache;
+          MlpActMatKey key{ctx && ctx->uses_gpu_backend(), cfg.frac_bits, hidden_scaled.size(), /*activation=*/1};
+          std::lock_guard<std::mutex> lk(mu);
+          auto it = cache.find(key);
+          if (it == cache.end()) {
+            auto mat = std::make_shared<gates::GeluTaskMaterial>(gates::dealer_make_gelu_task_material(
+                ctx->trunc_backend(),
+                cfg.frac_bits,
+                rng2,
+                3 * hidden_scaled.size(),
+                hidden_scaled.size()));
+            it = cache.emplace(key, std::move(mat)).first;
+          }
+          gelu_mat = it->second;
+        } else {
+          gelu_mat = std::make_shared<gates::GeluTaskMaterial>(gates::dealer_make_gelu_task_material(
               ctx->trunc_backend(),
               cfg.frac_bits,
               rng2,
               3 * hidden_scaled.size(),
               hidden_scaled.size()));
-          it = cache.emplace(key, std::move(mat)).first;
         }
-        gelu_mat = it->second;
-      } else {
-        gelu_mat = std::make_shared<gates::GeluTaskMaterial>(gates::dealer_make_gelu_task_material(
-            ctx->trunc_backend(),
+        auto& mat = *gelu_mat;
+        runtime::CubicPolyBundle bundle{
+            &mat.suf,
+            &mat.keys.k0,
+            &mat.keys.k1,
+            &mat.trunc_f,
+            &mat.trunc_2f,
             cfg.frac_bits,
-            rng2,
-            3 * hidden_scaled.size(),
-            hidden_scaled.size()));
+            compiler::GateKind::GeLUSpline,
+            &mat.spec};
+        act_task = std::make_unique<runtime::CubicPolyTask>(
+            bundle,
+            std::span<const uint64_t>(hidden_scaled.data(), hidden_scaled.size()),
+            std::span<uint64_t>(hidden_scaled.data(), hidden_scaled.size()));
       }
-      auto& mat = *gelu_mat;
-      runtime::CubicPolyBundle bundle{
-          &mat.suf,
-          &mat.keys.k0,
-          &mat.keys.k1,
-          &mat.trunc_f,
-          &mat.trunc_2f,
-          cfg.frac_bits,
-          compiler::GateKind::GeLUSpline,
-          &mat.spec};
-      act_task = std::make_unique<runtime::CubicPolyTask>(
-          bundle,
-          std::span<const uint64_t>(hidden_scaled.data(), hidden_scaled.size()),
-          std::span<uint64_t>(hidden_scaled.data(), hidden_scaled.size()));
       mat2_x_range = clamp_gelu_range(cfg.frac_bits);
     } else {
       if (bench_trace_enabled()) {

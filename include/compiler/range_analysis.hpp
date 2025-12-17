@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <type_traits>
 #include <optional>
@@ -316,6 +317,11 @@ inline GateKind select_trunc_kind(const AbsBound& abs,
     g.kind = cert->kind;
   }
   if (g.kind == RangeKind::Proof && can_gapars(g)) return GateKind::GapARS;
+  if (std::getenv("SUF_GAPARS_ALLOW_HINT") != nullptr) {
+    GapCert proof = g;
+    proof.kind = RangeKind::Proof;
+    if (can_gapars(proof)) return GateKind::GapARS;
+  }
   return GateKind::FaithfulARS;
 }
 

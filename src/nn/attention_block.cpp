@@ -30,8 +30,8 @@ namespace nn {
 
 namespace {
 
-inline int64_t to_signed(uint64_t v) { return static_cast<int64_t>(v); }
-inline uint64_t to_ring(int64_t v) { return static_cast<uint64_t>(v); }
+inline int64_t to_signed(uint64_t v) { return proto::to_signed(v); }
+inline uint64_t to_ring(int64_t v) { return proto::from_signed(v); }
 
 // Temporary helper to open shares to plaintext (will be removed once score/prob path is fully taskified).
 void open_to_plain(int party,
@@ -121,9 +121,9 @@ RowBroadcastTripleMaterial make_row_broadcast_triples(int rows, int cols, std::m
 
   std::vector<uint64_t> B(rows);
   for (int r = 0; r < rows; ++r) {
-    uint64_t b = rng();
-    uint64_t b0 = rng();
-    uint64_t b1 = b - b0;
+    uint64_t b = proto::norm_mod(rng());
+    uint64_t b0 = proto::norm_mod(rng());
+    uint64_t b1 = proto::sub_mod(b, b0);
     B[static_cast<size_t>(r)] = b;
     mat.B0[static_cast<size_t>(r)] = b0;
     mat.B1[static_cast<size_t>(r)] = b1;
@@ -131,12 +131,12 @@ RowBroadcastTripleMaterial make_row_broadcast_triples(int rows, int cols, std::m
   for (int r = 0; r < rows; ++r) {
     for (int c = 0; c < cols; ++c) {
       size_t idx = static_cast<size_t>(r * cols + c);
-      uint64_t a = rng();
-      uint64_t a0 = rng();
-      uint64_t a1 = a - a0;
+      uint64_t a = proto::norm_mod(rng());
+      uint64_t a0 = proto::norm_mod(rng());
+      uint64_t a1 = proto::sub_mod(a, a0);
       uint64_t c_val = proto::mul_mod(a, B[static_cast<size_t>(r)]);
-      uint64_t c0 = rng();
-      uint64_t c1 = c_val - c0;
+      uint64_t c0 = proto::norm_mod(rng());
+      uint64_t c1 = proto::sub_mod(c_val, c0);
       mat.A0[idx] = a0;
       mat.A1[idx] = a1;
       mat.C0[idx] = c0;
@@ -208,14 +208,16 @@ static std::vector<proto::BeaverTriple64Share>& ensure_cached_triples(
   std::mt19937_64 rng(seed_base ^ static_cast<uint64_t>(count));
   std::vector<proto::BeaverTriple64Share> triples(count);
   for (auto& tri : triples) {
-    uint64_t a = rng();
-    uint64_t b = rng();
+    uint64_t a = proto::norm_mod(rng());
+    uint64_t b = proto::norm_mod(rng());
     uint64_t c = proto::mul_mod(a, b);
-    uint64_t a0 = rng();
-    uint64_t b0 = rng();
-    uint64_t c0 = rng();
+    uint64_t a0 = proto::norm_mod(rng());
+    uint64_t b0 = proto::norm_mod(rng());
+    uint64_t c0 = proto::norm_mod(rng());
     tri = (party == 0) ? proto::BeaverTriple64Share{a0, b0, c0}
-                       : proto::BeaverTriple64Share{a - a0, b - b0, c - c0};
+                       : proto::BeaverTriple64Share{proto::sub_mod(a, a0),
+                                                   proto::sub_mod(b, b0),
+                                                   proto::sub_mod(c, c0)};
   }
   auto [ins_it, _] = cache.emplace(count, std::move(triples));
   return ins_it->second;
@@ -532,6 +534,7 @@ void attention_forward(const AttentionConfig& cfg,
   // Run GEMM on its own stream so PFSS (if GPU) can overlap on its compute stream.
   mp.overlap_stream = (ctx && ctx->uses_gpu_backend()) ? nn::matmul_default_stream() : nullptr;
   net::Chan* pfss_nc = (ctx && ctx->pfss_net_chan) ? ctx->pfss_net_chan : &ch;
+  proto::IChannel* pfss_chan_override = (ctx && ctx->pfss_chan) ? ctx->pfss_chan : nullptr;
 
   if (!ctx) {
     throw std::runtime_error("attention_forward: LayerContext required (no local rescale fallback)");
@@ -563,16 +566,28 @@ void attention_forward(const AttentionConfig& cfg,
   auto barrier = [&](const runtime::PfssLayerPlanner::BarrierPolicy& pol) {
     if (ctx && ctx->disable_inner_barriers) return;
     if (ctx && ctx->pfss_layer_planner) {
-      runtime::ProtoChanFromNet pch_bar(*pfss_nc);
-      ctx->pfss_layer_planner->barrier(
-          party,
-          ctx->trunc_backend(),
-          pe->pfss_coeff_batch(),
-          pe->pfss_trunc_batch(),
-          pch_bar,
-          &pe->open_collector(),
-          &ch,
-          pol);
+      if (pfss_chan_override) {
+        ctx->pfss_layer_planner->barrier(
+            party,
+            ctx->trunc_backend(),
+            pe->pfss_coeff_batch(),
+            pe->pfss_trunc_batch(),
+            *pfss_chan_override,
+            &pe->open_collector(),
+            &ch,
+            pol);
+      } else {
+        runtime::ProtoChanFromNet pch_bar(*pfss_nc);
+        ctx->pfss_layer_planner->barrier(
+            party,
+            ctx->trunc_backend(),
+            pe->pfss_coeff_batch(),
+            pe->pfss_trunc_batch(),
+            pch_bar,
+            &pe->open_collector(),
+            &ch,
+            pol);
+      }
     }
   };
   auto enter_phase = [&]() {
@@ -622,7 +637,7 @@ void attention_forward(const AttentionConfig& cfg,
     truncR.party = party;
     truncR.net_chan = &ch;
     truncR.pfss_backend = &ctx->trunc_backend();
-    truncR.pfss_chan = &pch;
+    truncR.pfss_chan = pfss_chan_override ? pfss_chan_override : &pch;
     truncR.pfss_trunc = &pe->pfss_coeff_batch();  // share batch for trunc + coeff
     truncR.opens = &pe->open_collector();
     if (!(ctx && ctx->force_eager_pfss)) {
@@ -824,7 +839,7 @@ void attention_forward(const AttentionConfig& cfg,
     prob_choice.shift_bits = fb;
     prob_choice.signed_value = false;  // probabilities are non-negative
     phase_R.pfss_backend = &ctx->trunc_backend();
-    phase_R.pfss_chan = &pch;
+    phase_R.pfss_chan = pfss_chan_override ? pfss_chan_override : &pch;
     phase_R.pfss_coeff = &pe->pfss_coeff_batch();
     phase_R.pfss_trunc = &pe->pfss_trunc_batch();
     phase_R.opens = &pe->open_collector();
@@ -1593,7 +1608,7 @@ void attention_forward(const AttentionConfig& cfg,
     truncR.party = party;
     truncR.net_chan = &ch;
     truncR.pfss_backend = &ctx->trunc_backend();
-    truncR.pfss_chan = &pch;
+    truncR.pfss_chan = pfss_chan_override ? pfss_chan_override : &pch;
     truncR.pfss_trunc = &pe->pfss_coeff_batch();  // share batch for trunc + coeff
     truncR.opens = &pe->open_collector();
     runtime::PfssPhasePlanner planner;

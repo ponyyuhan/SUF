@@ -70,8 +70,8 @@
 
 namespace runtime {
 
-inline int64_t to_signed(uint64_t v) { return static_cast<int64_t>(v); }
-inline uint64_t to_ring(int64_t v) { return static_cast<uint64_t>(v); }
+inline int64_t to_signed(uint64_t v) { return proto::to_signed(v); }
+inline uint64_t to_ring(int64_t v) { return proto::from_signed(v); }
 
 // Simple Beaver mul task (secret x secret). Uses OpenCollector if provided,
 // otherwise falls back to direct channel opens.
@@ -351,12 +351,19 @@ class TruncTask final : public detail::PhaseTask {
         hook_ = (R.party == 0) ? bundle_->hook0.get() : bundle_->hook1.get();
         if (!hook_) throw std::runtime_error("TruncTask: hook missing");
         hook_->configure(key_->compiled.layout);
-        if (key_->r_in_share_vec.empty() || key_->r_in_share_vec.size() < in_.size()) {
-          // Some generators still provide scalar r_in; repeat it to enforce per-element usage.
-          r_in_fallback_.assign(in_.size(), key_->r_in_share);
-          r_in_src_ = &r_in_fallback_;
-        } else {
-          r_in_src_ = &key_->r_in_share_vec;
+        if (std::getenv("SUF_TRUNC_KEY_TRACE")) {
+          static std::atomic<bool> logged{false};
+          bool expect = false;
+          if (logged.compare_exchange_strong(expect, true)) {
+            std::fprintf(stderr,
+                         "[TruncTask] gate_kind=%d pred_sem=%d pred_out_bytes=%d triples=%zu ell=%d degree=%d\n",
+                         static_cast<int>(key_->compiled.gate_kind),
+                         static_cast<int>(key_->pred_meta.sem),
+                         key_->pred_meta.out_bytes,
+                         key_->triples.size(),
+                         key_->compiled.ell,
+                         key_->compiled.degree);
+          }
         }
       }
     }
@@ -372,10 +379,7 @@ class TruncTask final : public detail::PhaseTask {
           }
         } else {
           for (size_t i = 0; i < in_.size(); ++i) {
-            if (!r_in_src_ || r_in_src_->size() <= i) {
-              throw std::runtime_error("TruncTask: missing r_in share");
-            }
-            uint64_t rin = (*r_in_src_)[i];
+            uint64_t rin = (key_->r_in_share_vec.size() > i) ? key_->r_in_share_vec[i] : key_->r_in_share;
             masked_[i] = proto::add_mod(in_[i], rin);
           }
         }
@@ -512,7 +516,11 @@ class TruncTask final : public detail::PhaseTask {
               throw std::runtime_error("TruncTask: PFSS arith slice too small (per-element)");
             }
             std::vector<uint64_t> hook_out(v.r, 0);
-            size_t need_triples = std::max<size_t>(v.ell, v.r);
+            const bool hook_needs_mul =
+                !(dynamic_cast<const gates::FaithfulTruncPostProc*>(per_hooks_[elem]) ||
+                  dynamic_cast<const gates::FaithfulArsPostProc*>(per_hooks_[elem]) ||
+                  dynamic_cast<const gates::GapArsPostProc*>(per_hooks_[elem]));
+            size_t need_triples = hook_needs_mul ? std::max<size_t>(v.ell, v.r) : 0;
             const auto* key_i = per_keys_[elem];
             const std::vector<proto::BeaverTriple64Share>* triples = &key_i->triples;
             std::vector<proto::BeaverTriple64Share> tmp_triples;
@@ -526,7 +534,8 @@ class TruncTask final : public detail::PhaseTask {
             if (triples->size() < need_triples) {
               throw std::runtime_error("TruncTask: insufficient triples (per-element)");
             }
-            proto::BeaverMul64 mul{R.party, *R.pfss_chan, *triples};
+            static const std::vector<proto::BeaverTriple64Share> k_empty_triples;
+            proto::BeaverMul64 mul{R.party, *R.pfss_chan, hook_needs_mul ? *triples : k_empty_triples};
             uint64_t hatx_public = static_cast<uint64_t>(opened_[elem]);
             per_hooks_[elem]->run_batch(R.party,
                                      *R.pfss_chan,
@@ -774,7 +783,11 @@ class TruncTask final : public detail::PhaseTask {
                     << "\n";
         }
         std::vector<uint64_t> hook_out(elems * v.r, 0);
-        size_t need_triples = std::max<size_t>(elems * v.ell, elems * v.r);
+        const bool hook_needs_mul =
+            !(dynamic_cast<const gates::FaithfulTruncPostProc*>(hook_) ||
+              dynamic_cast<const gates::FaithfulArsPostProc*>(hook_) ||
+              dynamic_cast<const gates::GapArsPostProc*>(hook_));
+        size_t need_triples = hook_needs_mul ? std::max<size_t>(elems * v.ell, elems * v.r) : 0;
         const std::vector<proto::BeaverTriple64Share>* triples = &key_->triples;
         std::vector<proto::BeaverTriple64Share> tmp_triples;
         if (triples->size() < need_triples && !triples->empty()) {
@@ -787,7 +800,8 @@ class TruncTask final : public detail::PhaseTask {
         if (triples->size() < need_triples) {
           throw std::runtime_error("TruncTask: insufficient triples");
         }
-        proto::BeaverMul64 mul{R.party, *R.pfss_chan, *triples};
+        static const std::vector<proto::BeaverTriple64Share> k_empty_triples;
+        proto::BeaverMul64 mul{R.party, *R.pfss_chan, hook_needs_mul ? *triples : k_empty_triples};
         hook_->run_batch(R.party, *R.pfss_chan, mul,
                          job_hatx(),
                          v.arith, v.r,
@@ -858,14 +872,12 @@ class TruncTask final : public detail::PhaseTask {
   std::vector<gates::PostProcHook*> per_hooks_;
   std::vector<PfssHandle> pfss_handles_;
   size_t pfss_next_elem_ = 0;
-  size_t pfss_chunk_begin_ = 0;
-  std::span<const uint64_t> in_;
-  std::span<uint64_t> out_;
-  const std::vector<uint64_t>* r_in_src_ = nullptr;
-  std::vector<uint64_t> r_in_fallback_;
-  std::vector<uint64_t> masked_;
-  std::vector<int64_t> opened_;
-  OpenHandle h_open_{};
+	  size_t pfss_chunk_begin_ = 0;
+	  std::span<const uint64_t> in_;
+	  std::span<uint64_t> out_;
+	  std::vector<uint64_t> masked_;
+	  std::vector<int64_t> opened_;
+	  OpenHandle h_open_{};
   PfssHandle h_pfss_{};
   const std::vector<int>* row_offsets_hint_ = nullptr;
   const std::vector<int>* row_lengths_hint_ = nullptr;
@@ -972,18 +984,10 @@ class RsqrtTask final : public detail::PhaseTask {
       key_ = (R.party == 0) ? bundle_.key0 : bundle_.key1;
       if (!key_) throw std::runtime_error("RsqrtTask: missing party key");
       triple_span_ = std::span<const proto::BeaverTriple64Share>(key_->triples);
-      if (key_->r_in_share_vec.size() != x_.size()) {
-        if (std::getenv("SOFTMAX_BENCH_TRACE")) {
-          std::fprintf(stderr, "[RsqrtTask p%d] r_in_share_vec size=%zu expected=%zu\n",
-                       R.party, key_->r_in_share_vec.size(), x_.size());
-        }
-        // Bench fallback: resize and fill with repeated r_in.
-        auto* k = const_cast<gates::CompositePartyKey*>(key_);
-        k->r_in_share_vec.assign(x_.size(), k->r_in_share);
-        if (std::getenv("SOFTMAX_BENCH_TRACE")) {
-          std::fprintf(stderr, "[RsqrtTask p%d] filled r_in_share_vec with r_in=%llu\n",
-                       R.party, static_cast<unsigned long long>(k->r_in_share));
-        }
+      if (std::getenv("SOFTMAX_BENCH_TRACE")) {
+        const bool have_vec = (key_->r_in_share_vec.size() == x_.size());
+        std::fprintf(stderr, "[RsqrtTask p%d] r_in_share_vec size=%zu expected=%zu (using %s)\n",
+                     R.party, key_->r_in_share_vec.size(), x_.size(), have_vec ? "vec" : "scalar");
       }
     }
     switch (st_) {
@@ -991,7 +995,7 @@ class RsqrtTask final : public detail::PhaseTask {
         // Mask and open x (public) for init PFSS.
         masked_.resize(x_.size());
         for (size_t i = 0; i < x_.size(); ++i) {
-          uint64_t rin = key_->r_in_share_vec[i];
+          uint64_t rin = (key_->r_in_share_vec.size() > i) ? key_->r_in_share_vec[i] : key_->r_in_share;
           masked_[i] = proto::add_mod(x_[i], rin);
         }
         if (!R.opens) throw std::runtime_error("RsqrtTask: no OpenCollector");
@@ -1990,15 +1994,33 @@ class CubicPolyTask final : public detail::PhaseTask {
     if (!key_) {
       key_ = (R.party == 0) ? bundle_.key0 : bundle_.key1;
       if (!key_) throw std::runtime_error("CubicPolyTask: missing party key");
-      triple_span_ = std::span<const proto::BeaverTriple64Share>(key_->triples);
-      if (!bundle_.trunc_f) {
-        throw std::runtime_error("CubicPolyTask: missing truncation bundle");
+      const bool direct_payload_only =
+          (key_->compiled.r == 1 && key_->compiled.degree == 0 && key_->compiled.ell == 0);
+      if (!direct_payload_only) {
+        triple_span_ = std::span<const proto::BeaverTriple64Share>(key_->triples);
       }
-      if (!bundle_.trunc_2f) {
-        throw std::runtime_error("CubicPolyTask: missing truncation-2f bundle");
+      if (std::getenv("SUF_CUBIC_KEY_TRACE")) {
+        static std::atomic<bool> logged{false};
+        bool expect = false;
+        if (logged.compare_exchange_strong(expect, true)) {
+          std::fprintf(stderr,
+                       "[CubicPolyTask] gate_kind=%d coeff_mode=%d pred_sem=%d degree=%d r=%d ell=%d triples=%zu\n",
+                       static_cast<int>(key_->compiled.gate_kind),
+                       static_cast<int>(key_->compiled.coeff.mode),
+                       static_cast<int>(key_->pred_meta.sem),
+                       key_->compiled.degree,
+                       key_->compiled.r,
+                       key_->compiled.ell,
+                       key_->triples.size());
+        }
       }
-      if (key_->r_in_share_vec.empty() || key_->r_in_share_vec.size() < x_.size()) {
-        throw std::runtime_error("CubicPolyTask: r_in_share_vec missing or too small");
+      if (!direct_payload_only) {
+        if (!bundle_.trunc_f) {
+          throw std::runtime_error("CubicPolyTask: missing truncation bundle");
+        }
+        if (!bundle_.trunc_2f) {
+          throw std::runtime_error("CubicPolyTask: missing truncation-2f bundle");
+        }
       }
     }
     switch (st_) {
@@ -2006,7 +2028,7 @@ class CubicPolyTask final : public detail::PhaseTask {
         if (!R.net_chan) throw std::runtime_error("CubicPolyTask: net channel missing");
         masked_.resize(x_.size());
         for (size_t i = 0; i < x_.size(); ++i) {
-          uint64_t rin = key_->r_in_share_vec[i];
+          uint64_t rin = (key_->r_in_share_vec.size() > i) ? key_->r_in_share_vec[i] : key_->r_in_share;
           masked_[i] = proto::add_mod(x_[i], rin);
         }
         if (R.opens) {
@@ -2099,8 +2121,10 @@ class CubicPolyTask final : public detail::PhaseTask {
         static bool logged = false;
         if (!logged && R.party == 0 && c0_.size() > 0) {
           logged = true;
-          std::cerr << "CubicPolyTask coeffs: c0=" << c0_[0] << " c1=" << c1_[0]
-                    << " c2=" << c2_[0] << " c3=" << c3_[0] << " r=" << v.r << "\n";
+          if (std::getenv("SUF_CUBIC_TRACE")) {
+            std::cerr << "CubicPolyTask coeffs: c0=" << c0_[0] << " c1=" << c1_[0]
+                      << " c2=" << c2_[0] << " c3=" << c3_[0] << " r=" << v.r << "\n";
+          }
         }
         if (R.pfss_backend &&
             dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) != nullptr &&
@@ -2390,16 +2414,13 @@ class RecipTask final : public detail::PhaseTask {
                                         : bundle_.trunc_fb->keys.k1.r_out_share[0])
                   << "\n";
       }
-      if (key_->r_in_share_vec.empty() || key_->r_in_share_vec.size() < x_.size()) {
-        throw std::runtime_error("RecipTask: r_in_share_vec missing or too small");
-      }
     }
     switch (st_) {
       case St::OpenXhat: {
         if (!R.net_chan) throw std::runtime_error("RecipTask: net channel missing");
         masked_.resize(x_.size());
         for (size_t i = 0; i < x_.size(); ++i) {
-          uint64_t rin = key_->r_in_share_vec[i];
+          uint64_t rin = (key_->r_in_share_vec.size() > i) ? key_->r_in_share_vec[i] : key_->r_in_share;
           masked_[i] = proto::add_mod(x_[i], rin);
         }
         if (R.opens) {

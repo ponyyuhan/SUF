@@ -361,9 +361,6 @@ RsqrtMaterial make_rsqrt_material(int frac_bits,
       suf_gate, backend, rng, rng(), r_out, static_cast<size_t>(rows), compiler::GateKind::Rsqrt);
   kp.k0.compiled.gate_kind = compiler::GateKind::Rsqrt;
   kp.k1.compiled.gate_kind = compiler::GateKind::Rsqrt;
-  // Ensure r_in shares are replicated per element for RsqrtTask.
-  kp.k0.r_in_share_vec.assign(static_cast<size_t>(rows), kp.k0.r_in_share);
-  kp.k1.r_in_share_vec.assign(static_cast<size_t>(rows), kp.k1.r_in_share);
   if (std::getenv("SOFTMAX_BENCH_TRACE")) {
     std::fprintf(stderr, "[bench rsqrt material] rows=%d r_in_vec0=%zu r_in_vec1=%zu r_in0=%llu r_in1=%llu\n",
                  rows,

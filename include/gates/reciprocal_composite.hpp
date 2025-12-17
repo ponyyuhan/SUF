@@ -30,12 +30,10 @@ struct RecipTaskMaterial {
 inline void ensure_recips_triples(gates::CompositeKeyPair& kp,
                                   size_t per_iter_need,
                                   int nr_iters,
+                                  size_t batch_N,
                                   std::mt19937_64& rng) {
   // One mul for the affine init plus per-iter muls, per element in the batch.
-  const size_t batch_N = std::max<size_t>(
-      1,
-      std::max(kp.k0.r_in_share_vec.size(),
-               kp.k1.r_in_share_vec.size()));
+  batch_N = std::max<size_t>(batch_N, 1);
   const size_t per_elem = per_iter_need * static_cast<size_t>(nr_iters) + 1;
   size_t need = per_elem * batch_N;
   auto fill = [&](std::vector<proto::BeaverTriple64Share>& dst0,
@@ -76,9 +74,10 @@ inline RecipTaskMaterial dealer_make_recip_task_material(proto::PfssBackendBatch
     return std::max(bits, 1);
   };
   int eff_bits = std::min(bits_mag(max_end) + 1, 64);
+  const uint64_t r_in = rng();
   std::vector<uint64_t> r_out(static_cast<size_t>(suf_gate.r_out), 0ull);
   auto kp = gates::composite_gen_backend_with_masks(
-      suf_gate, backend, rng, /*r_in=*/0ull, r_out, batch_N, compiler::GateKind::Reciprocal,
+      suf_gate, backend, rng, r_in, r_out, batch_N, compiler::GateKind::Reciprocal,
       /*pred_eff_bits_hint=*/eff_bits,
       /*coeff_eff_bits_hint=*/eff_bits);
   kp.k0.compiled.gate_kind = compiler::GateKind::Reciprocal;
@@ -101,7 +100,7 @@ inline RecipTaskMaterial dealer_make_recip_task_material(proto::PfssBackendBatch
   std::fill(trunc_fb.keys.k1.r_out_share.begin(), trunc_fb.keys.k1.r_out_share.end(), 0ull);
 
   // Two muls per NR iter: y*x and y*(2 - xy). Each mul needs a trunc back to Qf.
-  ensure_recips_triples(kp, /*per_iter_need=*/2, nr_iters, rng);
+  ensure_recips_triples(kp, /*per_iter_need=*/2, nr_iters, batch_N, rng);
 
   RecipTaskMaterial out;
   out.suf = std::move(suf_gate);

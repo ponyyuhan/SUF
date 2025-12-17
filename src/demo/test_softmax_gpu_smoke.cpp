@@ -569,7 +569,9 @@ int main() {
     return recon;
   };
   auto recon_exp_gpu = recon_composite(hatx_plain, *gpu0, nexp_mat.keys, nexp_mat.suf);
-  auto recon_exp_ref = recon_composite(hatx_plain, ref_backend, nexp_mat_ref.keys, nexp_mat_ref.suf);
+  // Compare evaluation backends on identical keys/inputs (avoid false mismatches from
+  // different random r_in masks across independently generated materials).
+  auto recon_exp_ref = recon_composite(hatx_plain, ref_backend, nexp_mat.keys, nexp_mat.suf);
   for (size_t i = 0; i < recon_exp_gpu.size(); i++) {
     if (recon_exp_gpu[i] != recon_exp_ref[i]) {
       std::cerr << "Direct nExp composite mismatch idx=" << i
@@ -588,7 +590,7 @@ int main() {
   }
   std::cerr << "[dbg] Checking recip composite GPU vs ref...\n";
   auto recon_recip_gpu = recon_composite(hatx_recip, *gpu0, recip_mat.keys, recip_mat.suf);
-  auto recon_recip_ref = recon_composite(hatx_recip, ref_backend, recip_mat_ref.keys, recip_mat_ref.suf);
+  auto recon_recip_ref = recon_composite(hatx_recip, ref_backend, recip_mat.keys, recip_mat.suf);
   if (recon_recip_gpu.size() != recon_recip_ref.size()) {
     std::cerr << "Recip composite size mismatch gpu=" << recon_recip_gpu.size()
               << " ref=" << recon_recip_ref.size() << "\n";

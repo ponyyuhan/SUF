@@ -2,10 +2,12 @@
 
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <random>
 #include <algorithm>
 #include <cstdlib>
 #include <limits>
+#include <mutex>
 
 #ifdef SUF_HAVE_CUDA
 #include <cuda_runtime.h>
@@ -31,6 +33,25 @@ inline size_t packed_words_host(size_t elems, int eff_bits) {
 
 inline size_t beaver_u64_mul_per_elem(const ::gates::CompositePartyKey& k) {
   const auto& comp = k.compiled;
+  // If predicate shares are additive-u64, composite_eval_batch_backend uses a
+  // non-interactive path (no Beaver muls) for degree-0 gates.
+  if (k.pred_meta.sem == ::proto::ShareSemantics::AddU64 &&
+      comp.degree == 0 &&
+      comp.coeff.cutpoints_ge.empty()) {
+    return 0;
+  }
+  // Truncation gates can be evaluated without Beaver muls when predicate shares
+  // are emitted directly in the additive ring (0/1 as u64). This avoids the
+  // XOR->add conversion and selector-weighted blending that the generic path
+  // would otherwise perform.
+  if ((comp.gate_kind == ::compiler::GateKind::FaithfulTR ||
+       comp.gate_kind == ::compiler::GateKind::FaithfulARS ||
+       comp.gate_kind == ::compiler::GateKind::GapARS) &&
+      k.pred_meta.sem == ::proto::ShareSemantics::AddU64 &&
+      comp.degree == 0 &&
+      comp.coeff.cutpoints_ge.empty()) {
+    return 0;
+  }
   // Interval-LUT coeff mode can make coefficient selection Beaver-free. For the
   // current usage in this repo (payload-only gates: degree=0, ell=0), the PFSS
   // evaluation does not consume any Beaver 64-bit triples.
@@ -330,11 +351,52 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
     std::vector<Bucket> buckets;
     for (auto job_idx : gd.jobs) {
       auto& job = jobs_[job_idx];
+      if (std::getenv("SUF_PFSS_BEAVER_TRACE")) {
+        static std::mutex mu;
+        static std::unordered_set<uint64_t> seen;
+        const auto& ck = job.key->compiled;
+        const size_t per_elem = beaver_u64_mul_per_elem(*job.key);
+        if (per_elem > 0) {
+          // Deduplicate logs by gate metadata; many jobs share the same key shape.
+          uint64_t tag = 0;
+          tag ^= static_cast<uint64_t>(static_cast<int>(ck.gate_kind)) & 0xFFull;
+          tag ^= (static_cast<uint64_t>(static_cast<int>(ck.coeff.mode)) & 0xFFull) << 8;
+          tag ^= (static_cast<uint64_t>(static_cast<int>(job.key->pred_meta.sem)) & 0xFFull) << 16;
+          tag ^= (static_cast<uint64_t>(ck.r) & 0xFFull) << 24;
+          tag ^= (static_cast<uint64_t>(ck.ell) & 0xFFull) << 32;
+          tag ^= (static_cast<uint64_t>(ck.degree) & 0xFFull) << 40;
+          tag ^= (static_cast<uint64_t>(ck.coeff.cutpoints_ge.size()) & 0xFFFFull) << 48;
+          std::lock_guard<std::mutex> lg(mu);
+          if (seen.insert(tag).second) {
+            std::fprintf(stderr,
+                         "[pfss_beaver] gate_kind=%d coeff_mode=%d pred_sem=%d r=%d ell=%d degree=%d "
+                         "cuts=%zu per_elem_mul=%zu hatx=%zu triples=%zu\n",
+                         static_cast<int>(ck.gate_kind),
+                         static_cast<int>(ck.coeff.mode),
+                         static_cast<int>(job.key->pred_meta.sem),
+                         ck.r,
+                         ck.ell,
+                         ck.degree,
+                         ck.coeff.cutpoints_ge.size(),
+                         per_elem,
+                         job.hatx_public.size(),
+                         job.key->triples.size());
+          }
+        }
+      }
       const size_t cap_elems = beaver_u64_capacity_elems(*job.key);
       if (cap_elems != std::numeric_limits<size_t>::max() && job.hatx_public.size() > cap_elems) {
+        const auto& ck = job.key->compiled;
         throw std::runtime_error("PfssSuperBatch: job exceeds provisioned Beaver triple capacity (hatx=" +
                                  std::to_string(job.hatx_public.size()) + " cap=" + std::to_string(cap_elems) +
-                                 " triples=" + std::to_string(job.key->triples.size()) + ")");
+                                 " triples=" + std::to_string(job.key->triples.size()) +
+                                 " gate_kind=" + std::to_string(static_cast<int>(ck.gate_kind)) +
+                                 " pred_sem=" + std::to_string(static_cast<int>(job.key->pred_meta.sem)) +
+                                 " r=" + std::to_string(ck.r) +
+                                 " ell=" + std::to_string(ck.ell) +
+                                 " degree=" + std::to_string(ck.degree) +
+                                 " cutpoints=" + std::to_string(ck.coeff.cutpoints_ge.size()) +
+                                 " coeff_mode=" + std::to_string(static_cast<int>(ck.coeff.mode)) + ")");
       }
       size_t bidx;
       auto it = bucket_index.find(job.key);

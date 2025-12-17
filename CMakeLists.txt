@@ -30,6 +30,7 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 add_library(suf_fss INTERFACE)
 target_include_directories(suf_fss INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(suf_fss INTERFACE OpenSSL::Crypto)
 
 option(SUF_USE_MYL7_FSS "Enable myl7/fss backend adapter" ON)
 option(SUF_FETCH_MYL7_FSS "Fetch myl7/fss from GitHub if not found" ON)

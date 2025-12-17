@@ -77,9 +77,10 @@ inline SiluTaskMaterial dealer_make_silu_task_material(proto::PfssBackendBatch& 
     }
     std::cerr << " size=" << suf_gate.alpha.size() << "\n";
   }
+  const uint64_t r_in = rng();
   std::vector<uint64_t> r_out(static_cast<size_t>(suf_gate.r_out), 0ull);
   auto kp = gates::composite_gen_backend_with_masks(
-      suf_gate, backend, rng, /*r_in=*/0ull, r_out, batch_N, compiler::GateKind::SiLUSpline);
+      suf_gate, backend, rng, r_in, r_out, batch_N, compiler::GateKind::SiLUSpline);
   // output masks are already zero; keep r_out shares zeroed for coeff payload.
   kp.k0.compiled.gate_kind = compiler::GateKind::SiLUSpline;
   kp.k1.compiled.gate_kind = compiler::GateKind::SiLUSpline;
@@ -121,9 +122,10 @@ inline SiluCompositeKeys dealer_make_silu_composite_keys(proto::PfssBackend& bac
                                                          std::mt19937_64& rng) {
   auto spec = make_silu_spec(params);
   auto suf_gate = suf::build_silu_suf_from_piecewise(spec);
+  const uint64_t r_in = rng();
   std::vector<uint64_t> r_out(static_cast<size_t>(suf_gate.r_out), 0ull);
   auto kp = gates::composite_gen_backend_with_masks(
-      suf_gate, backend, rng, /*r_in=*/0ull, r_out, /*batch_N=*/1, compiler::GateKind::SiLUSpline);
+      suf_gate, backend, rng, r_in, r_out, /*batch_N=*/1, compiler::GateKind::SiLUSpline);
   SiluCompositeKeys out;
   out.suf = std::move(suf_gate);
   out.keys = std::move(kp);
