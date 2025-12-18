@@ -592,6 +592,10 @@ int main(int argc, char** argv) {
 	    // is explicitly exported by the user.
 	    if (args.backend == "gpu") {
 	      ::setenv("SUF_FORCE_PFSS", "1", /*overwrite=*/0);
+        // Global performance default: use the GPU path for Beaver matmuls in attention.
+        // This keeps the benchmark faithful to paper.md's offline/online split while
+        // avoiding CPU-side O(MNK) hot loops that dominate large-model runs.
+        ::setenv("SUF_MATMUL_BEAVER_GPU", "1", /*overwrite=*/0);
 	    }
 	    const auto& spec = nn::get_model_spec(args.model);
 	    proto::set_ring_bits(static_cast<int>(spec.n_bits));

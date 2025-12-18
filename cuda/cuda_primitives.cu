@@ -234,6 +234,123 @@ __global__ void row_sum_ragged_kernel(const uint64_t* __restrict__ vals,
   if (tid == 0) out_rows[r] = buf[0];
 }
 
+__device__ __forceinline__ uint64_t beaver_scaled_acc(uint64_t acc_mod,
+                                                      int has_scale,
+                                                      int64_t mul_const,
+                                                      int mul_shift) {
+  if (!has_scale) return acc_mod;
+  if (mul_shift <= 0) {
+    // Low 64 bits of signed product (two's complement); matches host cast behavior.
+    int64_t a = static_cast<int64_t>(acc_mod);
+    uint64_t lo = static_cast<uint64_t>(a) * static_cast<uint64_t>(mul_const);
+    return lo;
+  }
+  if (mul_shift >= 64) {
+    int64_t a = static_cast<int64_t>(acc_mod);
+    int64_t hi = __mul64hi(a, mul_const);
+    // Arithmetic shift of 128 by >=64: low word comes from hi.
+    int s = mul_shift - 64;
+    uint64_t out_lo = static_cast<uint64_t>(hi >> s);
+    return out_lo;
+  }
+  int64_t a = static_cast<int64_t>(acc_mod);
+  uint64_t lo = static_cast<uint64_t>(a) * static_cast<uint64_t>(mul_const);
+  int64_t hi = __mul64hi(a, mul_const);
+  const int s = mul_shift;
+  // Low word of arithmetic-right-shifted 128-bit product.
+  uint64_t out_lo = (lo >> s) | (static_cast<uint64_t>(hi) << (64 - s));
+  return out_lo;
+}
+
+__global__ void beaver_matmul2d_kernel(int party,
+                                       const uint64_t* __restrict__ D_open,
+                                       const uint64_t* __restrict__ E_open,
+                                       const uint64_t* __restrict__ A_tri,
+                                       const uint64_t* __restrict__ B_tri,
+                                       const uint64_t* __restrict__ C_tri,
+                                       int M,
+                                       int K,
+                                       int N,
+                                       int w_transposed,
+                                       int has_scale,
+                                       int64_t mul_const,
+                                       int mul_shift,
+                                       uint64_t* __restrict__ out) {
+  const size_t idx = static_cast<size_t>(blockIdx.x) * static_cast<size_t>(blockDim.x) +
+                     static_cast<size_t>(threadIdx.x);
+  const size_t total = static_cast<size_t>(M) * static_cast<size_t>(N);
+  if (idx >= total) return;
+  const int m = static_cast<int>(idx / static_cast<size_t>(N));
+  const int n = static_cast<int>(idx - static_cast<size_t>(m) * static_cast<size_t>(N));
+  uint64_t acc = C_tri[idx];
+  const int party0 = (party == 0);
+  for (int k = 0; k < K; ++k) {
+    const size_t aidx = static_cast<size_t>(m) * static_cast<size_t>(K) + static_cast<size_t>(k);
+    const size_t bidx = w_transposed
+                            ? (static_cast<size_t>(n) * static_cast<size_t>(K) + static_cast<size_t>(k))
+                            : (static_cast<size_t>(k) * static_cast<size_t>(N) + static_cast<size_t>(n));
+    const uint64_t d = D_open[aidx];
+    const uint64_t e = E_open[bidx];
+    acc = add_mod(acc, mul_mod(d, B_tri[bidx]));
+    acc = add_mod(acc, mul_mod(A_tri[aidx], e));
+    if (party0) {
+      acc = add_mod(acc, mul_mod(d, e));
+    }
+  }
+  acc = beaver_scaled_acc(acc, has_scale, mul_const, mul_shift);
+  out[idx] = acc;
+}
+
+__global__ void beaver_matmul2d_batched_kernel(int party,
+                                               const uint64_t* __restrict__ D_open,
+                                               const uint64_t* __restrict__ E_open,
+                                               const uint64_t* __restrict__ A_tri,
+                                               const uint64_t* __restrict__ B_tri,
+                                               const uint64_t* __restrict__ C_tri,
+                                               int batches,
+                                               int M,
+                                               int K,
+                                               int N,
+                                               int w_transposed,
+                                               int has_scale,
+                                               int64_t mul_const,
+                                               int mul_shift,
+                                               uint64_t* __restrict__ out) {
+  const size_t idx = static_cast<size_t>(blockIdx.x) * static_cast<size_t>(blockDim.x) +
+                     static_cast<size_t>(threadIdx.x);
+  const size_t mn = static_cast<size_t>(M) * static_cast<size_t>(N);
+  const size_t total = static_cast<size_t>(batches) * mn;
+  if (idx >= total) return;
+  const int b = static_cast<int>(idx / mn);
+  const size_t off_mn = static_cast<size_t>(b) * mn;
+  const size_t idx_mn = idx - off_mn;
+  const int m = static_cast<int>(idx_mn / static_cast<size_t>(N));
+  const int n = static_cast<int>(idx_mn - static_cast<size_t>(m) * static_cast<size_t>(N));
+
+  const size_t mk = static_cast<size_t>(M) * static_cast<size_t>(K);
+  const size_t kn = static_cast<size_t>(K) * static_cast<size_t>(N);
+  const size_t off_mk = static_cast<size_t>(b) * mk;
+  const size_t off_kn = static_cast<size_t>(b) * kn;
+
+  uint64_t acc = C_tri[idx_mn];
+  const int party0 = (party == 0);
+  for (int k = 0; k < K; ++k) {
+    const size_t aidx = static_cast<size_t>(m) * static_cast<size_t>(K) + static_cast<size_t>(k);
+    const size_t bidx = w_transposed
+                            ? (static_cast<size_t>(n) * static_cast<size_t>(K) + static_cast<size_t>(k))
+                            : (static_cast<size_t>(k) * static_cast<size_t>(N) + static_cast<size_t>(n));
+    const uint64_t d = D_open[off_mk + aidx];
+    const uint64_t e = E_open[off_kn + bidx];
+    acc = add_mod(acc, mul_mod(d, B_tri[bidx]));
+    acc = add_mod(acc, mul_mod(A_tri[aidx], e));
+    if (party0) {
+      acc = add_mod(acc, mul_mod(d, e));
+    }
+  }
+  acc = beaver_scaled_acc(acc, has_scale, mul_const, mul_shift);
+  out[off_mn + idx_mn] = acc;
+}
+
 __global__ void row_mean_kernel(const uint64_t* __restrict__ mat,
                                 int rows,
                                 int cols,
@@ -460,6 +577,117 @@ extern "C" void launch_row_sum_ragged_kernel(const uint64_t* d_vals,
   dim3 block(256);
   row_sum_ragged_kernel<<<grid, block, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
       d_vals, d_row_offsets, rows, d_out_rows);
+#endif
+}
+
+extern "C" void launch_beaver_matmul2d_kernel(int party,
+                                              const uint64_t* d_D_open,
+                                              const uint64_t* d_E_open,
+                                              const uint64_t* d_A_tri_share,
+                                              const uint64_t* d_B_tri_share,
+                                              const uint64_t* d_C_tri_share,
+                                              int M,
+                                              int K,
+                                              int N,
+                                              int w_transposed,
+                                              int has_scale,
+                                              int64_t mul_const,
+                                              int mul_shift,
+                                              uint64_t* d_out,
+                                              void* stream) {
+#ifndef SUF_HAVE_CUDA
+  (void)party;
+  (void)d_D_open;
+  (void)d_E_open;
+  (void)d_A_tri_share;
+  (void)d_B_tri_share;
+  (void)d_C_tri_share;
+  (void)M;
+  (void)K;
+  (void)N;
+  (void)w_transposed;
+  (void)has_scale;
+  (void)mul_const;
+  (void)mul_shift;
+  (void)d_out;
+  (void)stream;
+#else
+  if (M <= 0 || K <= 0 || N <= 0) return;
+  const size_t total = static_cast<size_t>(M) * static_cast<size_t>(N);
+  constexpr int kBlock = 256;
+  int grid = static_cast<int>((total + static_cast<size_t>(kBlock) - 1) / static_cast<size_t>(kBlock));
+	  beaver_matmul2d_kernel<<<grid, kBlock, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+	      party,
+	      d_D_open,
+	      d_E_open,
+	      d_A_tri_share,
+	      d_B_tri_share,
+	      d_C_tri_share,
+	      M,
+	      K,
+	      N,
+	      w_transposed,
+	      has_scale,
+	      mul_const,
+	      mul_shift,
+	      d_out);
+#endif
+}
+
+extern "C" void launch_beaver_matmul2d_batched_kernel(int party,
+                                                      const uint64_t* d_D_open,
+                                                      const uint64_t* d_E_open,
+                                                      const uint64_t* d_A_tri_share,
+                                                      const uint64_t* d_B_tri_share,
+                                                      const uint64_t* d_C_tri_share,
+                                                      int batches,
+                                                      int M,
+                                                      int K,
+                                                      int N,
+                                                      int w_transposed,
+                                                      int has_scale,
+                                                      int64_t mul_const,
+                                                      int mul_shift,
+                                                      uint64_t* d_out,
+                                                      void* stream) {
+#ifndef SUF_HAVE_CUDA
+  (void)party;
+  (void)d_D_open;
+  (void)d_E_open;
+  (void)d_A_tri_share;
+  (void)d_B_tri_share;
+  (void)d_C_tri_share;
+  (void)batches;
+  (void)M;
+  (void)K;
+  (void)N;
+  (void)w_transposed;
+  (void)has_scale;
+  (void)mul_const;
+  (void)mul_shift;
+  (void)d_out;
+  (void)stream;
+#else
+  if (batches <= 0 || M <= 0 || K <= 0 || N <= 0) return;
+  const size_t total = static_cast<size_t>(batches) * static_cast<size_t>(M) * static_cast<size_t>(N);
+  constexpr int kBlock = 256;
+  int grid = static_cast<int>((total + static_cast<size_t>(kBlock) - 1) / static_cast<size_t>(kBlock));
+  beaver_matmul2d_batched_kernel<<<grid, kBlock, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+      party,
+      d_D_open,
+      d_E_open,
+      d_A_tri_share,
+      d_B_tri_share,
+      d_C_tri_share,
+      batches,
+      M,
+      K,
+      N,
+      w_transposed,
+      has_scale,
+      mul_const,
+      mul_shift,
+      d_out);
 #endif
 }
 

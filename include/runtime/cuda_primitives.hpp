@@ -101,6 +101,51 @@ void launch_row_sum_ragged_kernel(const uint64_t* d_vals,
                                   uint64_t* d_out_rows,
                                   void* stream /* cudaStream_t */);
 
+// 2D Beaver matmul (dense): out = C + D*B + A*E (+ D*E if party==0) where
+// D = open(A - A_tri) and E = open(B - B_tri). All arithmetic is mod 2^64.
+//
+// Shapes:
+//   A, D, A_tri: [M x K] (row-major)
+//   B, E, B_tri: [K x N] (row-major) if w_transposed==false
+//                [N x K] (row-major) if w_transposed==true (i.e., B^T stored)
+//   C, C_tri, out: [M x N]
+//
+// D_open and E_open must be provided as uint64 bit-patterns (opened ring elems).
+void launch_beaver_matmul2d_kernel(int party,
+                                   const uint64_t* d_D_open,        // M*K
+                                   const uint64_t* d_E_open,        // K*N or N*K
+                                   const uint64_t* d_A_tri_share,   // M*K
+                                   const uint64_t* d_B_tri_share,   // K*N or N*K
+                                   const uint64_t* d_C_tri_share,   // M*N
+                                   int M,
+                                   int K,
+                                   int N,
+                                   int w_transposed,                // 0/1
+                                   int has_scale,                   // 0/1
+                                   int64_t mul_const,               // only used if has_scale=1
+                                   int mul_shift,                   // only used if has_scale=1
+                                   uint64_t* d_out,                 // M*N
+                                   void* stream /* cudaStream_t */);
+
+// Batched variant where the *same* triple shares (A_tri,B_tri,C_tri) are reused across all
+// batch instances. This matches the benchmark's shape-based triple caching behavior.
+void launch_beaver_matmul2d_batched_kernel(int party,
+                                           const uint64_t* d_D_open,        // batches*M*K
+                                           const uint64_t* d_E_open,        // batches*(K*N or N*K)
+                                           const uint64_t* d_A_tri_share,   // M*K
+                                           const uint64_t* d_B_tri_share,   // K*N or N*K
+                                           const uint64_t* d_C_tri_share,   // M*N
+                                           int batches,
+                                           int M,
+                                           int K,
+                                           int N,
+                                           int w_transposed,                // 0/1
+                                           int has_scale,                   // 0/1
+                                           int64_t mul_const,
+                                           int mul_shift,
+                                           uint64_t* d_out,                 // batches*M*N
+                                           void* stream /* cudaStream_t */);
+
 // Row mean: mean = sum / len (len from valid_lens or cols). Operates mod 2^64.
 void launch_row_mean_kernel(const uint64_t* d_mat,
                             int rows,

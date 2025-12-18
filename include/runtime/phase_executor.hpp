@@ -120,10 +120,13 @@ class PhaseExecutor {
   }
 
   struct LazyLimits {
-    size_t open_pending_words = 1ull << 18;
-    size_t coeff_pending_jobs = 1ull << 12;
-    size_t trunc_pending_jobs = 1ull << 12;
-    size_t hatx_pending_words = 1ull << 20;
+    // Default batching thresholds. These are tuned for end-to-end transformer
+    // runs where per-flush latency dominates if we flush too often.
+    // (OpenCollector itself has a generous max_pending_words guardrail.)
+    size_t open_pending_words = 1ull << 22;
+    size_t coeff_pending_jobs = 1ull << 14;
+    size_t trunc_pending_jobs = 1ull << 14;
+    size_t hatx_pending_words = 1ull << 22;
   };
 
   void set_lazy_mode(bool enable) { lazy_mode_ = enable; }

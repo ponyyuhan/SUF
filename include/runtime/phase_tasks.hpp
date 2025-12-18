@@ -104,7 +104,9 @@ class MulTask final : public detail::PhaseTask {
         if (R.opens) {
           h_ = R.opens->enqueue(diff_, OpenKind::kBeaver);
           st_ = St::WaitOpen;
-          return detail::Need::Open;
+          // Treat enqueue as progress so PhaseExecutor can batch multiple opens
+          // before forcing a flush.
+          return detail::Need::None;
         }
         opened_.assign(diff_.size(), 0);
         // Fallback direct open.
@@ -387,7 +389,8 @@ class TruncTask final : public detail::PhaseTask {
         if (R.opens) {
           h_open_ = R.opens->enqueue(masked_, OpenKind::kMask);
           st_ = St::WaitOpen;
-          return detail::Need::Open;
+          // Allow other tasks to enqueue opens before forcing a flush.
+          return detail::Need::None;
         }
         opened_.assign(masked_.size(), 0);
         for (size_t i = 0; i < masked_.size(); ++i) {
@@ -500,7 +503,9 @@ class TruncTask final : public detail::PhaseTask {
           h_pfss_ = R.pfss_trunc->enqueue_composite(std::move(job));
         }
         st_ = St::WaitPfss;
-        return detail::Need::PfssTrunc;
+        // Treat enqueue as progress so PhaseExecutor can batch multiple PFSS jobs
+        // before forcing a flush/finalize cycle.
+        return detail::Need::None;
       }
       case St::WaitPfss: {
         if (per_element_) {
@@ -1002,7 +1007,8 @@ class RsqrtTask final : public detail::PhaseTask {
         if (!R.opens) throw std::runtime_error("RsqrtTask: no OpenCollector");
         h_open_ = R.opens->enqueue(masked_, OpenKind::kMask);
         st_ = St::WaitOpen;
-        return detail::Need::Open;
+        // Allow batching of opens across tasks.
+        return detail::Need::None;
       }
       case St::WaitOpen: {
         if (!R.opens->ready(h_open_)) return detail::Need::Open;
@@ -1023,7 +1029,8 @@ class RsqrtTask final : public detail::PhaseTask {
         if (!R.pfss_coeff) throw std::runtime_error("RsqrtTask: missing coeff PFSS batch");
         coeff_handle_ = R.pfss_coeff->enqueue_composite(std::move(job));
         st_ = St::WaitInit;
-        return detail::Need::PfssCoeff;
+        // Allow batching of PFSS enqueues across tasks.
+        return detail::Need::None;
       }
       case St::WaitInit: {
         if (!R.pfss_coeff->ready(coeff_handle_)) return detail::Need::PfssCoeff;
@@ -1350,7 +1357,8 @@ class MulRowBroadcastTask final : public detail::PhaseTask {
         if (!R.opens) throw std::runtime_error("MulRowBroadcastTask: no OpenCollector");
         h_open_ = R.opens->enqueue(buf_de_, OpenKind::kBeaver);
         st_ = St::WaitOpen;
-        return detail::Need::Open;
+        // Allow batching of Beaver opens across tasks.
+        return detail::Need::None;
       }
       case St::WaitOpen: {
         if (!R.opens->ready(h_open_)) return detail::Need::Open;
@@ -2035,7 +2043,8 @@ class CubicPolyTask final : public detail::PhaseTask {
         if (R.opens) {
           h_open_ = R.opens->enqueue(masked_, OpenKind::kMask);
           st_ = St::WaitXhatOpen;
-          return detail::Need::Open;
+          // Allow batching of opens across tasks.
+          return detail::Need::None;
         }
         opened_.assign(masked_.size(), 0);
         for (size_t i = 0; i < masked_.size(); ++i) {
@@ -2088,7 +2097,8 @@ class CubicPolyTask final : public detail::PhaseTask {
         if (!R.pfss_coeff) throw std::runtime_error("CubicPolyTask: missing coeff PFSS batch");
         coeff_handle_ = R.pfss_coeff->enqueue_composite(std::move(job));
         st_ = St::WaitCoeff;
-        return detail::Need::PfssCoeff;
+        // Allow batching of PFSS enqueues across tasks.
+        return detail::Need::None;
       }
       case St::WaitCoeff: {
         if (!R.pfss_coeff->ready(coeff_handle_)) return detail::Need::PfssCoeff;
@@ -2427,7 +2437,8 @@ class RecipTask final : public detail::PhaseTask {
         if (R.opens) {
           h_open_ = R.opens->enqueue(masked_, OpenKind::kMask);
           st_ = St::WaitXhatOpen;
-          return detail::Need::Open;
+          // Allow batching of opens across tasks.
+          return detail::Need::None;
         }
         throw std::runtime_error("RecipTask: no OpenCollector");
       }
@@ -2470,7 +2481,8 @@ class RecipTask final : public detail::PhaseTask {
         if (!R.pfss_coeff) throw std::runtime_error("RecipTask: missing coeff PFSS batch");
         coeff_handle_ = R.pfss_coeff->enqueue_composite(std::move(job));
         st_ = St::WaitCoeff;
-        return detail::Need::PfssCoeff;
+        // Allow batching of PFSS enqueues across tasks.
+        return detail::Need::None;
       }
       case St::WaitCoeff: {
         if (!R.pfss_coeff->ready(coeff_handle_)) return detail::Need::PfssCoeff;

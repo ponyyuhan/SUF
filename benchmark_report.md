@@ -17,7 +17,7 @@ Generated: `2025-12-18`
 - **Offline key bytes (`preprocessing.key_bytes`)**: SUF now treats this as **dealer-total bytes across both parties** and tags the object as `preprocessing.key_bytes_scope = "dealer_total"`.
 - **Online bytes (`communication.*`)**:
   - SUF reports `communication.net_bytes` (wire bytes on the net-channel) and `communication.pfss_bytes` (wire bytes on the PFSS-channel), with `communication.online_bytes = net_bytes + pfss_bytes`.
-  - In this prototype, PFSS evaluation is **non-interactive** (paper.md §3), so `communication.pfss_bytes` is typically `0` and online comm is dominated by openings (`communication.open_*`), i.e., **net bytes**.
+  - PFSS evaluation is **non-interactive** at the protocol level (paper.md §3), but the benchmark harness can still show nonzero `communication.pfss_bytes` (e.g., backend bookkeeping / simulated PFSS channel usage). Online comm is still dominated by openings (`communication.open_*`), i.e., **net bytes**.
 - **SIGMA schema normalization**: `bench/run_sigma_vs_suf.py` now maps SIGMA’s `Total Comm` to `communication.net_bytes` so Sigma/SUF comparisons use consistent byte objects.
 - **More open breakdown**: SUF logs now include `pfss.opened_words_{beaver,mask,other}` (and corresponding `communication.open_bytes_*`) to align the “what are we counting?” question with Sigma’s single `Total Comm` bucket.
 
@@ -49,12 +49,12 @@ Source: `bench/results/large_models/summary.csv`
 | system | model | preprocessing.key_bytes | timing.online_time_s | communication.online_bytes |
 | --- | --- | ---: | ---: | ---: |
 | sigma | bert-base | 18,075,947,008 | 3.386349 | 1,062,390,674 |
-| suf | bert-base | 1,135,312,856 | 3.989390 | 792,826,368 |
+| suf | bert-base | 1,135,312,856 | 3.592740 | 792,826,368 |
 | sigma | bert-large | 48,799,535,104 | 8.253441 | 2,832,800,546 |
-| suf | bert-large | 3,696,962,152 | 11.163500 | 2,190,297,600 |
+| suf | bert-large | 3,696,962,152 | 10.799300 | 2,190,297,600 |
 | sigma | gpt-neo-1.3b | 81,805,541,376 | 13.723769 | 4,325,592,866 |
-| suf | gpt-neo-1.3b | 4,296,609,384 | 25.427800 | 2,745,113,088 |
+| suf | gpt-neo-1.3b | 4,296,609,384 | 24.438000 | 2,745,113,088 |
 
-## LLaMA2-7B status
+## LLaMA2-7B status (not rerun)
 
 - The attempted SIGMA run for LLaMA2-7B (`bench/configs/sigma_vs_suf_llama2_7b.json`) did not produce `dealer.txt/evaluator.txt` and one party exited with `-9` (likely OOM/kill). No SUF run was summarized for that config.

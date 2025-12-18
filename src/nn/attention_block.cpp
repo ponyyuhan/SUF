@@ -4,6 +4,7 @@
 #include <cassert>
 #include <cctype>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <optional>
@@ -28,12 +29,110 @@
 #include "runtime/bench_accounting.hpp"
 #include "runtime/bench_key_cost.hpp"
 
+#ifdef SUF_HAVE_CUDA
+#include <cuda_runtime.h>
+#endif
+
 namespace nn {
 
 namespace {
 
 inline int64_t to_signed(uint64_t v) { return proto::to_signed(v); }
 inline uint64_t to_ring(int64_t v) { return proto::from_signed(v); }
+
+#ifdef SUF_HAVE_CUDA
+struct BeaverMatmulScratch {
+  struct HostBufKey {
+    const void* host = nullptr;
+    size_t bytes = 0;
+    bool operator==(const HostBufKey& o) const { return host == o.host && bytes == o.bytes; }
+  };
+  struct HostBufKeyHash {
+    size_t operator()(const HostBufKey& k) const noexcept {
+      size_t h = 1469598103934665603ull;
+      auto mix = [&](size_t v) {
+        h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+      };
+      mix(reinterpret_cast<size_t>(k.host));
+      mix(static_cast<size_t>(k.bytes));
+      return h;
+    }
+  };
+  struct DevBuf {
+    void* d = nullptr;
+    size_t bytes = 0;
+  };
+
+  uint64_t* dD = nullptr;
+  uint64_t* dE = nullptr;
+  uint64_t* dOut = nullptr;
+  size_t dD_cap = 0;
+  size_t dE_cap = 0;
+  size_t dOut_cap = 0;
+
+  std::unordered_map<HostBufKey, DevBuf, HostBufKeyHash> cache;
+  size_t cache_bytes = 0;
+  size_t cache_max_bytes = size_t(1024ull) * 1024ull * 1024ull;
+
+  cudaEvent_t ready = nullptr;
+  bool ready_recorded = false;
+  std::mutex mu;
+
+  bool ensure_alloc(size_t bytes, uint64_t** ptr, size_t& cap) {
+    if (bytes <= cap) return true;
+    if (*ptr) cudaFree(*ptr);
+    if (cudaMalloc(reinterpret_cast<void**>(ptr), bytes) != cudaSuccess) {
+      *ptr = nullptr;
+      cap = 0;
+      return false;
+    }
+    cap = bytes;
+    return true;
+  }
+
+  void clear_cache() {
+    for (auto& kv : cache) {
+      if (kv.second.d) cudaFree(kv.second.d);
+    }
+    cache.clear();
+    cache_bytes = 0;
+  }
+
+  void* cached_upload(const void* host, size_t bytes, cudaStream_t stream) {
+    if (!host || bytes == 0) return nullptr;
+    HostBufKey key{host, bytes};
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second.d;
+    if (cache_max_bytes > 0 && bytes > cache_max_bytes) return nullptr;
+    if (cache_max_bytes > 0 && cache_bytes + bytes > cache_max_bytes) {
+      clear_cache();
+    }
+    void* d = nullptr;
+    if (cudaMalloc(&d, bytes) != cudaSuccess) return nullptr;
+    if (cudaMemcpyAsync(d, host, bytes, cudaMemcpyHostToDevice, stream) != cudaSuccess) {
+      cudaFree(d);
+      return nullptr;
+    }
+    cache.emplace(key, DevBuf{d, bytes});
+    cache_bytes += bytes;
+    return d;
+  }
+};
+
+BeaverMatmulScratch& beaver_matmul_scratch() {
+  static BeaverMatmulScratch s;
+  static bool inited = false;
+  if (!inited) {
+    inited = true;
+    const char* env = std::getenv("SUF_MATMUL_BEAVER_CACHE_MAX_MB");
+    if (env && *env) {
+      unsigned long long mb = std::strtoull(env, nullptr, 10);
+      if (mb > 0) s.cache_max_bytes = static_cast<size_t>(mb) * 1024ull * 1024ull;
+    }
+  }
+  return s;
+}
+#endif  // SUF_HAVE_CUDA
 
 // Temporary helper to open shares to plaintext (will be removed once score/prob path is fully taskified).
 void open_to_plain(int party,
@@ -376,6 +475,65 @@ class Matmul2DTask final : public runtime::detail::PhaseTask {
         if (opened.size() != A_words + B_words) {
           throw std::runtime_error("Matmul2DTask: opened size mismatch");
         }
+#ifdef SUF_HAVE_CUDA
+        const bool want_gpu = (std::getenv("SUF_MATMUL_BEAVER_GPU") != nullptr);
+        if (want_gpu && R.pfss_backend) {
+          if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend)) {
+            cudaStream_t stream = reinterpret_cast<cudaStream_t>(staged->device_stream());
+            auto& sc = beaver_matmul_scratch();
+            std::unique_lock<std::mutex> lk(sc.mu);
+            if (!sc.ready) {
+              cudaEventCreateWithFlags(&sc.ready, cudaEventDisableTiming);
+            }
+            if (sc.ready && sc.ready_recorded) {
+              cudaStreamWaitEvent(stream, sc.ready, 0);
+            }
+            const size_t bytes_D = A_words * sizeof(uint64_t);
+            const size_t bytes_E = B_words * sizeof(uint64_t);
+            const size_t bytes_out = static_cast<size_t>(M_) * static_cast<size_t>(N_) * sizeof(uint64_t);
+            if (!sc.ensure_alloc(bytes_D, &sc.dD, sc.dD_cap) ||
+                !sc.ensure_alloc(bytes_E, &sc.dE, sc.dE_cap) ||
+                !sc.ensure_alloc(bytes_out, &sc.dOut, sc.dOut_cap)) {
+              throw std::runtime_error("Matmul2DTask: beaver GPU alloc failed");
+            }
+            // Opened values are stored as int64_t; bit-pattern is the ring element.
+            const uint8_t* opened_bytes = reinterpret_cast<const uint8_t*>(opened.data());
+            cudaMemcpyAsync(sc.dD, opened_bytes, bytes_D, cudaMemcpyHostToDevice, stream);
+            cudaMemcpyAsync(sc.dE, opened_bytes + bytes_D, bytes_E, cudaMemcpyHostToDevice, stream);
+
+            const void* dA = sc.cached_upload(a_tri_.data(), bytes_D, stream);
+            const void* dB = sc.cached_upload(b_tri_.data(), bytes_E, stream);
+            const void* dC = sc.cached_upload(c_tri_.data(), bytes_out, stream);
+            if (!dA || !dB || !dC) {
+              throw std::runtime_error("Matmul2DTask: beaver GPU triple upload failed");
+            }
+            const int has_scale = mul_const_.has_value() ? 1 : 0;
+            const int64_t mul_c = mul_const_.value_or(0);
+            const int mul_s = mul_shift_;
+            launch_beaver_matmul2d_kernel(R.party,
+                                          sc.dD,
+                                          sc.dE,
+                                          reinterpret_cast<const uint64_t*>(dA),
+                                          reinterpret_cast<const uint64_t*>(dB),
+                                          reinterpret_cast<const uint64_t*>(dC),
+                                          M_,
+                                          K_,
+                                          N_,
+                                          w_transposed_ ? 1 : 0,
+                                          has_scale,
+                                          mul_c,
+                                          mul_s,
+                                          sc.dOut,
+                                          stream);
+            cudaMemcpyAsync(out_.data(), sc.dOut, bytes_out, cudaMemcpyDeviceToHost, stream);
+            cudaEventRecord(sc.ready, stream);
+            sc.ready_recorded = true;
+            cudaStreamSynchronize(stream);
+            st_ = St::Done;
+            return runtime::detail::Need::None;
+          }
+        }
+#endif
         #pragma omp parallel for collapse(2) schedule(static)
         for (int m = 0; m < M_; ++m) {
           for (int n = 0; n < N_; ++n) {
@@ -414,6 +572,214 @@ class Matmul2DTask final : public runtime::detail::PhaseTask {
   std::span<const uint64_t> A_;
   std::span<const uint64_t> B_;
   std::span<uint64_t> out_;
+  std::span<const uint64_t> a_tri_;
+  std::span<const uint64_t> b_tri_;
+  std::span<const uint64_t> c_tri_;
+  bool w_transposed_ = false;
+  std::optional<int64_t> mul_const_;
+  int mul_shift_ = 0;
+  std::vector<uint64_t> diff_;
+  runtime::OpenHandle h_open_{};
+};
+
+// Batched variant of Matmul2DTask: performs `batches` independent matmuls of the same shape
+// and reuses the same cached triple shares (benchmark behavior), reducing per-head scheduling
+// and GPU sync overhead.
+class BatchedMatmul2DTask final : public runtime::detail::PhaseTask {
+ public:
+  BatchedMatmul2DTask(int batches,
+                      int M,
+                      int K,
+                      int N,
+                      std::span<const uint64_t> A_all,
+                      std::span<const uint64_t> B_all,
+                      std::span<uint64_t> out_all_q2f,
+                      std::span<const uint64_t> a_tri,
+                      std::span<const uint64_t> b_tri,
+                      std::span<const uint64_t> c_tri,
+                      bool w_transposed,
+                      std::optional<int64_t> mul_const = std::nullopt,
+                      int mul_shift = 0)
+      : batches_(batches),
+        M_(M),
+        K_(K),
+        N_(N),
+        A_all_(A_all),
+        B_all_(B_all),
+        out_all_(out_all_q2f),
+        a_tri_(a_tri),
+        b_tri_(b_tri),
+        c_tri_(c_tri),
+        w_transposed_(w_transposed),
+        mul_const_(mul_const),
+        mul_shift_(mul_shift) {
+    if (batches_ <= 0) throw std::runtime_error("BatchedMatmul2DTask: batches must be > 0");
+    const size_t A_words = static_cast<size_t>(M_) * static_cast<size_t>(K_);
+    const size_t B_words = w_transposed_ ? (static_cast<size_t>(N_) * static_cast<size_t>(K_))
+                                         : (static_cast<size_t>(K_) * static_cast<size_t>(N_));
+    const size_t out_words = static_cast<size_t>(M_) * static_cast<size_t>(N_);
+    if (A_all_.size() != static_cast<size_t>(batches_) * A_words) {
+      throw std::runtime_error("BatchedMatmul2DTask: A_all size mismatch");
+    }
+    if (B_all_.size() != static_cast<size_t>(batches_) * B_words) {
+      throw std::runtime_error("BatchedMatmul2DTask: B_all size mismatch");
+    }
+    if (out_all_.size() != static_cast<size_t>(batches_) * out_words) {
+      throw std::runtime_error("BatchedMatmul2DTask: out_all size mismatch");
+    }
+    if (a_tri_.size() != A_words) throw std::runtime_error("BatchedMatmul2DTask: a triple size mismatch");
+    if (b_tri_.size() != B_words) throw std::runtime_error("BatchedMatmul2DTask: b triple size mismatch");
+    if (c_tri_.size() != out_words) throw std::runtime_error("BatchedMatmul2DTask: c triple size mismatch");
+  }
+
+  bool done() const override { return st_ == St::Done; }
+
+  runtime::detail::Need step(runtime::PhaseResources& R) override {
+    const size_t A_words = static_cast<size_t>(M_) * static_cast<size_t>(K_);
+    const size_t B_words = b_tri_.size();
+    const size_t out_words = static_cast<size_t>(M_) * static_cast<size_t>(N_);
+    const size_t per = A_words + B_words;
+
+    switch (st_) {
+      case St::Init: {
+        if (!R.opens) throw std::runtime_error("BatchedMatmul2DTask: OpenCollector missing");
+        diff_.resize(static_cast<size_t>(batches_) * per);
+        for (int b = 0; b < batches_; ++b) {
+          const size_t a_off = static_cast<size_t>(b) * A_words;
+          const size_t b_off = static_cast<size_t>(b) * B_words;
+          const size_t d_off = static_cast<size_t>(b) * per;
+          for (size_t i = 0; i < A_words; ++i) diff_[d_off + i] = proto::sub_mod(A_all_[a_off + i], a_tri_[i]);
+          for (size_t i = 0; i < B_words; ++i) diff_[d_off + A_words + i] = proto::sub_mod(B_all_[b_off + i], b_tri_[i]);
+        }
+        h_open_ = R.opens->enqueue(diff_, runtime::OpenKind::kBeaver);
+        st_ = St::WaitOpen;
+        // Enqueue is progress; let PhaseExecutor batch multiple opens before flushing.
+        return runtime::detail::Need::None;
+      }
+      case St::WaitOpen: {
+        if (!R.opens->ready(h_open_)) return runtime::detail::Need::Open;
+        auto opened = R.opens->view(h_open_);
+        if (opened.size() != diff_.size()) throw std::runtime_error("BatchedMatmul2DTask: opened size mismatch");
+
+#ifdef SUF_HAVE_CUDA
+        const bool want_gpu = (std::getenv("SUF_MATMUL_BEAVER_GPU") != nullptr);
+        if (want_gpu && R.pfss_backend &&
+            dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr) {
+          if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend)) {
+            cudaStream_t stream = reinterpret_cast<cudaStream_t>(staged->device_stream());
+            auto& sc = beaver_matmul_scratch();
+            std::unique_lock<std::mutex> lk(sc.mu);
+            if (!sc.ready) {
+              cudaEventCreateWithFlags(&sc.ready, cudaEventDisableTiming);
+            }
+            if (sc.ready && sc.ready_recorded) {
+              cudaStreamWaitEvent(stream, sc.ready, 0);
+            }
+
+            const size_t bytes_D = static_cast<size_t>(batches_) * A_words * sizeof(uint64_t);
+            const size_t bytes_E = static_cast<size_t>(batches_) * B_words * sizeof(uint64_t);
+            const size_t bytes_out = static_cast<size_t>(batches_) * out_words * sizeof(uint64_t);
+            if (!sc.ensure_alloc(bytes_D, &sc.dD, sc.dD_cap) ||
+                !sc.ensure_alloc(bytes_E, &sc.dE, sc.dE_cap) ||
+                !sc.ensure_alloc(bytes_out, &sc.dOut, sc.dOut_cap)) {
+              throw std::runtime_error("BatchedMatmul2DTask: beaver GPU alloc failed");
+            }
+
+            const uint8_t* opened_bytes = reinterpret_cast<const uint8_t*>(opened.data());
+            for (int b = 0; b < batches_; ++b) {
+              const size_t src_off = static_cast<size_t>(b) * per * sizeof(uint64_t);
+              const size_t dst_d_off = static_cast<size_t>(b) * A_words * sizeof(uint64_t);
+              const size_t dst_e_off = static_cast<size_t>(b) * B_words * sizeof(uint64_t);
+              cudaMemcpyAsync(reinterpret_cast<uint8_t*>(sc.dD) + dst_d_off,
+                              opened_bytes + src_off,
+                              A_words * sizeof(uint64_t),
+                              cudaMemcpyHostToDevice,
+                              stream);
+              cudaMemcpyAsync(reinterpret_cast<uint8_t*>(sc.dE) + dst_e_off,
+                              opened_bytes + src_off + A_words * sizeof(uint64_t),
+                              B_words * sizeof(uint64_t),
+                              cudaMemcpyHostToDevice,
+                              stream);
+            }
+
+            const void* dA = sc.cached_upload(a_tri_.data(), A_words * sizeof(uint64_t), stream);
+            const void* dB = sc.cached_upload(b_tri_.data(), B_words * sizeof(uint64_t), stream);
+            const void* dC = sc.cached_upload(c_tri_.data(), out_words * sizeof(uint64_t), stream);
+            if (!dA || !dB || !dC) {
+              throw std::runtime_error("BatchedMatmul2DTask: beaver GPU triple upload failed");
+            }
+            const int has_scale = mul_const_.has_value() ? 1 : 0;
+            const int64_t mul_c = mul_const_.value_or(0);
+            const int mul_s = mul_shift_;
+            launch_beaver_matmul2d_batched_kernel(R.party,
+                                                  sc.dD,
+                                                  sc.dE,
+                                                  reinterpret_cast<const uint64_t*>(dA),
+                                                  reinterpret_cast<const uint64_t*>(dB),
+                                                  reinterpret_cast<const uint64_t*>(dC),
+                                                  batches_,
+                                                  M_,
+                                                  K_,
+                                                  N_,
+                                                  w_transposed_ ? 1 : 0,
+                                                  has_scale,
+                                                  mul_c,
+                                                  mul_s,
+                                                  sc.dOut,
+                                                  stream);
+            cudaMemcpyAsync(out_all_.data(), sc.dOut, bytes_out, cudaMemcpyDeviceToHost, stream);
+            cudaEventRecord(sc.ready, stream);
+            sc.ready_recorded = true;
+            cudaStreamSynchronize(stream);
+            st_ = St::Done;
+            return runtime::detail::Need::None;
+          }
+        }
+#endif
+
+        #pragma omp parallel for collapse(3) schedule(static)
+        for (int b = 0; b < batches_; ++b) {
+          for (int m = 0; m < M_; ++m) {
+            for (int n = 0; n < N_; ++n) {
+              __int128 acc = static_cast<__int128>(to_signed(c_tri_[static_cast<size_t>(m) * static_cast<size_t>(N_) +
+                                                                  static_cast<size_t>(n)]));
+              const size_t opened_off = static_cast<size_t>(b) * per;
+              for (int k = 0; k < K_; ++k) {
+                size_t aidx = static_cast<size_t>(m) * static_cast<size_t>(K_) + static_cast<size_t>(k);
+                size_t bidx = w_transposed_
+                                  ? (static_cast<size_t>(n) * static_cast<size_t>(K_) + static_cast<size_t>(k))
+                                  : (static_cast<size_t>(k) * static_cast<size_t>(N_) + static_cast<size_t>(n));
+                int64_t e = opened[opened_off + aidx];
+                int64_t f = opened[opened_off + A_words + bidx];
+                acc += static_cast<__int128>(e) * static_cast<__int128>(to_signed(b_tri_[bidx]));
+                acc += static_cast<__int128>(to_signed(a_tri_[aidx])) * static_cast<__int128>(f);
+                if (R.party == 0) acc += static_cast<__int128>(e) * static_cast<__int128>(f);
+              }
+              if (mul_const_) {
+                acc = (acc * static_cast<__int128>(*mul_const_)) >> mul_shift_;
+              }
+              out_all_[static_cast<size_t>(b) * out_words +
+                       static_cast<size_t>(m) * static_cast<size_t>(N_) + static_cast<size_t>(n)] =
+                  static_cast<uint64_t>(acc);
+            }
+          }
+        }
+        st_ = St::Done;
+        return runtime::detail::Need::None;
+      }
+      case St::Done:
+        return runtime::detail::Need::None;
+    }
+    return runtime::detail::Need::None;
+  }
+
+ private:
+  enum class St { Init, WaitOpen, Done } st_ = St::Init;
+  int batches_ = 0;
+  int M_ = 0, K_ = 0, N_ = 0;
+  std::span<const uint64_t> A_all_;
+  std::span<const uint64_t> B_all_;
+  std::span<uint64_t> out_all_;
   std::span<const uint64_t> a_tri_;
   std::span<const uint64_t> b_tri_;
   std::span<const uint64_t> c_tri_;
@@ -1026,32 +1392,70 @@ void attention_forward(const AttentionConfig& cfg,
     // Compute scores per (batch,head): Q[T x Dh] * K^T[Dh x T] -> Q2f, fold inv_sqrt scaling.
     pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
     enter_phase();
-    for (size_t b = 0; b < B; ++b) {
-      for (size_t h = 0; h < H; ++h) {
-        const size_t head_base = (b * H + h) * T * Dh;
-        const size_t out_base = (b * H + h) * T * T;
-        MatmulTripleKey tri_key;
-        tri_key.is_gpu = is_gpu;
-        tri_key.frac_bits = fb;
-        tri_key.M = static_cast<int>(T);
-        tri_key.K = static_cast<int>(Dh);
-        tri_key.N = static_cast<int>(T);
-        tri_key.w_transposed = true;
-        tri_key.domain = 0x73636f7265ull;  // "score"
-        const auto& tri = get_cached_matmul_triple(tri_key, party);
-        pe->add_task(std::make_unique<Matmul2DTask>(
-            static_cast<int>(T),
-            static_cast<int>(Dh),
-            static_cast<int>(T),
-            std::span<const uint64_t>(Q_all.data() + head_base, T * Dh),
-            std::span<const uint64_t>(K_all.data() + head_base, T * Dh),  // stored as [N x K]
-            std::span<uint64_t>(score_scaled_q2f.data() + out_base, T * T),
-            std::span<const uint64_t>(tri.A_share.data(), tri.A_share.size()),
-            std::span<const uint64_t>(tri.B_share.data(), tri.B_share.size()),
-            std::span<const uint64_t>(tri.C_share.data(), tri.C_share.size()),
-            /*w_transposed=*/true,
-            std::optional<int64_t>(inv_sqrt),
-            /*mul_shift=*/fb));
+    const int score_batches = static_cast<int>(B * H);
+    const bool beaver_batched =
+        (score_batches > 1) &&
+        (std::getenv("SUF_MATMUL_BEAVER_GPU") != nullptr) &&
+        (std::getenv("SUF_MATMUL_BEAVER_BATCHED") == nullptr ||
+         std::string(std::getenv("SUF_MATMUL_BEAVER_BATCHED")) != "0");
+    if (beaver_batched) {
+      MatmulTripleKey tri_key;
+      tri_key.is_gpu = is_gpu;
+      tri_key.frac_bits = fb;
+      tri_key.M = static_cast<int>(T);
+      tri_key.K = static_cast<int>(Dh);
+      tri_key.N = static_cast<int>(T);
+      tri_key.w_transposed = true;
+      tri_key.domain = 0x73636f7265ull;  // "score"
+      const auto& tri = get_cached_matmul_triple(tri_key, party);
+      if (score_batches > 1) {
+        uint64_t bytes = static_cast<uint64_t>(tri.A_share.size() + tri.B_share.size() + tri.C_share.size()) *
+                         sizeof(uint64_t);
+        runtime::bench::add_offline_bytes(runtime::bench::OfflineBytesKind::MatmulTriple,
+                                          bytes * static_cast<uint64_t>(score_batches - 1));
+      }
+      pe->add_task(std::make_unique<BatchedMatmul2DTask>(
+          score_batches,
+          static_cast<int>(T),
+          static_cast<int>(Dh),
+          static_cast<int>(T),
+          std::span<const uint64_t>(Q_all.data(), Q_all.size()),
+          std::span<const uint64_t>(K_all.data(), K_all.size()),  // stored per head as [N x K]
+          std::span<uint64_t>(score_scaled_q2f.data(), score_scaled_q2f.size()),
+          std::span<const uint64_t>(tri.A_share.data(), tri.A_share.size()),
+          std::span<const uint64_t>(tri.B_share.data(), tri.B_share.size()),
+          std::span<const uint64_t>(tri.C_share.data(), tri.C_share.size()),
+          /*w_transposed=*/true,
+          std::optional<int64_t>(inv_sqrt),
+          /*mul_shift=*/fb));
+    } else {
+      for (size_t b = 0; b < B; ++b) {
+        for (size_t h = 0; h < H; ++h) {
+          const size_t head_base = (b * H + h) * T * Dh;
+          const size_t out_base = (b * H + h) * T * T;
+          MatmulTripleKey tri_key;
+          tri_key.is_gpu = is_gpu;
+          tri_key.frac_bits = fb;
+          tri_key.M = static_cast<int>(T);
+          tri_key.K = static_cast<int>(Dh);
+          tri_key.N = static_cast<int>(T);
+          tri_key.w_transposed = true;
+          tri_key.domain = 0x73636f7265ull;  // "score"
+          const auto& tri = get_cached_matmul_triple(tri_key, party);
+          pe->add_task(std::make_unique<Matmul2DTask>(
+              static_cast<int>(T),
+              static_cast<int>(Dh),
+              static_cast<int>(T),
+              std::span<const uint64_t>(Q_all.data() + head_base, T * Dh),
+              std::span<const uint64_t>(K_all.data() + head_base, T * Dh),  // stored as [N x K]
+              std::span<uint64_t>(score_scaled_q2f.data() + out_base, T * T),
+              std::span<const uint64_t>(tri.A_share.data(), tri.A_share.size()),
+              std::span<const uint64_t>(tri.B_share.data(), tri.B_share.size()),
+              std::span<const uint64_t>(tri.C_share.data(), tri.C_share.size()),
+              /*w_transposed=*/true,
+              std::optional<int64_t>(inv_sqrt),
+              /*mul_shift=*/fb));
+        }
       }
     }
     pe->run(phase_R);
@@ -1159,31 +1563,67 @@ void attention_forward(const AttentionConfig& cfg,
 
     pe->begin_phase(runtime::PhaseExecutor::Phase::kSoftmax);
     enter_phase();
-    for (size_t b = 0; b < B; ++b) {
-      for (size_t h = 0; h < H; ++h) {
-        const size_t head_base = (b * H + h) * T * Dh;
-        const size_t prob_base = (b * H + h) * T * T;
-        const size_t out_base = (b * H + h) * T * Dh;
-        MatmulTripleKey tri_key;
-        tri_key.is_gpu = is_gpu;
-        tri_key.frac_bits = fb;
-        tri_key.M = static_cast<int>(T);
-        tri_key.K = static_cast<int>(T);
-        tri_key.N = static_cast<int>(Dh);
-        tri_key.w_transposed = false;
-        tri_key.domain = 0x63747874ull;  // "ctxt"
-        const auto& tri = get_cached_matmul_triple(tri_key, party);
-        pe->add_task(std::make_unique<Matmul2DTask>(
-            static_cast<int>(T),
-            static_cast<int>(T),
-            static_cast<int>(Dh),
-            std::span<const uint64_t>(prob_shares.data() + prob_base, T * T),
-            std::span<const uint64_t>(V_all.data() + head_base, T * Dh),
-            std::span<uint64_t>(ctx_q2f.data() + out_base, T * Dh),
-            std::span<const uint64_t>(tri.A_share.data(), tri.A_share.size()),
-            std::span<const uint64_t>(tri.B_share.data(), tri.B_share.size()),
-            std::span<const uint64_t>(tri.C_share.data(), tri.C_share.size()),
-            /*w_transposed=*/false));
+    const int ctxt_batches = static_cast<int>(B * H);
+    const bool ctxt_batched =
+        (ctxt_batches > 1) &&
+        (std::getenv("SUF_MATMUL_BEAVER_GPU") != nullptr) &&
+        (std::getenv("SUF_MATMUL_BEAVER_BATCHED") == nullptr ||
+         std::string(std::getenv("SUF_MATMUL_BEAVER_BATCHED")) != "0");
+    if (ctxt_batched) {
+      MatmulTripleKey tri_key;
+      tri_key.is_gpu = is_gpu;
+      tri_key.frac_bits = fb;
+      tri_key.M = static_cast<int>(T);
+      tri_key.K = static_cast<int>(T);
+      tri_key.N = static_cast<int>(Dh);
+      tri_key.w_transposed = false;
+      tri_key.domain = 0x63747874ull;  // "ctxt"
+      const auto& tri = get_cached_matmul_triple(tri_key, party);
+      if (ctxt_batches > 1) {
+        uint64_t bytes = static_cast<uint64_t>(tri.A_share.size() + tri.B_share.size() + tri.C_share.size()) *
+                         sizeof(uint64_t);
+        runtime::bench::add_offline_bytes(runtime::bench::OfflineBytesKind::MatmulTriple,
+                                          bytes * static_cast<uint64_t>(ctxt_batches - 1));
+      }
+      pe->add_task(std::make_unique<BatchedMatmul2DTask>(
+          ctxt_batches,
+          static_cast<int>(T),
+          static_cast<int>(T),
+          static_cast<int>(Dh),
+          std::span<const uint64_t>(prob_shares.data(), prob_shares.size()),
+          std::span<const uint64_t>(V_all.data(), V_all.size()),
+          std::span<uint64_t>(ctx_q2f.data(), ctx_q2f.size()),
+          std::span<const uint64_t>(tri.A_share.data(), tri.A_share.size()),
+          std::span<const uint64_t>(tri.B_share.data(), tri.B_share.size()),
+          std::span<const uint64_t>(tri.C_share.data(), tri.C_share.size()),
+          /*w_transposed=*/false));
+    } else {
+      for (size_t b = 0; b < B; ++b) {
+        for (size_t h = 0; h < H; ++h) {
+          const size_t head_base = (b * H + h) * T * Dh;
+          const size_t prob_base = (b * H + h) * T * T;
+          const size_t out_base = (b * H + h) * T * Dh;
+          MatmulTripleKey tri_key;
+          tri_key.is_gpu = is_gpu;
+          tri_key.frac_bits = fb;
+          tri_key.M = static_cast<int>(T);
+          tri_key.K = static_cast<int>(T);
+          tri_key.N = static_cast<int>(Dh);
+          tri_key.w_transposed = false;
+          tri_key.domain = 0x63747874ull;  // "ctxt"
+          const auto& tri = get_cached_matmul_triple(tri_key, party);
+          pe->add_task(std::make_unique<Matmul2DTask>(
+              static_cast<int>(T),
+              static_cast<int>(T),
+              static_cast<int>(Dh),
+              std::span<const uint64_t>(prob_shares.data() + prob_base, T * T),
+              std::span<const uint64_t>(V_all.data() + head_base, T * Dh),
+              std::span<uint64_t>(ctx_q2f.data() + out_base, T * Dh),
+              std::span<const uint64_t>(tri.A_share.data(), tri.A_share.size()),
+              std::span<const uint64_t>(tri.B_share.data(), tri.B_share.size()),
+              std::span<const uint64_t>(tri.C_share.data(), tri.C_share.size()),
+              /*w_transposed=*/false));
+        }
       }
     }
     pe->run(phase_R);
