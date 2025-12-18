@@ -101,17 +101,74 @@ Correctness note: trunc/ARS helper bits (`carry/sign/wrap`) are maintained as **
 - GPU PFSS tuning: `SUF_PFSS_GPU_BLOCK`, `RUN_GPU_COMPOSITE=1`
 - GPU matmul tuning: `SUF_MATMUL_GPU_TILE=wide|narrow`
 - GPU caches: `SUF_NO_CACHE_KEYS=1`, `SUF_NO_CACHE_HATX=1`
+- GPU postproc fast-paths (require CUDA + `PhaseExecutor` device pipeline in most cases):
+  - `SUF_TRUNC_GPU=1` (GPU trunc/ARS postproc when PFSS device slices exist)
+  - `SUF_HORNER_GPU=1` (GPU Horner polynomial evaluation for cubic bundles)
+  - `SUF_SOFTMAX_GPU=1` (GPU row-sum / ragged row-sum inside softmax)
+  - `SUF_LN_GPU=1` (GPU row-sum/variance helpers inside LayerNormTask)
+  - `SUF_MUL_GPU=1` (GPU fast-path for BeaverMul64-based elementwise mul, where wired)
+  - `SUF_MATMUL_BEAVER_GPU=1` (GPU Beaver matmul tasks, where wired)
 - Benchmark toggles:
   - `SUF_PER_ELEMENT_MASKS=0|1` disables/enables per-element trunc/ARS masks (benchmark sets `0` by default for batching)
   - `SUF_BENCH_DEVICE_PIPELINE=1` keeps PFSS outputs on GPU when downstream can consume device pointers
   - `SUF_BENCH_CACHE_MATERIAL=1` caches expensive dealer-generated materials (GeLU/SiLU/nExp/recip + trunc bundles)
   - `SUF_FORCE_PFSS=1` forces the PFSS execution path even when a reference fast-path exists
+  - `SUF_BENCH_PFSS_RING_POW2=20..30` sets the in-process PFSS byte-ring capacity as `2^k` bytes (bench harness)
+  - `SUF_BENCH_NET_RING_POW2=20..28` sets the in-process net-channel ring capacity as `2^k` u64 words (bench harness)
 - Open batching/packing:
   - `SUF_OPEN_PACK_EFFBITS=1` enables packed opens when shares fit in small bitwidth
   - `SUF_OPEN_PACK_MAX_BITS` caps packing width (default 48)
 - BERT-Tiny activation tuning:
   - `SUF_GELU_CONST=1` enables a fast piecewise-constant GeLU approximation
   - `SUF_GELU_CONST_SEGMENTS` controls GeLU LUT granularity (default `256` in the benchmark)
+
+## Performance Optimization Guide
+
+This repo is intentionally “knob-heavy”: different models and phases stress different parts of the stack.
+The goal is to keep the **protocol semantics** aligned with `paper.md` while minimizing **online time**.
+
+### What “online” means (and what is / isn’t interactive)
+
+- **SUF/PFSS evaluation** is *non-interactive* given the public masked input `hatx = x + r_in` (each party can locally evaluate its key on `hatx`).
+- End-to-end transformer execution is still **interactive online** because it performs:
+  - **opens** (e.g., to reveal `hatx` and Beaver `d,e` terms), and
+  - **Beaver multiplication** for non-linear glue.
+
+SIGMA is also an online two-party protocol; in the Sigma-vs-SUF harness we normalize Sigma’s single “Total Comm” bucket into `communication.net_bytes` so that byte objects match SUF’s reporting.
+
+### Biggest levers for online time
+
+- **Reduce interactive bandwidth**:
+  - Enable packed opens: `SUF_OPEN_PACK_EFFBITS=1` (benchmark `--open-pack 1`).
+  - Avoid per-element trunc/ARS masks when batching matters: `SUF_PER_ELEMENT_MASKS=0`.
+- **Avoid unnecessary flush/round overhead**:
+  - Prefer `PhaseExecutor` lazy scheduling (default) so it batches opens/PFSS work until tasks stall.
+  - Keep batches alive across phases (`PhaseExecutor::set_keep_batches(true)` is used in the transformer stack).
+- **Exploit GPU overlap where safe**:
+  - `attention_block.cpp` uses an **overlap GEMM stream** (`MatmulParams::overlap_stream`) so GPU PFSS kernels can overlap with matmul.
+  - Enable weight/bias caching on GPU where pointers are stable: `MatmulParams::cache_weights/cache_bias`.
+- **Make device-pipeline explicit** (when downstream can consume device pointers):
+  - `SUF_BENCH_DEVICE_PIPELINE=1` turns on `PhaseExecutor` device pipeline and requests PFSS device slices.
+  - Pair with `SUF_TRUNC_GPU=1` / `SUF_HORNER_GPU=1` / `SUF_SOFTMAX_GPU=1` to actually use the staged device slices.
+
+### CPU monitoring
+
+All end-to-end transformer benches log:
+- `resources.cpu_user_s`, `resources.cpu_sys_s`
+- `resources.cpu_util_avg` (process CPU time / wall time)
+- `resources.max_rss_kb`
+
+Use these alongside `pfss.{num_jobs,num_flushes,open_flushes,opened_words}` to determine whether you’re bottlenecked by **protocol rounds**, **GPU kernels**, or **host-side packing/scatter**.
+
+### Notes on alternative DPF/DCF backends (libdpf / grotto)
+
+This prototype currently includes a “sigmafast” backend and GPU stubs geared toward the paper’s measurement model.
+Swapping the PFSS predicate backend to something like `libdpf`/grotto can be a good next step if profiling shows predicate evaluation dominates:
+
+- Candidate: `external` DPF backends (e.g. grotto in `libdpf`) typically target high-throughput PRG + tree traversal.
+- Integration constraints:
+  - Keep the **same public masked input** model (`hatx`) and predicate semantics used in `paper.md`.
+  - Preserve accounting objects (`communication.*`, `preprocessing.key_bytes_scope`) so comparisons remain consistent.
 
 ## Docs
 

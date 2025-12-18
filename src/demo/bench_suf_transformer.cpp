@@ -55,6 +55,35 @@ namespace std { using std::experimental::span; }
 
 namespace {
 
+size_t bench_ring_pow2_env_or_default(const char* env_name, size_t def_pow2, size_t min_pow2, size_t max_pow2) {
+  const char* env = std::getenv(env_name);
+  if (!env) return size_t{1} << def_pow2;
+  char* endp = nullptr;
+  unsigned long long v = std::strtoull(env, &endp, 10);
+  if (!endp || endp == env) return size_t{1} << def_pow2;
+  if (v < min_pow2) v = min_pow2;
+  if (v > max_pow2) v = max_pow2;
+  return size_t{1} << static_cast<size_t>(v);
+}
+
+size_t bench_default_pfss_ring_bytes() {
+  // Large models can exchange multiple GiB per iteration; too-small rings force
+  // frequent producer/consumer stalls and inflate "online_time" with harness
+  // overhead rather than protocol work.
+  return bench_ring_pow2_env_or_default("SUF_BENCH_PFSS_RING_POW2",
+                                        /*def_pow2=*/26,
+                                        /*min_pow2=*/20,
+                                        /*max_pow2=*/30);
+}
+
+size_t bench_default_net_ring_words() {
+  // Counted in u64 words (not bytes). Default: 2^23 u64 = 64 MiB.
+  return bench_ring_pow2_env_or_default("SUF_BENCH_NET_RING_POW2",
+                                        /*def_pow2=*/23,
+                                        /*min_pow2=*/20,
+                                        /*max_pow2=*/28);
+}
+
 struct Args {
   std::string model;
   std::string backend = "cpu";
@@ -120,7 +149,8 @@ Args parse(int argc, char** argv) {
 
 struct CountingChan : proto::IChannel {
   struct Ring {
-    explicit Ring(size_t cap_pow2 = (1ull << 24)) : buf(cap_pow2, 0), mask(cap_pow2 - 1) {
+    explicit Ring(size_t cap_pow2 = bench_default_pfss_ring_bytes())
+        : buf(cap_pow2, 0), mask(cap_pow2 - 1) {
       if ((cap_pow2 & (cap_pow2 - 1)) != 0) {
         throw std::runtime_error("CountingChan::Ring: capacity must be power of two");
       }
@@ -235,7 +265,8 @@ struct CountingNetChan : net::Chan {
   struct Ring {
     // Default large enough to hold a full OpenCollector flush (order ~ millions of words)
     // without forcing the sender to spin on backpressure.
-    explicit Ring(size_t cap_pow2 = (1ull << 22)) : buf(cap_pow2, 0), mask(cap_pow2 - 1) {
+    explicit Ring(size_t cap_pow2 = bench_default_net_ring_words())
+        : buf(cap_pow2, 0), mask(cap_pow2 - 1) {
       if ((cap_pow2 & (cap_pow2 - 1)) != 0) throw std::runtime_error("Ring: capacity must be power of two");
     }
     std::vector<uint64_t> buf;

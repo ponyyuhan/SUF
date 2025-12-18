@@ -294,6 +294,7 @@ class PfssSuperBatch {
   bool device_outputs_ = false;
 
   void populate_completed_();
+  void populate_device_views_();
 };
 
 // Convenience: run a truncation bundle immediately on a flat vector of shares.

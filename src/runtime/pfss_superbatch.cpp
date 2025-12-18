@@ -237,6 +237,162 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
   stats_.jobs += jobs_.size();
   total_stats_.flushes += 1;
   total_stats_.jobs += jobs_.size();
+
+  // Fast path: a single job is extremely common in end-to-end transformer runs
+  // (each trunc/coeff stage drives one PFSS eval). Avoid the heavyweight
+  // grouping/bucketing path and, critically, avoid copying `hatx_public` into
+  // an intermediate bucket buffer.
+  if (jobs_.size() == 1) {
+    if (gpu_stager_) {
+      // Drop any group-local device buffers from a prior flush.
+      for (auto& gr : group_results_) {
+        if (gr.dev_arith.ptr && !gr.dev_arith_owner) gpu_stager_->free_bytes(gr.dev_arith);
+        if (gr.dev_bools.ptr && !gr.dev_bools_owner) gpu_stager_->free_bytes(gr.dev_bools);
+        gr.dev_arith_owner.reset();
+        gr.dev_bools_owner.reset();
+        gr.dev_arith = DeviceBufferRef{};
+        gr.dev_bools = DeviceBufferRef{};
+      }
+    }
+    group_results_.clear();
+    slices_.assign(jobs_.size(), JobSlice{});
+
+    auto& job = jobs_[0];
+    if (!job.suf || !job.key) {
+      throw std::runtime_error("PfssSuperBatch: incomplete composite job");
+    }
+    const auto& comp = job.key->compiled;
+    const size_t r = static_cast<size_t>(comp.r);
+    const size_t ell = static_cast<size_t>(comp.ell);
+    const size_t N = job.hatx_public.size();
+    size_t total_hatx_words = N;
+
+    stats_.max_bucket_hatx = std::max(stats_.max_bucket_hatx, N);
+    stats_.max_bucket_jobs = std::max(stats_.max_bucket_jobs, size_t{1});
+    total_stats_.max_bucket_hatx = std::max(total_stats_.max_bucket_hatx, N);
+    total_stats_.max_bucket_jobs = std::max(total_stats_.max_bucket_jobs, size_t{1});
+
+    const bool dev_capable =
+        gpu_stager_ && (dynamic_cast<runtime::CpuPassthroughStager*>(gpu_stager_) == nullptr);
+    DeviceBufferRef dev_hatx;
+    bool own_dev_hatx = false;
+    auto free_dev_hatx = [&]() {
+      if (!gpu_stager_ || !dev_capable) return;
+      if (own_dev_hatx && dev_hatx.ptr) {
+        gpu_stager_->free_bytes(dev_hatx);
+        dev_hatx = DeviceBufferRef{};
+        own_dev_hatx = false;
+      }
+    };
+
+    try {
+      if (gpu_stager_ && dev_capable && !job.hatx_device && !job.hatx_public.empty()) {
+        HostBufferRef host{job.hatx_public.data(), job.hatx_public.size() * sizeof(uint64_t)};
+        dev_hatx = gpu_stager_->stage_to_device(host);
+        own_dev_hatx = true;
+      }
+
+      gates::CompositeBatchInput in{
+          job.hatx_public.data(),
+          N,
+          job.hatx_device
+              ? job.hatx_device
+              : (dev_capable && dev_hatx.ptr ? reinterpret_cast<const uint64_t*>(dev_hatx.ptr) : nullptr),
+          device_outputs_};
+      // We stage raw PFSS outputs ourselves (via PfssGpuStager) so device pointers
+      // remain stable across flushes/finalize boundaries.
+      in.device_outputs = false;
+      auto out = gates::composite_eval_batch_backend(party, backend, ch, *job.key, *job.suf, in);
+
+      GroupResult gr;
+      gr.suf = job.suf;
+      gr.key = job.key;
+      gr.r = r;
+      gr.ell = ell;
+      gr.arith = std::move(out.haty_share);
+      gr.bools = std::move(out.bool_share);
+      gr.dev_arith_ptr = out.haty_device;
+      gr.dev_arith_words = out.haty_device_words;
+      gr.dev_bools_ptr = out.bool_device;
+      gr.dev_bools_words = out.bool_device_words;
+
+      if (device_outputs_ && dev_capable && gpu_stager_) {
+        if (!gr.arith.empty()) {
+          HostBufferRef host_arith{gr.arith.data(), gr.arith.size() * sizeof(uint64_t)};
+          gr.dev_arith = gpu_stager_->stage_to_device(host_arith);
+          if (gr.dev_arith.ptr) {
+            void* ptr = gr.dev_arith.ptr;
+            size_t bytes = gr.dev_arith.bytes;
+#ifdef SUF_HAVE_CUDA
+            gr.dev_arith_owner = std::shared_ptr<void>(ptr, [bytes](void* p) {
+              (void)bytes;
+              if (!p) return;
+              cudaFree(p);
+            });
+#else
+            PfssGpuStager* stager = gpu_stager_;
+            gr.dev_arith_owner = std::shared_ptr<void>(ptr, [stager, bytes](void* p) {
+              if (!p) return;
+              if (!stager) return;
+              stager->free_bytes(DeviceBufferRef{p, bytes});
+            });
+#endif
+          }
+        }
+        if (!gr.bools.empty()) {
+          HostBufferRef host_bools{gr.bools.data(), gr.bools.size() * sizeof(uint64_t)};
+          gr.dev_bools = gpu_stager_->stage_to_device(host_bools);
+          if (gr.dev_bools.ptr) {
+            void* ptr = gr.dev_bools.ptr;
+            size_t bytes = gr.dev_bools.bytes;
+#ifdef SUF_HAVE_CUDA
+            gr.dev_bools_owner = std::shared_ptr<void>(ptr, [bytes](void* p) {
+              (void)bytes;
+              if (!p) return;
+              cudaFree(p);
+            });
+#else
+            PfssGpuStager* stager = gpu_stager_;
+            gr.dev_bools_owner = std::shared_ptr<void>(ptr, [stager, bytes](void* p) {
+              if (!p) return;
+              if (!stager) return;
+              stager->free_bytes(DeviceBufferRef{p, bytes});
+            });
+#endif
+          }
+        }
+      }
+
+      const size_t total_arith_words = gr.arith.size();
+      const size_t total_bool_words = gr.bools.size();
+      slices_[0].group_result = 0;
+      slices_[0].start = 0;
+      slices_[0].len = N;
+      group_results_.push_back(std::move(gr));
+
+      flushed_ = true;
+      stats_.arith_words += total_arith_words;
+      stats_.pred_bits += total_bool_words * 64;
+      stats_.hatx_words += total_hatx_words;
+      stats_.hatx_bytes += total_hatx_words * sizeof(uint64_t);
+      total_stats_.arith_words += total_arith_words;
+      total_stats_.pred_bits += total_bool_words * 64;
+      total_stats_.hatx_words += total_hatx_words;
+      total_stats_.hatx_bytes += total_hatx_words * sizeof(uint64_t);
+      pending_jobs_ = 0;
+      pending_hatx_words_ = 0;
+      pending_dev_bytes_ = 0;
+      stats_.pending_jobs = 0;
+      stats_.pending_hatx = 0;
+      stats_.pending_device_bytes = 0;
+      free_dev_hatx();
+      return;
+    } catch (...) {
+      free_dev_hatx();
+      throw;
+    }
+  }
+
   size_t total_hatx_words = 0;
   struct GroupKey {
     int r = 0;
@@ -779,6 +935,60 @@ void PfssSuperBatch::populate_completed_() {
   }
 }
 
+void PfssSuperBatch::populate_device_views_() {
+  // Populate per-handle device slice pointers/owners from group results (no host copies).
+  for (size_t idx = 0; idx < jobs_.size(); ++idx) {
+    if (idx >= slices_.size()) continue;
+    const auto& sl = slices_[idx];
+    if (sl.group_result == static_cast<size_t>(-1)) continue;
+    if (sl.group_result >= group_results_.size()) continue;
+    const auto& job = jobs_[idx];
+    if (job.token >= slots_.size()) continue;
+    auto& slot = slots_[job.token];
+    if (!slot) continue;
+    const auto& gr = group_results_[sl.group_result];
+    const size_t r = gr.r;
+    const size_t ell = gr.ell;
+
+    slot->r = r;
+    slot->ell = ell;
+    slot->arith_device_owner.reset();
+    slot->arith_device = nullptr;
+    slot->arith_device_words = 0;
+    slot->bools_device_owner.reset();
+    slot->bools_device = nullptr;
+    slot->bools_device_words = 0;
+
+    const uint64_t* dev_arith_base = nullptr;
+    if (gr.dev_arith_owner) {
+      dev_arith_base = reinterpret_cast<const uint64_t*>(gr.dev_arith_owner.get());
+      slot->arith_device_owner = gr.dev_arith_owner;
+    } else if (gr.dev_arith.ptr) {
+      dev_arith_base = reinterpret_cast<const uint64_t*>(gr.dev_arith.ptr);
+    } else if (gr.dev_arith_ptr) {
+      dev_arith_base = gr.dev_arith_ptr;
+    }
+    if (dev_arith_base) {
+      slot->arith_device = dev_arith_base + sl.start * r;
+      slot->arith_device_words = sl.len * r;
+    }
+
+    const uint64_t* dev_bools_base = nullptr;
+    if (gr.dev_bools_owner) {
+      dev_bools_base = reinterpret_cast<const uint64_t*>(gr.dev_bools_owner.get());
+      slot->bools_device_owner = gr.dev_bools_owner;
+    } else if (gr.dev_bools.ptr) {
+      dev_bools_base = reinterpret_cast<const uint64_t*>(gr.dev_bools.ptr);
+    } else if (gr.dev_bools_ptr) {
+      dev_bools_base = gr.dev_bools_ptr;
+    }
+    if (dev_bools_base) {
+      slot->bools_device = dev_bools_base + sl.start * ell;
+      slot->bools_device_words = sl.len * ell;
+    }
+  }
+}
+
 void PfssSuperBatch::clear() {
   if (gpu_stager_) {
     for (auto& gr : group_results_) {
@@ -809,6 +1019,7 @@ void PfssSuperBatch::clear() {
 
 void PfssSuperBatch::finalize_all(int party, proto::IChannel& ch) {
   if (!flushed_) return;
+  populate_device_views_();
   if (completed_.empty()) populate_completed_();
   for (size_t idx = 0; idx < jobs_.size(); ++idx) {
     const auto& job = jobs_[idx];
@@ -901,6 +1112,7 @@ void PfssSuperBatch::finalize_all(int party, proto::IChannel& ch) {
 
 void PfssSuperBatch::materialize_host(int party, proto::IChannel& ch) {
   if (!flushed_) return;
+  populate_device_views_();
   if (completed_.empty()) populate_completed_();
   for (size_t idx = 0; idx < jobs_.size(); ++idx) {
     const auto& job = jobs_[idx];

@@ -49,11 +49,13 @@ Source: `bench/results/large_models/summary.csv`
 | system | model | preprocessing.key_bytes | timing.online_time_s | communication.online_bytes |
 | --- | --- | ---: | ---: | ---: |
 | sigma | bert-base | 18,075,947,008 | 3.386349 | 1,062,390,674 |
-| suf | bert-base | 1,135,312,856 | 3.592740 | 792,826,368 |
+| suf | bert-base | 1,135,322,184 | 3.282370 | 792,826,368 |
 | sigma | bert-large | 48,799,535,104 | 8.253441 | 2,832,800,546 |
-| suf | bert-large | 3,696,962,152 | 10.799300 | 2,190,297,600 |
+| suf | bert-large | 3,696,971,852 | 9.306610 | 2,190,297,600 |
+| sigma | gpt2 | 15,346,094,080 | 2.985616 | 885,146,258 |
+| suf | gpt2 | 1,077,808,588 | 2.686140 | 627,795,456 |
 | sigma | gpt-neo-1.3b | 81,805,541,376 | 13.723769 | 4,325,592,866 |
-| suf | gpt-neo-1.3b | 4,296,609,384 | 24.438000 | 2,745,113,088 |
+| suf | gpt-neo-1.3b | 4,401,605,224 | 23.363000 | 2,745,113,088 |
 
 ## LLaMA2-7B status (not rerun)
 
