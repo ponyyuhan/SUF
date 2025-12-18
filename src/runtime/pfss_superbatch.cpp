@@ -5,6 +5,7 @@
 #include <unordered_set>
 #include <random>
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <limits>
 #include <mutex>
@@ -13,6 +14,7 @@
 #include <cuda_runtime.h>
 #include "runtime/cuda_primitives.hpp"
 #endif
+#include "runtime/bench_online_profile.hpp"
 
 namespace runtime {
 
@@ -230,6 +232,19 @@ bool PfssSuperBatch::ready(const PfssHandle& h) const {
 }
 
 void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, proto::IChannel& ch) {
+  const bool prof = runtime::bench::online_profiling_enabled();
+  const auto prof_now = [] { return std::chrono::steady_clock::now(); };
+  const auto prof_ns = [](const std::chrono::steady_clock::time_point& a,
+                          const std::chrono::steady_clock::time_point& b) -> uint64_t {
+    if (b <= a) return 0;
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count());
+  };
+  const auto t_total0 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
+  uint64_t ns_stage_hatx = 0;
+  uint64_t ns_eval = 0;
+  uint64_t ns_stage_out = 0;
+
   if (limits_.max_flushes > 0 && stats_.flushes + 1 > limits_.max_flushes) {
     throw std::runtime_error("PfssSuperBatch: flush budget exceeded");
   }
@@ -287,9 +302,11 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
 
     try {
       if (gpu_stager_ && dev_capable && !job.hatx_device && !job.hatx_public.empty()) {
+        const auto t_stage0 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
         HostBufferRef host{job.hatx_public.data(), job.hatx_public.size() * sizeof(uint64_t)};
         dev_hatx = gpu_stager_->stage_to_device(host);
         own_dev_hatx = true;
+        if (prof) ns_stage_hatx += prof_ns(t_stage0, prof_now());
       }
 
       gates::CompositeBatchInput in{
@@ -302,7 +319,9 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
       // We stage raw PFSS outputs ourselves (via PfssGpuStager) so device pointers
       // remain stable across flushes/finalize boundaries.
       in.device_outputs = false;
+      const auto t_eval0 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
       auto out = gates::composite_eval_batch_backend(party, backend, ch, *job.key, *job.suf, in);
+      if (prof) ns_eval += prof_ns(t_eval0, prof_now());
 
       GroupResult gr;
       gr.suf = job.suf;
@@ -318,8 +337,10 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
 
       if (device_outputs_ && dev_capable && gpu_stager_) {
         if (!gr.arith.empty()) {
+          const auto t_stage0 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
           HostBufferRef host_arith{gr.arith.data(), gr.arith.size() * sizeof(uint64_t)};
           gr.dev_arith = gpu_stager_->stage_to_device(host_arith);
+          if (prof) ns_stage_out += prof_ns(t_stage0, prof_now());
           if (gr.dev_arith.ptr) {
             void* ptr = gr.dev_arith.ptr;
             size_t bytes = gr.dev_arith.bytes;
@@ -340,8 +361,10 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
           }
         }
         if (!gr.bools.empty()) {
+          const auto t_stage0 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
           HostBufferRef host_bools{gr.bools.data(), gr.bools.size() * sizeof(uint64_t)};
           gr.dev_bools = gpu_stager_->stage_to_device(host_bools);
+          if (prof) ns_stage_out += prof_ns(t_stage0, prof_now());
           if (gr.dev_bools.ptr) {
             void* ptr = gr.dev_bools.ptr;
             size_t bytes = gr.dev_bools.bytes;
@@ -386,6 +409,13 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
       stats_.pending_hatx = 0;
       stats_.pending_device_bytes = 0;
       free_dev_hatx();
+      if (prof) {
+        runtime::bench::add_online_ns(runtime::bench::OnlineTimeKind::PfssFlushEvalStageHatx, ns_stage_hatx);
+        runtime::bench::add_online_ns(runtime::bench::OnlineTimeKind::PfssFlushEvalEval, ns_eval);
+        runtime::bench::add_online_ns(runtime::bench::OnlineTimeKind::PfssFlushEvalStageOut, ns_stage_out);
+        runtime::bench::add_online_ns(runtime::bench::OnlineTimeKind::PfssFlushEvalTotal,
+                                      prof_ns(t_total0, prof_now()));
+      }
       return;
     } catch (...) {
       free_dev_hatx();
@@ -634,6 +664,7 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
 
       try {
         if (gpu_stager_ && dev_capable && !b.dev_hatx.ptr) {
+          const auto t_stage0 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
 #ifdef SUF_HAVE_CUDA
           int eff_bits = static_cast<int>(b.eff_bits);
           void* st_stream = gpu_stager_->stream();
@@ -675,6 +706,7 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
             b.dev_hatx = gpu_stager_->stage_to_device(host);
             b.own_dev_hatx = true;
           }
+          if (prof) ns_stage_hatx += prof_ns(t_stage0, prof_now());
         }
 
         gates::CompositeBatchInput in{b.hatx.data(), b.hatx.size(),
@@ -684,7 +716,9 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
         // We stage raw PFSS outputs ourselves (via PfssGpuStager) so device pointers
         // remain stable across flushes/finalize boundaries.
         in.device_outputs = false;
+        const auto t_eval0 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
         auto out = gates::composite_eval_batch_backend(party, backend, ch, *b.key, *b.suf, in);
+        if (prof) ns_eval += prof_ns(t_eval0, prof_now());
       size_t gr_idx = group_results_.size();
       GroupResult gr;
       gr.suf = b.suf;
@@ -695,9 +729,11 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
       gr.bools = std::move(out.bool_share);
       if (device_outputs_ && dev_capable && gpu_stager_) {
         if (!gr.arith.empty()) {
+          const auto t_stage0 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
           HostBufferRef host{gr.arith.data(), gr.arith.size() * sizeof(uint64_t)};
           gr.dev_arith = gpu_stager_->stage_to_device(host);
           gr.dev_arith_words = gr.arith.size();
+          if (prof) ns_stage_out += prof_ns(t_stage0, prof_now());
           if (gr.dev_arith.ptr) {
             void* ptr = gr.dev_arith.ptr;
             size_t bytes = gr.dev_arith.bytes;
@@ -718,9 +754,11 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
           }
         }
         if (!gr.bools.empty()) {
+          const auto t_stage0 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
           HostBufferRef host_b{gr.bools.data(), gr.bools.size() * sizeof(uint64_t)};
           gr.dev_bools = gpu_stager_->stage_to_device(host_b);
           gr.dev_bools_words = gr.bools.size();
+          if (prof) ns_stage_out += prof_ns(t_stage0, prof_now());
           if (gr.dev_bools.ptr) {
             void* ptr = gr.dev_bools.ptr;
             size_t bytes = gr.dev_bools.bytes;
@@ -773,6 +811,13 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
   stats_.pending_hatx = 0;
   stats_.pending_device_bytes = 0;
   populate_completed_();
+  if (prof) {
+    runtime::bench::add_online_ns(runtime::bench::OnlineTimeKind::PfssFlushEvalStageHatx, ns_stage_hatx);
+    runtime::bench::add_online_ns(runtime::bench::OnlineTimeKind::PfssFlushEvalEval, ns_eval);
+    runtime::bench::add_online_ns(runtime::bench::OnlineTimeKind::PfssFlushEvalStageOut, ns_stage_out);
+    runtime::bench::add_online_ns(runtime::bench::OnlineTimeKind::PfssFlushEvalTotal,
+                                  prof_ns(t_total0, prof_now()));
+  }
 }
 
 PfssResultView PfssSuperBatch::view(const PfssHandle& h) const {
@@ -1019,6 +1064,8 @@ void PfssSuperBatch::clear() {
 
 void PfssSuperBatch::finalize_all(int party, proto::IChannel& ch) {
   if (!flushed_) return;
+  const bool prof = runtime::bench::online_profiling_enabled();
+  const auto t0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   populate_device_views_();
   if (completed_.empty()) populate_completed_();
   for (size_t idx = 0; idx < jobs_.size(); ++idx) {
@@ -1108,10 +1155,18 @@ void PfssSuperBatch::finalize_all(int party, proto::IChannel& ch) {
   slices_.clear();
   group_results_.clear();
   flushed_ = false;
+  if (prof) {
+    const auto t1 = std::chrono::steady_clock::now();
+    runtime::bench::add_online_ns(
+        runtime::bench::OnlineTimeKind::PfssFinalizeTotal,
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()));
+  }
 }
 
 void PfssSuperBatch::materialize_host(int party, proto::IChannel& ch) {
   if (!flushed_) return;
+  const bool prof = runtime::bench::online_profiling_enabled();
+  const auto t0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   populate_device_views_();
   if (completed_.empty()) populate_completed_();
   for (size_t idx = 0; idx < jobs_.size(); ++idx) {
@@ -1194,6 +1249,12 @@ void PfssSuperBatch::materialize_host(int party, proto::IChannel& ch) {
       slot->bool_storage->assign(cj.bools.begin(), cj.bools.end());
       slot->ready.store(true);
     }
+  }
+  if (prof) {
+    const auto t1 = std::chrono::steady_clock::now();
+    runtime::bench::add_online_ns(
+        runtime::bench::OnlineTimeKind::PfssMaterializeHost,
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()));
   }
 }
 

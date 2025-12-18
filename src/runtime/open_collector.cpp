@@ -6,6 +6,7 @@
 #include <stdexcept>
 
 #include "proto/common.hpp"
+#include "runtime/bench_online_profile.hpp"
 
 namespace runtime {
 
@@ -167,6 +168,13 @@ OpenHandle OpenCollector::enqueue(const std::vector<uint64_t>& diff, OpenKind ki
 void OpenCollector::flush(int party, net::Chan& ch) {
   if (requests_.empty()) return;
   auto t0 = std::chrono::steady_clock::now();
+  auto add_ns = [](runtime::bench::OnlineTimeKind k,
+                   const std::chrono::steady_clock::time_point& a,
+                   const std::chrono::steady_clock::time_point& b) {
+    if (b <= a) return;
+    runtime::bench::add_online_ns(
+        k, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count()));
+  };
   const bool want_pack = env_flag_enabled("SUF_OPEN_PACK_EFFBITS");
   const bool signed_pack = env_flag_enabled("SUF_OPEN_PACK_SIGNED");
   const int max_pack_bits = []() {
@@ -177,6 +185,7 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     if (v <= 0 || v > 64) return 56;
     return v;
   }();
+  const auto t_comm0 = std::chrono::steady_clock::now();
   const bool pack = [&]() {
     uint64_t remote = 0;
     const uint64_t local = want_pack ? 1ull : 0ull;
@@ -189,6 +198,7 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     }
     return want_pack && (remote != 0);
   }();
+  const auto t_comm1 = std::chrono::steady_clock::now();
 
   size_t total_words = 0;
   std::array<size_t, static_cast<size_t>(OpenKind::kCount)> words_by_kind{};
@@ -205,12 +215,15 @@ void OpenCollector::flush(int party, net::Chan& ch) {
   }
   if (!pack) {
     // Fast-path: one bulk exchange per flush, then scatter results.
+    const auto t_pack0 = std::chrono::steady_clock::now();
     std::vector<uint64_t> send_flat;
     send_flat.reserve(total_words);
     for (const auto& req : requests_) {
       send_flat.insert(send_flat.end(), req.diff.begin(), req.diff.end());
     }
     std::vector<uint64_t> recv_flat(total_words, 0);
+    const auto t_pack1 = std::chrono::steady_clock::now();
+    const auto t_comm2 = std::chrono::steady_clock::now();
     if (party == 0) {
       if (!send_flat.empty()) ch.send_u64s(send_flat.data(), send_flat.size());
       if (!recv_flat.empty()) ch.recv_u64s(recv_flat.data(), recv_flat.size());
@@ -218,6 +231,8 @@ void OpenCollector::flush(int party, net::Chan& ch) {
       if (!recv_flat.empty()) ch.recv_u64s(recv_flat.data(), recv_flat.size());
       if (!send_flat.empty()) ch.send_u64s(send_flat.data(), send_flat.size());
     }
+    const auto t_comm3 = std::chrono::steady_clock::now();
+    const auto t_scatter0 = std::chrono::steady_clock::now();
     size_t off = 0;
     for (const auto& req : requests_) {
       for (size_t i = 0; i < req.len; ++i) {
@@ -227,6 +242,7 @@ void OpenCollector::flush(int party, net::Chan& ch) {
       req.slot->ready.store(true);
       off += req.len;
     }
+    const auto t_scatter1 = std::chrono::steady_clock::now();
     requests_.clear();
     stats_.flushes += 1;
     stats_.opened_words += total_words;
@@ -237,11 +253,17 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     auto t1 = std::chrono::steady_clock::now();
     stats_.flush_ns += static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+    add_ns(runtime::bench::OnlineTimeKind::OpenFlushTotal, t0, t1);
+    add_ns(runtime::bench::OnlineTimeKind::OpenComm, t_comm0, t_comm1);
+    add_ns(runtime::bench::OnlineTimeKind::OpenPack, t_pack0, t_pack1);
+    add_ns(runtime::bench::OnlineTimeKind::OpenComm, t_comm2, t_comm3);
+    add_ns(runtime::bench::OnlineTimeKind::OpenScatter, t_scatter0, t_scatter1);
     return;
   }
 
   // Packed path: pack the entire flush with a single bitwidth decision.
   // This mirrors Sigma’s “communication packing”: values live in Z_{2^n}, so we can safely pack to `n` bits.
+  const auto t_pack0 = std::chrono::steady_clock::now();
   std::vector<uint64_t> send_flat;
   send_flat.reserve(total_words);
   for (const auto& req : requests_) {
@@ -254,6 +276,8 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     eff_local = n_bits;
   }
   int eff_remote = 0;
+  const auto t_pack1 = std::chrono::steady_clock::now();
+  const auto t_comm2 = std::chrono::steady_clock::now();
   if (party == 0) {
     ch.send_u64(static_cast<uint64_t>(eff_local));
     eff_remote = static_cast<int>(ch.recv_u64());
@@ -261,13 +285,18 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     eff_remote = static_cast<int>(ch.recv_u64());
     ch.send_u64(static_cast<uint64_t>(eff_local));
   }
+  const auto t_comm3 = std::chrono::steady_clock::now();
   int eff = std::max(eff_local, eff_remote);
   if (eff <= 0 || eff > 64) eff = 64;
 
   std::vector<uint64_t> other_flat(total_words, 0);
+  uint64_t pack2_ns = 0;
   if (eff > 0 && eff < 64) {
+    const auto t_pack2_0 = std::chrono::steady_clock::now();
     std::vector<uint64_t> packed_local = pack_eff_bits_host(send_flat, eff);
     std::vector<uint64_t> packed_remote(packed_local.size(), 0);
+    const auto t_pack2_1 = std::chrono::steady_clock::now();
+    const auto t_comm4 = std::chrono::steady_clock::now();
     if (party == 0) {
       if (!packed_local.empty()) ch.send_u64s(packed_local.data(), packed_local.size());
       if (!packed_remote.empty()) ch.recv_u64s(packed_remote.data(), packed_remote.size());
@@ -275,12 +304,20 @@ void OpenCollector::flush(int party, net::Chan& ch) {
       if (!packed_remote.empty()) ch.recv_u64s(packed_remote.data(), packed_remote.size());
       if (!packed_local.empty()) ch.send_u64s(packed_local.data(), packed_local.size());
     }
+    const auto t_comm5 = std::chrono::steady_clock::now();
+    const auto t_pack2_2 = std::chrono::steady_clock::now();
     other_flat = unpack_eff_bits_host(packed_remote, eff, total_words);
     if (signed_pack && n_bits > 0 && n_bits <= 64) {
       for (auto& w : other_flat) w = sign_extend_to_nbits(w, eff, n_bits);
     }
+    const auto t_pack2_3 = std::chrono::steady_clock::now();
+    pack2_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         (t_pack2_1 - t_pack2_0) + (t_pack2_3 - t_pack2_2))
+                                         .count());
+    add_ns(runtime::bench::OnlineTimeKind::OpenComm, t_comm4, t_comm5);
   } else {
     // Fallback: no packing.
+    const auto t_comm4 = std::chrono::steady_clock::now();
     if (party == 0) {
       if (!send_flat.empty()) ch.send_u64s(send_flat.data(), send_flat.size());
       if (!other_flat.empty()) ch.recv_u64s(other_flat.data(), other_flat.size());
@@ -288,8 +325,11 @@ void OpenCollector::flush(int party, net::Chan& ch) {
       if (!other_flat.empty()) ch.recv_u64s(other_flat.data(), other_flat.size());
       if (!send_flat.empty()) ch.send_u64s(send_flat.data(), send_flat.size());
     }
+    const auto t_comm5 = std::chrono::steady_clock::now();
+    add_ns(runtime::bench::OnlineTimeKind::OpenComm, t_comm4, t_comm5);
   }
 
+  const auto t_scatter0 = std::chrono::steady_clock::now();
   size_t off = 0;
   for (const auto& req : requests_) {
     for (size_t i = 0; i < req.len; ++i) {
@@ -299,6 +339,7 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     req.slot->ready.store(true);
     off += req.len;
   }
+  const auto t_scatter1 = std::chrono::steady_clock::now();
   requests_.clear();
   stats_.flushes += 1;
   stats_.opened_words += total_words;
@@ -309,6 +350,12 @@ void OpenCollector::flush(int party, net::Chan& ch) {
   auto t1 = std::chrono::steady_clock::now();
   stats_.flush_ns += static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
+  add_ns(runtime::bench::OnlineTimeKind::OpenFlushTotal, t0, t1);
+  add_ns(runtime::bench::OnlineTimeKind::OpenComm, t_comm0, t_comm1);
+  add_ns(runtime::bench::OnlineTimeKind::OpenPack, t_pack0, t_pack1);
+  add_ns(runtime::bench::OnlineTimeKind::OpenComm, t_comm2, t_comm3);
+  if (pack2_ns) runtime::bench::add_online_ns(runtime::bench::OnlineTimeKind::OpenPack, pack2_ns);
+  add_ns(runtime::bench::OnlineTimeKind::OpenScatter, t_scatter0, t_scatter1);
 }
 
 std::span<const int64_t> OpenCollector::view(const OpenHandle& h) const {

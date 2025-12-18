@@ -1,10 +1,12 @@
 #include "nn/matmul_publicW.hpp"
 
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <stdexcept>
 
 #include "proto/common.hpp"
+#include "runtime/bench_online_profile.hpp"
 
 namespace nn {
 
@@ -37,6 +39,8 @@ void matmul_publicW(const TensorView<uint64_t>& X_share,
                     const TensorView<int64_t>& W_public,
                     TensorView<uint64_t> Y_share,
                     const MatmulParams& params) {
+  const bool prof = runtime::bench::online_profiling_enabled();
+  const auto t0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   if (params.local_rescale) {
     throw std::runtime_error("matmul_publicW: local_rescale is unsupported; insert explicit Rescale");
   }
@@ -55,6 +59,12 @@ void matmul_publicW(const TensorView<uint64_t>& X_share,
     const uint64_t* Xb = X_share.data + b * M * K;
     uint64_t* Yb = Y_share.data + b * M * N;
     matmul2d(Xb, W_public.data, Yb, M, K, N, params);
+  }
+  if (prof) {
+    const auto t1 = std::chrono::steady_clock::now();
+    runtime::bench::add_online_ns(
+        runtime::bench::OnlineTimeKind::MatmulTotal,
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()));
   }
 }
 

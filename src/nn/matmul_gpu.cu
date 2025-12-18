@@ -11,6 +11,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include "runtime/bench_online_profile.hpp"
+
 namespace {
 
 // Matmul kernels implement exact mod 2^64 arithmetic using a 32-bit limb
@@ -404,6 +406,20 @@ bool matmul_publicW_gpu(const TensorView<uint64_t>& X_share,
   size_t N = params.w_transposed ? W_public.shape[0] : W_public.shape[1];
   size_t total_out = batch * M * N;
 
+  const bool prof = runtime::bench::online_profiling_enabled();
+  bool prof_events = false;
+  cudaEvent_t ev_start = nullptr;
+  cudaEvent_t ev_after_upload = nullptr;
+  cudaEvent_t ev_after_kernel = nullptr;
+  cudaEvent_t ev_after_download = nullptr;
+  auto destroy_events = [&]() {
+    if (ev_start) cudaEventDestroy(ev_start);
+    if (ev_after_upload) cudaEventDestroy(ev_after_upload);
+    if (ev_after_kernel) cudaEventDestroy(ev_after_kernel);
+    if (ev_after_download) cudaEventDestroy(ev_after_download);
+    ev_start = ev_after_upload = ev_after_kernel = ev_after_download = nullptr;
+  };
+
   cudaStream_t stream = params.overlap_stream ? reinterpret_cast<cudaStream_t>(params.overlap_stream)
                                               : get_default_stream();
   auto& sc = scratch();
@@ -419,10 +435,23 @@ bool matmul_publicW_gpu(const TensorView<uint64_t>& X_share,
     cudaStreamWaitEvent(stream, sc.ready, 0);
   }
 
+  if (prof && !params.device_only) {
+    if (cudaEventCreate(&ev_start) == cudaSuccess &&
+        cudaEventCreate(&ev_after_upload) == cudaSuccess &&
+        cudaEventCreate(&ev_after_kernel) == cudaSuccess &&
+        cudaEventCreate(&ev_after_download) == cudaSuccess) {
+      prof_events = true;
+      cudaEventRecord(ev_start, stream);
+    } else {
+      destroy_events();
+    }
+  }
+
   bool ok = true;
   ok &= sc.ensure_alloc(sizeof(uint64_t) * batch * M * K, reinterpret_cast<void**>(&sc.dX), sc.x_cap);
   ok &= sc.ensure_alloc(sizeof(uint64_t) * total_out, reinterpret_cast<void**>(&sc.dY), sc.y_cap);
   if (!ok) {
+    if (prof_events) destroy_events();
     sc.release();
     return false;
   }
@@ -575,9 +604,15 @@ bool matmul_publicW_gpu(const TensorView<uint64_t>& X_share,
     }
   }
   if (!ok) {
+    if (prof_events) destroy_events();
     sc.release();
     return false;
   }
+
+  if (prof_events) {
+    cudaEventRecord(ev_after_upload, stream);
+  }
+
   int64_t* bias_ptr = params.bias ? const_cast<int64_t*>(dB) : nullptr;
   bool launched = false;
   TileMode mode = tile_mode_from_env();
@@ -638,12 +673,19 @@ bool matmul_publicW_gpu(const TensorView<uint64_t>& X_share,
     if (!launched) launched = try_fallback();
   }
   if (!launched) {
+    if (prof_events) destroy_events();
     sc.release();
     return false;
+  }
+  if (prof_events) {
+    cudaEventRecord(ev_after_kernel, stream);
   }
   if (!params.device_only) {
     ok &= check(cudaMemcpyAsync(Y_share.data, sc.dY, sizeof(uint64_t) * total_out,
                                 cudaMemcpyDeviceToHost, stream));
+    if (prof_events) {
+      cudaEventRecord(ev_after_download, stream);
+    }
   }
   if (sc.ready) {
     cudaEventRecord(sc.ready, stream);
@@ -651,6 +693,25 @@ bool matmul_publicW_gpu(const TensorView<uint64_t>& X_share,
   }
   if (!params.device_only) {
     ok &= check(cudaStreamSynchronize(stream));
+  }
+  if (prof_events) {
+    float ms_upload = 0.0f;
+    float ms_kernel = 0.0f;
+    float ms_download = 0.0f;
+    float ms_total = 0.0f;
+    cudaEventElapsedTime(&ms_upload, ev_start, ev_after_upload);
+    cudaEventElapsedTime(&ms_kernel, ev_after_upload, ev_after_kernel);
+    cudaEventElapsedTime(&ms_download, ev_after_kernel, ev_after_download);
+    cudaEventElapsedTime(&ms_total, ev_start, ev_after_download);
+    const uint64_t ns_upload = static_cast<uint64_t>(ms_upload * 1e6);
+    const uint64_t ns_kernel = static_cast<uint64_t>(ms_kernel * 1e6);
+    const uint64_t ns_download = static_cast<uint64_t>(ms_download * 1e6);
+    const uint64_t ns_total = static_cast<uint64_t>(ms_total * 1e6);
+    runtime::bench::add_online_ns(runtime::bench::OnlineTimeKind::MatmulUpload, ns_upload);
+    runtime::bench::add_online_ns(runtime::bench::OnlineTimeKind::MatmulKernel, ns_kernel);
+    runtime::bench::add_online_ns(runtime::bench::OnlineTimeKind::MatmulDownload, ns_download);
+    runtime::bench::add_online_ns(runtime::bench::OnlineTimeKind::MatmulTotal, ns_total);
+    destroy_events();
   }
   // Keep device buffers for reuse; scratch access is serialized via mutex.
   lock.unlock();

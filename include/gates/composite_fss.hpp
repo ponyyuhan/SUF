@@ -9,8 +9,10 @@
 #include <type_traits>
 #include <cstddef>
 #include <iostream>
+#include <chrono>
 #include "proto/reference_backend.hpp"
 #include "proto/backend_gpu.hpp"
+#include "runtime/bench_online_profile.hpp"
 #if __has_include(<span>)
   #include <span>
 #elif __has_include(<experimental/span>)
@@ -1172,6 +1174,8 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     }
     const size_t out_words = static_cast<size_t>(compiled.coeff.out_words);
     std::vector<uint64_t> coeff_flat(N * out_words, 0);
+    const bool prof = ::runtime::bench::online_profiling_enabled();
+    const auto t_eval0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (staged && in.hatx_device) {
       staged->eval_interval_lut_many_device_broadcast(
           k.coeff_keys[0].bytes.size(),
@@ -1188,6 +1192,12 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
         std::memcpy(keys_flat.data() + i * key_bytes, k.coeff_keys[0].bytes.data(), key_bytes);
       }
       lut_backend->eval_interval_lut_many_u64(key_bytes, keys_flat.data(), xs_vec, static_cast<int>(out_words), coeff_flat.data());
+    }
+    if (prof) {
+      const auto t_eval1 = std::chrono::steady_clock::now();
+      ::runtime::bench::add_online_ns(
+          ::runtime::bench::OnlineTimeKind::PfssCoeffEval,
+          static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t_eval1 - t_eval0).count()));
     }
     // Apply per-output mask shares (to match step-DCF semantics); caller later subtracts r_out.
     for (size_t i = 0; i < N; ++i) {
@@ -1227,6 +1237,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     std::vector<uint64_t> pred_add(compiled.pred.queries.size() * N, 0ull);
     std::vector<uint64_t> xs_vec(in.hatx, in.hatx + N);
     for (size_t qi = 0; qi < compiled.pred.queries.size(); ++qi) {
+      const bool prof = ::runtime::bench::online_profiling_enabled();
       int bits_in = (compiled.pred.queries[qi].kind == compiler::RawPredKind::kLtU64)
                         ? ((compiled.pred.eff_bits > 0 && compiled.pred.eff_bits <= compiled.pred.n)
                                ? compiled.pred.eff_bits
@@ -1234,6 +1245,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
                         : compiled.pred.queries[qi].f;
       const size_t key_bytes = k.pred_keys[qi].bytes.size();
       std::vector<uint8_t> outs_flat(N * 8);
+      const auto t_eval0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
       if (staged && in.hatx_device) {
         staged->eval_dcf_many_u64_device_broadcast(bits_in,
                                                    key_bytes,
@@ -1253,6 +1265,12 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
                                   xs_vec,
                                   /*out_bytes=*/8,
                                   outs_flat.data());
+      }
+      if (prof) {
+        const auto t_eval1 = std::chrono::steady_clock::now();
+        ::runtime::bench::add_online_ns(
+            ::runtime::bench::OnlineTimeKind::PfssPredEval,
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t_eval1 - t_eval0).count()));
       }
       for (size_t i = 0; i < N; ++i) {
         pred_add[qi * N + i] = proto::unpack_u64_le(outs_flat.data() + i * 8);
@@ -1394,8 +1412,10 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
   if (packed && k.use_packed_pred && !k.packed_pred_groups.empty()) {
     pred_masks.assign(N * static_cast<size_t>(k.packed_pred_words), 0);
     for (const auto& grp : k.packed_pred_groups) {
+      const bool prof = ::runtime::bench::online_profiling_enabled();
       size_t key_bytes = grp.key.bytes.size();
       std::vector<uint64_t> masks(N * static_cast<size_t>(grp.out_words), 0);
+      const auto t_eval0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
       if (staged && in.hatx_device) {
         staged->eval_packed_lt_many_device_broadcast(key_bytes, grp.key.bytes.data(),
                                            reinterpret_cast<const uint64_t*>(in.hatx_device),
@@ -1407,6 +1427,12 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
         }
         packed->eval_packed_lt_many(key_bytes, keys_flat.data(), xs_vec,
                                     grp.in_bits, grp.out_words, masks.data());
+      }
+      if (prof) {
+        const auto t_eval1 = std::chrono::steady_clock::now();
+        ::runtime::bench::add_online_ns(
+            ::runtime::bench::OnlineTimeKind::PfssPredEval,
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t_eval1 - t_eval0).count()));
       }
       for (size_t i = 0; i < N; i++) {
         uint64_t* dst = pred_masks.data() + i * static_cast<size_t>(k.packed_pred_words);
@@ -1426,6 +1452,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
   } else {
     pred_bits_xor.resize(compiled.pred.queries.size() * N, 0);
     for (size_t qi = 0; qi < compiled.pred.queries.size(); qi++) {
+      const bool prof = ::runtime::bench::online_profiling_enabled();
       int bits_in = (compiled.pred.queries[qi].kind == compiler::RawPredKind::kLtU64)
                         ? ((compiled.pred.eff_bits > 0 && compiled.pred.eff_bits <= compiled.pred.n)
                                ? compiled.pred.eff_bits
@@ -1435,6 +1462,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       size_t out_bytes = static_cast<size_t>(k.pred_meta.out_bytes);
       if (out_bytes == 0) throw std::runtime_error("pred_meta.out_bytes must be >0");
       std::vector<uint8_t> outs_flat(N * out_bytes);
+      const auto t_eval0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
       if (staged && in.hatx_device) {
         staged->eval_dcf_many_u64_device_broadcast(bits_in, key_bytes, k.pred_keys[qi].bytes.data(),
                                          reinterpret_cast<const uint64_t*>(in.hatx_device),
@@ -1446,6 +1474,12 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
           std::memcpy(keys_flat.data() + i * key_bytes, k.pred_keys[qi].bytes.data(), key_bytes);
         }
         backend.eval_dcf_many_u64(bits_in, key_bytes, keys_flat.data(), xs_vec, k.pred_meta.out_bytes, outs_flat.data());
+      }
+      if (prof) {
+        const auto t_eval1 = std::chrono::steady_clock::now();
+        ::runtime::bench::add_online_ns(
+            ::runtime::bench::OnlineTimeKind::PfssPredEval,
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t_eval1 - t_eval0).count()));
       }
       for (size_t i = 0; i < N; i++) {
         if (k.pred_meta.sem == proto::ShareSemantics::XorBytes) {
@@ -1466,8 +1500,10 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
   if (packed && k.use_packed_cut && !k.packed_cut_groups.empty()) {
     cut_masks.assign(N * static_cast<size_t>(k.packed_cut_words), 0);
     for (const auto& grp : k.packed_cut_groups) {
+      const bool prof = ::runtime::bench::online_profiling_enabled();
       size_t key_bytes = grp.key.bytes.size();
       std::vector<uint64_t> masks(N * static_cast<size_t>(grp.out_words), 0);
+      const auto t_eval0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
       if (staged && in.hatx_device) {
         staged->eval_packed_lt_many_device_broadcast(key_bytes, grp.key.bytes.data(),
                                            reinterpret_cast<const uint64_t*>(in.hatx_device),
@@ -1479,6 +1515,12 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
         }
         packed->eval_packed_lt_many(key_bytes, keys_flat.data(), xs_vec,
                                     grp.in_bits, grp.out_words, masks.data());
+      }
+      if (prof) {
+        const auto t_eval1 = std::chrono::steady_clock::now();
+        ::runtime::bench::add_online_ns(
+            ::runtime::bench::OnlineTimeKind::PfssPredEval,
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t_eval1 - t_eval0).count()));
       }
       for (size_t i = 0; i < N; i++) {
         uint64_t* dst = cut_masks.data() + i * static_cast<size_t>(k.packed_cut_words);
@@ -1507,10 +1549,12 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
                           ? compiled.coeff.eff_bits
                           : compiled.coeff.n;
     for (size_t ci = 0; ci < k.cut_pred_keys.size(); ci++) {
+      const bool prof = ::runtime::bench::online_profiling_enabled();
       size_t key_bytes = k.cut_pred_keys[ci].bytes.size();
       size_t out_bytes = static_cast<size_t>(k.cut_pred_meta.out_bytes);
       if (out_bytes == 0) throw std::runtime_error("cut_pred_meta.out_bytes must be >0");
       std::vector<uint8_t> outs_flat(N * out_bytes);
+      const auto t_eval0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
       if (staged && in.hatx_device) {
         staged->eval_dcf_many_u64_device_broadcast(cut_bits_in, key_bytes, k.cut_pred_keys[ci].bytes.data(),
                                          reinterpret_cast<const uint64_t*>(in.hatx_device),
@@ -1522,6 +1566,12 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
         }
         backend.eval_dcf_many_u64(cut_bits_in, key_bytes, keys_flat.data(), xs_vec,
                                   k.cut_pred_meta.out_bytes, outs_flat.data());
+      }
+      if (prof) {
+        const auto t_eval1 = std::chrono::steady_clock::now();
+        ::runtime::bench::add_online_ns(
+            ::runtime::bench::OnlineTimeKind::PfssPredEval,
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t_eval1 - t_eval0).count()));
       }
       for (size_t i = 0; i < N; i++) {
         if (k.cut_pred_meta.sem == proto::ShareSemantics::XorBytes) {
@@ -1569,11 +1619,13 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     const int out_bytes = static_cast<int>(out_words * sizeof(uint64_t));
     std::vector<uint64_t> dcf_out_aos(out_words * N, 0);
     for (size_t ci = 0; ci < k.coeff_keys.size(); ++ci) {
+      const bool prof = ::runtime::bench::online_profiling_enabled();
       const size_t key_bytes = k.coeff_keys[ci].bytes.size();
       if (key_bytes == 0) {
         throw std::runtime_error("composite_eval_batch_backend: empty coeff DCF key");
       }
       std::fill(dcf_out_aos.begin(), dcf_out_aos.end(), 0ull);
+      const auto t_eval0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
       if (staged && in.hatx_device) {
         staged->eval_dcf_many_u64_device_broadcast(
             coeff_bits_in,
@@ -1590,6 +1642,12 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
         }
         backend.eval_dcf_many_u64(coeff_bits_in, key_bytes, keys_flat.data(), xs_vec,
                                   out_bytes, reinterpret_cast<uint8_t*>(dcf_out_aos.data()));
+      }
+      if (prof) {
+        const auto t_eval1 = std::chrono::steady_clock::now();
+        ::runtime::bench::add_online_ns(
+            ::runtime::bench::OnlineTimeKind::PfssCoeffEval,
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t_eval1 - t_eval0).count()));
       }
       for (size_t i = 0; i < N; ++i) {
         const uint64_t* row = dcf_out_aos.data() + i * out_words;

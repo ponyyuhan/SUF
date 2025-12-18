@@ -52,6 +52,7 @@ namespace std { using std::experimental::span; }
 #include "gates/composite_fss.hpp"
 #include "runtime/bench_accounting.hpp"
 #include "runtime/bench_key_cost.hpp"
+#include "runtime/bench_online_profile.hpp"
 
 namespace {
 
@@ -97,6 +98,65 @@ struct Args {
   int omp_threads = 0;          // 0 => don't override
   int gelu_const = -1;          // -1 => use env/default
   int gelu_const_segments = 0;  // 0 => leave env/default
+};
+
+struct CpuSampler {
+  std::atomic<bool> running{false};
+  std::thread worker;
+  std::mutex mu;
+  double sum_util = 0.0;
+  double max_util = 0.0;
+  size_t samples = 0;
+  int sample_ms = 100;
+
+  ~CpuSampler() { stop(); }
+
+  static double tv_to_s(const timeval& tv) {
+    return static_cast<double>(tv.tv_sec) + static_cast<double>(tv.tv_usec) / 1e6;
+  }
+
+  void start(int ms) {
+    if (running.load()) return;
+    if (ms > 0) sample_ms = ms;
+    running.store(true);
+    worker = std::thread([this]() {
+      auto prev_wall = std::chrono::steady_clock::now();
+      rusage ru_prev{};
+      getrusage(RUSAGE_SELF, &ru_prev);
+      double prev_cpu = tv_to_s(ru_prev.ru_utime) + tv_to_s(ru_prev.ru_stime);
+      while (running.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(sample_ms));
+        auto now = std::chrono::steady_clock::now();
+        rusage ru_now{};
+        getrusage(RUSAGE_SELF, &ru_now);
+        double cpu_now = tv_to_s(ru_now.ru_utime) + tv_to_s(ru_now.ru_stime);
+        double wall_s = std::chrono::duration<double>(now - prev_wall).count();
+        double cpu_s = cpu_now - prev_cpu;
+        if (wall_s > 0.0 && cpu_s >= 0.0) {
+          double util = cpu_s / wall_s;
+          std::lock_guard<std::mutex> lk(mu);
+          sum_util += util;
+          max_util = std::max(max_util, util);
+          samples += 1;
+        }
+        prev_wall = now;
+        prev_cpu = cpu_now;
+      }
+    });
+  }
+
+  void stop() {
+    if (!running.load()) return;
+    running.store(false);
+    if (worker.joinable()) worker.join();
+  }
+
+  void snapshot(double& avg_util, double& max_util_out, size_t& n) {
+    std::lock_guard<std::mutex> lk(mu);
+    n = samples;
+    max_util_out = max_util;
+    avg_util = (samples > 0) ? (sum_util / static_cast<double>(samples)) : 0.0;
+  }
 };
 
 Args parse(int argc, char** argv) {
@@ -419,9 +479,15 @@ void write_json(const Args& a,
                 double cpu_user_s,
                 double cpu_sys_s,
                 double cpu_util_avg,
+                double cpu_util_samples_avg,
+                double cpu_util_samples_max,
+                size_t cpu_util_samples_n,
+                int cpu_util_sample_ms,
                 long max_rss_kb,
                 double wall_time_s,
                 int n_iters,
+                const runtime::bench::OnlineProfileSnapshot& prof_mean,
+                size_t prof_iters,
                 const runtime::PhaseExecutor::Stats& stats0,
                 const runtime::PhaseExecutor::Stats& stats1) {
   auto env_flag = [](const char* name) -> bool {
@@ -503,6 +569,10 @@ void write_json(const Args& a,
     << "\"cpu_user_s\": " << cpu_user_s
     << ", \"cpu_sys_s\": " << cpu_sys_s
     << ", \"cpu_util_avg\": " << cpu_util_avg
+    << ", \"cpu_util_samples_avg\": " << cpu_util_samples_avg
+    << ", \"cpu_util_samples_max\": " << cpu_util_samples_max
+    << ", \"cpu_util_samples_n\": " << cpu_util_samples_n
+    << ", \"cpu_util_sample_ms\": " << cpu_util_sample_ms
     << ", \"max_rss_kb\": " << max_rss_kb
     << " },\n";
   const uint64_t key_bytes_total = runtime::bench::offline_bytes_total();
@@ -557,6 +627,28 @@ void write_json(const Args& a,
   f << "    \"opened_words_mask\": " << opened_words_mask << ",\n";
   f << "    \"opened_words_other\": " << opened_words_other << "\n";
   f << "  },\n";
+  auto prof_ns = [&](runtime::bench::OnlineTimeKind k) -> uint64_t {
+    return prof_mean.ns[static_cast<size_t>(k)];
+  };
+  f << "  \"online_profile\": { "
+    << "\"iters\": " << prof_iters
+    << ", \"open_flush_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::OpenFlushTotal)
+    << ", \"open_pack_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::OpenPack)
+    << ", \"open_comm_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::OpenComm)
+    << ", \"open_scatter_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::OpenScatter)
+    << ", \"pfss_flush_eval_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::PfssFlushEvalTotal)
+    << ", \"pfss_flush_eval_stage_hatx_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::PfssFlushEvalStageHatx)
+    << ", \"pfss_flush_eval_eval_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::PfssFlushEvalEval)
+    << ", \"pfss_flush_eval_stage_out_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::PfssFlushEvalStageOut)
+    << ", \"pfss_finalize_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::PfssFinalizeTotal)
+    << ", \"pfss_materialize_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::PfssMaterializeHost)
+    << ", \"pfss_pred_eval_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::PfssPredEval)
+    << ", \"pfss_coeff_eval_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::PfssCoeffEval)
+    << ", \"matmul_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::MatmulTotal)
+    << ", \"matmul_upload_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::MatmulUpload)
+    << ", \"matmul_kernel_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::MatmulKernel)
+    << ", \"matmul_download_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::MatmulDownload)
+    << " },\n";
   f << "  \"notes\": \"transformer forward (PFSS-backed)\"\n";
   f << "}\n";
 }
@@ -566,6 +658,20 @@ void write_json(const Args& a,
 int main(int argc, char** argv) {
   rusage ru_start{};
   rusage ru_end{};
+  auto env_flag_main = [](const char* name) -> bool {
+    const char* v = std::getenv(name);
+    if (!v) return false;
+    std::string s(v);
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return !(s == "0" || s == "false" || s == "off" || s == "no");
+  };
+  auto env_int_main = [](const char* name, int defv) -> int {
+    const char* v = std::getenv(name);
+    if (!v) return defv;
+    int out = std::atoi(v);
+    return (out > 0) ? out : defv;
+  };
   auto dump_bt = [](int sig) {
     void* addrs[64];
     int n = backtrace(addrs, 64);
@@ -835,9 +941,21 @@ int main(int argc, char** argv) {
       it_net_bytes.reserve(static_cast<size_t>(std::max(1, args.n_iters)));
 	    double wall_start_s = 0.0;
 	    double wall_end_s = 0.0;
+	    const bool enable_profile = env_flag_main("SUF_BENCH_PROFILE");
+	    runtime::bench::set_online_profiling_enabled(enable_profile);
+	    runtime::bench::reset_online_profile();
+	    CpuSampler cpu_sampler;
+	    const bool cpu_sample = env_flag_main("SUF_BENCH_CPU_SAMPLER");
+	    const int cpu_sample_ms = env_int_main("SUF_BENCH_CPU_SAMPLE_MS", 100);
+	    if (cpu_sample) {
+	      cpu_sampler.start(cpu_sample_ms);
+	    }
 	    auto wall_start = std::chrono::steady_clock::now();
       ::getrusage(RUSAGE_SELF, &ru_start);
 	    for (int it = 0; it < std::max(1, args.n_iters); ++it) {
+	      if (enable_profile && it == 1) {
+	        runtime::bench::reset_online_profile();
+	      }
 	      // Reset comm counters between iterations.
 	      {
         pfss_sh.sent0.store(0, std::memory_order_relaxed);
@@ -901,6 +1019,9 @@ int main(int argc, char** argv) {
       it_pfss_bytes.push_back(pfss_bytes);
       it_net_bytes.push_back(net_bytes);
     }
+    if (cpu_sample) {
+      cpu_sampler.stop();
+    }
     auto wall_end = std::chrono::steady_clock::now();
     ::getrusage(RUSAGE_SELF, &ru_end);
     wall_start_s = 0.0;
@@ -933,6 +1054,14 @@ int main(int argc, char** argv) {
     const size_t online_start = (it_s.size() >= 2) ? 1 : 0;
     uint64_t mean_pfss_bytes = mean_u64(it_pfss_bytes, online_start);
     uint64_t mean_net_bytes = mean_u64(it_net_bytes, online_start);
+    const size_t online_iters = (it_s.size() >= 2) ? (it_s.size() - 1) : it_s.size();
+    auto prof_total = runtime::bench::snapshot_online_profile();
+    runtime::bench::OnlineProfileSnapshot prof_mean{};
+    if (online_iters > 0) {
+      for (size_t i = 0; i < prof_mean.ns.size(); ++i) {
+        prof_mean.ns[i] = prof_total.ns[i] / online_iters;
+      }
+    }
 
     auto tv_to_s = [](const timeval& tv) -> double {
       return static_cast<double>(tv.tv_sec) + static_cast<double>(tv.tv_usec) / 1e6;
@@ -941,6 +1070,12 @@ int main(int argc, char** argv) {
     const double cpu_sys_s = tv_to_s(ru_end.ru_stime) - tv_to_s(ru_start.ru_stime);
     const double cpu_util_avg = (wall_end_s > 0.0) ? ((cpu_user_s + cpu_sys_s) / wall_end_s) : 0.0;
     const long max_rss_kb = ru_end.ru_maxrss;
+    double cpu_util_samples_avg = 0.0;
+    double cpu_util_samples_max = 0.0;
+    size_t cpu_util_samples_n = 0;
+    if (cpu_sample) {
+      cpu_sampler.snapshot(cpu_util_samples_avg, cpu_util_samples_max, cpu_util_samples_n);
+    }
 
     gates::set_composite_keygen_hook(nullptr);
 
@@ -955,9 +1090,15 @@ int main(int argc, char** argv) {
                cpu_user_s,
                cpu_sys_s,
                cpu_util_avg,
+               cpu_util_samples_avg,
+               cpu_util_samples_max,
+               cpu_util_samples_n,
+               cpu_sample_ms,
                max_rss_kb,
                wall_end_s,
                n_meas,
+               prof_mean,
+               online_iters,
                st0,
                st1);
     std::cout << "Wrote bench log to " << args.log_json << "\n";
