@@ -25,6 +25,8 @@
 #include "runtime/pfss_phase_planner.hpp"
 #include "runtime/pfss_superbatch.hpp"
 #include "runtime/phase_tasks.hpp"
+#include "runtime/bench_accounting.hpp"
+#include "runtime/bench_key_cost.hpp"
 
 namespace nn {
 
@@ -67,6 +69,15 @@ static bool per_element_masks_enabled() {
   return !(v == "0" || v == "false" || v == "off" || v == "no");
 }
 
+static bool causal_prefill_enabled() {
+  const char* env = std::getenv("SUF_CAUSAL_PREFILL");
+  if (!env) return true;
+  std::string v(env);
+  std::transform(v.begin(), v.end(), v.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return !(v == "0" || v == "false" || v == "off" || v == "no");
+}
+
 static bool bench_trace_enabled() { return std::getenv("SUF_BENCH_TRACE") != nullptr; }
 
 struct SoftmaxMatKey {
@@ -76,10 +87,12 @@ struct SoftmaxMatKey {
   size_t triple_need = 0;
   int which = 0;  // 0=nexp, 1=recip, 2=prob_gapars, 3=prob_faithful
   int nr_iters = 0;  // recip only
+  bool per_element_masks = false;
 
   bool operator==(const SoftmaxMatKey& o) const {
     return is_gpu == o.is_gpu && frac_bits == o.frac_bits && batch_N == o.batch_N &&
-           triple_need == o.triple_need && which == o.which && nr_iters == o.nr_iters;
+           triple_need == o.triple_need && which == o.which && nr_iters == o.nr_iters &&
+           per_element_masks == o.per_element_masks;
   }
 };
 
@@ -95,6 +108,7 @@ struct SoftmaxMatKeyHash {
     mix(static_cast<size_t>(k.triple_need));
     mix(static_cast<size_t>(k.which));
     mix(static_cast<size_t>(k.nr_iters));
+    mix(static_cast<size_t>(k.per_element_masks));
     return h;
   }
 };
@@ -186,6 +200,10 @@ class CachedRowBroadcastTripleProvider : public runtime::RowBroadcastTripleProvi
     const auto& A = (party_ == 0) ? mat.A0 : mat.A1;
     const auto& B = (party_ == 0) ? mat.B0 : mat.B1;
     const auto& C = (party_ == 0) ? mat.C0 : mat.C1;
+    {
+      uint64_t bytes = static_cast<uint64_t>(A.size() + B.size() + C.size()) * sizeof(uint64_t);
+      runtime::bench::add_offline_bytes(runtime::bench::OfflineBytesKind::RowBroadcastTriple, bytes);
+    }
     return {std::span<const uint64_t>(A.data(), A.size()),
             std::span<const uint64_t>(B.data(), B.size()),
             std::span<const uint64_t>(C.data(), C.size())};
@@ -204,7 +222,11 @@ static std::vector<proto::BeaverTriple64Share>& ensure_cached_triples(
     size_t count,
     int party) {
   auto it = cache.find(count);
-  if (it != cache.end()) return it->second;
+  if (it != cache.end()) {
+    runtime::bench::add_offline_bytes(runtime::bench::OfflineBytesKind::BeaverTriple,
+                                      static_cast<uint64_t>(count) * static_cast<uint64_t>(sizeof(proto::BeaverTriple64Share)));
+    return it->second;
+  }
   std::mt19937_64 rng(seed_base ^ static_cast<uint64_t>(count));
   std::vector<proto::BeaverTriple64Share> triples(count);
   for (auto& tri : triples) {
@@ -220,6 +242,8 @@ static std::vector<proto::BeaverTriple64Share>& ensure_cached_triples(
                                                    proto::sub_mod(c, c0)};
   }
   auto [ins_it, _] = cache.emplace(count, std::move(triples));
+  runtime::bench::add_offline_bytes(runtime::bench::OfflineBytesKind::BeaverTriple,
+                                    static_cast<uint64_t>(count) * static_cast<uint64_t>(sizeof(proto::BeaverTriple64Share)));
   return ins_it->second;
 }
 
@@ -263,7 +287,10 @@ static const nn::MatmulBeaverTriple& get_cached_matmul_triple(const MatmulTriple
   auto it0 = cache0.find(key);
   auto it1 = cache1.find(key);
   if (it0 != cache0.end() && it1 != cache1.end()) {
-    return (party == 0) ? it0->second : it1->second;
+    const auto& tri = (party == 0) ? it0->second : it1->second;
+    uint64_t bytes = static_cast<uint64_t>(tri.A_share.size() + tri.B_share.size() + tri.C_share.size()) * sizeof(uint64_t);
+    runtime::bench::add_offline_bytes(runtime::bench::OfflineBytesKind::MatmulTriple, bytes);
+    return tri;
   }
   std::mt19937_64 rng(static_cast<uint64_t>(MatmulTripleKeyHash{}(key)) ^ 0x6d61746d756c6c75ull);
   auto [t0, t1] = nn::dealer_gen_matmul_triple(
@@ -275,7 +302,10 @@ static const nn::MatmulBeaverTriple& get_cached_matmul_triple(const MatmulTriple
       key.w_transposed);
   auto ins0 = cache0.emplace(key, std::move(t0)).first;
   auto ins1 = cache1.emplace(key, std::move(t1)).first;
-  return (party == 0) ? ins0->second : ins1->second;
+  const auto& tri = (party == 0) ? ins0->second : ins1->second;
+  uint64_t bytes = static_cast<uint64_t>(tri.A_share.size() + tri.B_share.size() + tri.C_share.size()) * sizeof(uint64_t);
+  runtime::bench::add_offline_bytes(runtime::bench::OfflineBytesKind::MatmulTriple, bytes);
+  return tri;
 }
 
 // Matrix Beaver matmul task using one (A,B,C=A*B) triple per matrix multiply.
@@ -334,7 +364,7 @@ class Matmul2DTask final : public runtime::detail::PhaseTask {
         diff_.resize(A_words + B_words);
         for (size_t i = 0; i < A_words; ++i) diff_[i] = proto::sub_mod(A_[i], a_tri_[i]);
         for (size_t i = 0; i < B_words; ++i) diff_[A_words + i] = proto::sub_mod(B_[i], b_tri_[i]);
-        h_open_ = R.opens->enqueue(diff_);
+        h_open_ = R.opens->enqueue(diff_, runtime::OpenKind::kBeaver);
         st_ = St::WaitOpen;
         return runtime::detail::Need::Open;
       }
@@ -346,6 +376,7 @@ class Matmul2DTask final : public runtime::detail::PhaseTask {
         if (opened.size() != A_words + B_words) {
           throw std::runtime_error("Matmul2DTask: opened size mismatch");
         }
+        #pragma omp parallel for collapse(2) schedule(static)
         for (int m = 0; m < M_; ++m) {
           for (int n = 0; n < N_; ++n) {
             __int128 acc = static_cast<__int128>(to_signed(c_tri_[static_cast<size_t>(m) * static_cast<size_t>(N_) +
@@ -533,6 +564,11 @@ void attention_forward(const AttentionConfig& cfg,
   mp.allow_legacy_shift = false;
   // Run GEMM on its own stream so PFSS (if GPU) can overlap on its compute stream.
   mp.overlap_stream = (ctx && ctx->uses_gpu_backend()) ? nn::matmul_default_stream() : nullptr;
+  if (mp.overlap_stream) {
+    // Transformer weights are stable across layers; keep them resident on device.
+    mp.cache_weights = true;
+    mp.cache_bias = true;
+  }
   net::Chan* pfss_nc = (ctx && ctx->pfss_net_chan) ? ctx->pfss_net_chan : &ch;
   proto::IChannel* pfss_chan_override = (ctx && ctx->pfss_chan) ? ctx->pfss_chan : nullptr;
 
@@ -613,24 +649,51 @@ void attention_forward(const AttentionConfig& cfg,
   runtime::PfssPhasePlanner pfss_phase_planner;
   pfss_phase_planner.bind(&pe->pfss_coeff_batch(), &pe->pfss_trunc_batch());
   // Truncate qkv accum (Q2f -> Qf) via composite truncation (no local shift).
-  compiler::GateParams trunc_params_qkv;
-  trunc_params_qkv.kind = compiler::GateKind::AutoTrunc;
-  trunc_params_qkv.frac_bits = fb;
-  trunc_params_qkv.range_hint = compiler::matmul_accum_range(
-      q_range, wqkv_range, D);
-  trunc_params_qkv.per_element_masks = per_element_masks_enabled();
-  compiler::AbsBound qkv_acc_abs =
-      compiler::matmul_accum_abs(have_x_abs ? x_abs_hint : compiler::abs_from_range(q_range, true),
-                                 wqkv_abs,
-                                 D);
-  trunc_params_qkv.abs_hint = qkv_acc_abs;
-  if (qkv_acc_abs.kind == compiler::RangeKind::Proof) {
-    trunc_params_qkv.gap_hint =
-        compiler::gap_from_abs(qkv_acc_abs, fb, compiler::default_mask_bound(fb));
+  std::shared_ptr<compiler::TruncationLoweringResult> trunc_qkv_bundle;
+  {
+    compiler::GateParams trunc_params_qkv;
+    trunc_params_qkv.kind = compiler::GateKind::AutoTrunc;
+    trunc_params_qkv.frac_bits = fb;
+    trunc_params_qkv.range_hint = compiler::matmul_accum_range(q_range, wqkv_range, D);
+    trunc_params_qkv.per_element_masks = per_element_masks_enabled();
+    compiler::AbsBound qkv_acc_abs = compiler::matmul_accum_abs(
+        have_x_abs ? x_abs_hint : compiler::abs_from_range(q_range, true),
+        wqkv_abs,
+        D);
+    trunc_params_qkv.abs_hint = qkv_acc_abs;
+    if (qkv_acc_abs.kind == compiler::RangeKind::Proof) {
+      trunc_params_qkv.gap_hint =
+          compiler::gap_from_abs(qkv_acc_abs, fb, compiler::default_mask_bound(fb));
+    }
+    if (bench_cache_enabled()) {
+      const bool is_gpu_cache = (ctx && ctx->uses_gpu_backend());
+      static std::mutex mu;
+      static std::unordered_map<SoftmaxMatKey, std::shared_ptr<compiler::TruncationLoweringResult>, SoftmaxMatKeyHash>
+          cache_map;
+      SoftmaxMatKey key{is_gpu_cache,
+                        fb,
+                        qkv.size(),
+                        /*triple_need=*/0,
+                        /*which=*/6,
+                        /*nr_iters=*/0,
+                        /*per_element_masks=*/trunc_params_qkv.per_element_masks};
+      std::lock_guard<std::mutex> lk(mu);
+      auto it = cache_map.find(key);
+      if (it == cache_map.end()) {
+        std::mt19937_64 rng_qkv(0x716b7674ull);  // "qkvt"
+        auto res = std::make_shared<compiler::TruncationLoweringResult>(
+            compiler::lower_truncation_gate(ctx->trunc_backend(), rng_qkv, trunc_params_qkv, qkv.size()));
+        it = cache_map.emplace(key, std::move(res)).first;
+      } else if (party == 0) {
+        runtime::bench::charge_offline_bytes(runtime::bench::truncation_lowering_cost(*it->second));
+      }
+      trunc_qkv_bundle = it->second;
+    } else {
+      std::mt19937_64 rng_qkv(0x716b7674ull);  // "qkvt"
+      trunc_qkv_bundle = std::make_shared<compiler::TruncationLoweringResult>(
+          compiler::lower_truncation_gate(ctx->trunc_backend(), rng_qkv, trunc_params_qkv, qkv.size()));
+    }
   }
-  std::mt19937_64 rng_qkv(123);
-  auto trunc_qkv_bundle =
-      compiler::lower_truncation_gate(ctx->trunc_backend(), rng_qkv, trunc_params_qkv, qkv.size());
   {
     runtime::PhaseResources truncR{};
     runtime::ProtoChanFromNet pch(*pfss_nc);
@@ -664,7 +727,7 @@ void attention_forward(const AttentionConfig& cfg,
     pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
     enter_phase();
     auto trunc_task = std::make_unique<runtime::TruncTask>(
-        &trunc_qkv_bundle,
+        trunc_qkv_bundle.get(),
         std::span<const uint64_t>(qkv.data(), qkv.size()),
         std::span<uint64_t>(qkv.data(), qkv.size()));
     pe->add_task(std::move(trunc_task));
@@ -684,6 +747,8 @@ void attention_forward(const AttentionConfig& cfg,
     }
   };
   size_t init_len = cache.cur_len;
+  const bool causal_prefill =
+      cfg.causal && use_phase_softmax && causal_prefill_enabled() && (init_len == 0) && (T > 1);
 
   gates::NExpGateParams nexp_params;
   nexp_params.frac_bits = fb;
@@ -738,8 +803,8 @@ void attention_forward(const AttentionConfig& cfg,
     pe->open_collector().set_limits(open_lim);
     pe->set_max_flushes(1ull << 11);
     const bool is_gpu = ctx && ctx->uses_gpu_backend();
-    const size_t softmax_rows_mat = cfg.causal ? (B * H) : (B * H * T);
-    const size_t softmax_cols_mat = cfg.causal ? cache.S_max : T;
+    const size_t softmax_rows_mat = (!cfg.causal || causal_prefill) ? (B * H * T) : (B * H);
+    const size_t softmax_cols_mat = (!cfg.causal || causal_prefill) ? T : cache.S_max;
     const size_t batch_N = softmax_rows_mat * softmax_cols_mat;
     // Extra triples for tighter planner bytes test; use generous pool.
     size_t triple_need = 6 * batch_N;
@@ -747,13 +812,22 @@ void attention_forward(const AttentionConfig& cfg,
       if (bench_cache_enabled()) {
         static std::mutex mu;
         static std::unordered_map<SoftmaxMatKey, std::shared_ptr<gates::NexpTaskMaterial>, SoftmaxMatKeyHash> cache_map;
-        SoftmaxMatKey key{is_gpu, fb, batch_N, triple_need, /*which=*/0, /*nr_iters=*/0};
+        SoftmaxMatKey key{is_gpu, fb, batch_N, triple_need, /*which=*/0, /*nr_iters=*/0, /*per_element_masks=*/false};
         std::lock_guard<std::mutex> lk(mu);
         auto it = cache_map.find(key);
         if (it == cache_map.end()) {
           auto mat = std::make_shared<gates::NexpTaskMaterial>(gates::dealer_make_nexp_task_material(
               ctx->trunc_backend(), nexp_params, rng, triple_need, batch_N));
           it = cache_map.emplace(key, std::move(mat)).first;
+        } else if (party == 0) {
+          runtime::bench::OfflineBytesArray cost{};
+          auto add = [&](const runtime::bench::OfflineBytesArray& x) {
+            for (size_t i = 0; i < cost.size(); ++i) cost[i] += x[i];
+          };
+          add(runtime::bench::composite_keypair_cost(it->second->keys));
+          add(runtime::bench::truncation_lowering_cost(it->second->trunc_f));
+          add(runtime::bench::truncation_lowering_cost(it->second->trunc_2f));
+          runtime::bench::charge_offline_bytes(cost);
         }
         nexp_mat = it->second;
       } else {
@@ -769,13 +843,21 @@ void attention_forward(const AttentionConfig& cfg,
       if (bench_cache_enabled()) {
         static std::mutex mu;
         static std::unordered_map<SoftmaxMatKey, std::shared_ptr<gates::RecipTaskMaterial>, SoftmaxMatKeyHash> cache_map;
-        SoftmaxMatKey key{is_gpu, fb, batch_N, recip_triples, /*which=*/1, /*nr_iters=*/nr_iters};
+        SoftmaxMatKey key{is_gpu, fb, batch_N, recip_triples, /*which=*/1, /*nr_iters=*/nr_iters, /*per_element_masks=*/false};
         std::lock_guard<std::mutex> lk(mu);
         auto it = cache_map.find(key);
         if (it == cache_map.end()) {
           auto mat = std::make_shared<gates::RecipTaskMaterial>(gates::dealer_make_recip_task_material(
               ctx->trunc_backend(), fb, nr_iters, rng, recip_triples));
           it = cache_map.emplace(key, std::move(mat)).first;
+        } else if (party == 0) {
+          runtime::bench::OfflineBytesArray cost{};
+          auto add = [&](const runtime::bench::OfflineBytesArray& x) {
+            for (size_t i = 0; i < cost.size(); ++i) cost[i] += x[i];
+          };
+          add(runtime::bench::composite_keypair_cost(it->second->keys));
+          add(runtime::bench::truncation_lowering_cost(it->second->trunc_fb));
+          runtime::bench::charge_offline_bytes(cost);
         }
         recip_mat = it->second;
       } else {
@@ -799,13 +881,15 @@ void attention_forward(const AttentionConfig& cfg,
       if (bench_cache_enabled()) {
         static std::mutex mu;
         static std::unordered_map<SoftmaxMatKey, std::shared_ptr<compiler::TruncationLoweringResult>, SoftmaxMatKeyHash> cache_map;
-        SoftmaxMatKey key{is_gpu, fb, batch_N, /*triple_need=*/0, /*which=*/2, /*nr_iters=*/0};
+        SoftmaxMatKey key{is_gpu, fb, batch_N, /*triple_need=*/0, /*which=*/2, /*nr_iters=*/0, /*per_element_masks=*/gap_p.per_element_masks};
         std::lock_guard<std::mutex> lk(mu);
         auto it = cache_map.find(key);
         if (it == cache_map.end()) {
           auto res = std::make_shared<compiler::TruncationLoweringResult>(
               compiler::lower_truncation_gate(ctx->trunc_backend(), rng, gap_p, batch_N));
           it = cache_map.emplace(key, std::move(res)).first;
+        } else if (party == 0) {
+          runtime::bench::charge_offline_bytes(runtime::bench::truncation_lowering_cost(*it->second));
         }
         prob_gapars = it->second;
       } else {
@@ -820,13 +904,15 @@ void attention_forward(const AttentionConfig& cfg,
       if (bench_cache_enabled()) {
         static std::mutex mu;
         static std::unordered_map<SoftmaxMatKey, std::shared_ptr<compiler::TruncationLoweringResult>, SoftmaxMatKeyHash> cache_map;
-        SoftmaxMatKey key{is_gpu, fb, batch_N, /*triple_need=*/0, /*which=*/3, /*nr_iters=*/0};
+        SoftmaxMatKey key{is_gpu, fb, batch_N, /*triple_need=*/0, /*which=*/3, /*nr_iters=*/0, /*per_element_masks=*/faithful_p.per_element_masks};
         std::lock_guard<std::mutex> lk(mu);
         auto it = cache_map.find(key);
         if (it == cache_map.end()) {
           auto res = std::make_shared<compiler::TruncationLoweringResult>(
               compiler::lower_truncation_gate(ctx->trunc_backend(), rng, faithful_p, batch_N));
           it = cache_map.emplace(key, std::move(res)).first;
+        } else if (party == 0) {
+          runtime::bench::charge_offline_bytes(runtime::bench::truncation_lowering_cost(*it->second));
         }
         prob_faithful = it->second;
       } else {
@@ -853,9 +939,9 @@ void attention_forward(const AttentionConfig& cfg,
       std::llround((1.0 / std::sqrt(static_cast<double>(Dh))) * std::ldexp(1.0, fb)));
   if (inv_sqrt == 0) inv_sqrt = 1;
 
-  if (!cfg.causal) {
+  if (!cfg.causal || causal_prefill) {
     if (!use_phase_softmax) {
-      throw std::runtime_error("attention_forward: encoder attention requires phase softmax path");
+      throw std::runtime_error("attention_forward: full-matrix attention requires phase softmax path");
     }
 
     const bool is_gpu = ctx && ctx->uses_gpu_backend();
@@ -883,6 +969,21 @@ void attention_forward(const AttentionConfig& cfg,
       }
     }
 
+    // For causal prefill, also populate the KV cache in one shot.
+    if (cfg.causal && causal_prefill) {
+      const size_t fill_len = std::min(T, cache.S_max);
+      for (size_t b = 0; b < B; ++b) {
+        for (size_t h = 0; h < H; ++h) {
+          const size_t head_base = (b * H + h) * T * Dh;
+          uint64_t* k_dst = kv_head_ptr(cache, b, h);
+          uint64_t* v_dst = kv_head_ptr_v(cache, b, h);
+          std::memcpy(k_dst, K_all.data() + head_base, fill_len * Dh * sizeof(uint64_t));
+          std::memcpy(v_dst, V_all.data() + head_base, fill_len * Dh * sizeof(uint64_t));
+        }
+      }
+      cache.cur_len = fill_len;
+    }
+
     std::vector<uint64_t> score_scaled_q2f(rows_all * cols_all, 0);
     std::vector<uint64_t> score_scaled_qf(rows_all * cols_all, 0);
 
@@ -903,7 +1004,7 @@ void attention_forward(const AttentionConfig& cfg,
       if (bench_cache_enabled()) {
         static std::mutex mu;
         static std::unordered_map<SoftmaxMatKey, std::shared_ptr<compiler::TruncationLoweringResult>, SoftmaxMatKeyHash> cache_map;
-        SoftmaxMatKey k{is_gpu, fb, rows_all * cols_all, /*triple_need=*/0, /*which=*/4, /*nr_iters=*/0};
+        SoftmaxMatKey k{is_gpu, fb, rows_all * cols_all, /*triple_need=*/0, /*which=*/4, /*nr_iters=*/0, /*per_element_masks=*/score_trunc_p.per_element_masks};
         std::lock_guard<std::mutex> lk(mu);
         auto it = cache_map.find(k);
         if (it == cache_map.end()) {
@@ -911,6 +1012,8 @@ void attention_forward(const AttentionConfig& cfg,
           auto res = std::make_shared<compiler::TruncationLoweringResult>(
               compiler::lower_truncation_gate(ctx->trunc_backend(), rng_score, score_trunc_p, rows_all * cols_all));
           it = cache_map.emplace(k, std::move(res)).first;
+        } else if (party == 0) {
+          runtime::bench::charge_offline_bytes(runtime::bench::truncation_lowering_cost(*it->second));
         }
         score_trunc_bundle = it->second;
       } else {
@@ -987,6 +1090,16 @@ void attention_forward(const AttentionConfig& cfg,
       plan.frac_bits = fb;
       plan.rows = static_cast<int>(rows_all);
       plan.cols = static_cast<int>(cols_all);
+      if (cfg.causal && causal_prefill) {
+        plan.valid_lens.reserve(rows_all);
+        for (size_t b = 0; b < B; ++b) {
+          for (size_t h = 0; h < H; ++h) {
+            for (size_t t = 0; t < T; ++t) {
+              plan.valid_lens.push_back(static_cast<int>(t + 1));
+            }
+          }
+        }
+      }
       plan.input_is_max_diff = false;  // open scores to compute stable max-diff
       plan.nexp = nexp_bundle;
       plan.recip = recip_bundle;
@@ -1025,7 +1138,7 @@ void attention_forward(const AttentionConfig& cfg,
       if (bench_cache_enabled()) {
         static std::mutex mu;
         static std::unordered_map<SoftmaxMatKey, std::shared_ptr<compiler::TruncationLoweringResult>, SoftmaxMatKeyHash> cache_map;
-        SoftmaxMatKey k{is_gpu, fb, B * H * T * Dh, /*triple_need=*/0, /*which=*/5, /*nr_iters=*/0};
+        SoftmaxMatKey k{is_gpu, fb, B * H * T * Dh, /*triple_need=*/0, /*which=*/5, /*nr_iters=*/0, /*per_element_masks=*/ctx_trunc_p.per_element_masks};
         std::lock_guard<std::mutex> lk(mu);
         auto it = cache_map.find(k);
         if (it == cache_map.end()) {
@@ -1033,6 +1146,8 @@ void attention_forward(const AttentionConfig& cfg,
           auto res = std::make_shared<compiler::TruncationLoweringResult>(
               compiler::lower_truncation_gate(ctx->trunc_backend(), rng_ctx, ctx_trunc_p, B * H * T * Dh));
           it = cache_map.emplace(k, std::move(res)).first;
+        } else if (party == 0) {
+          runtime::bench::charge_offline_bytes(runtime::bench::truncation_lowering_cost(*it->second));
         }
         ctx_trunc_bundle = it->second;
       } else {
@@ -1599,9 +1714,37 @@ void attention_forward(const AttentionConfig& cfg,
     trunc_params_out.gap_hint =
         compiler::gap_from_abs(out_abs, fb, compiler::default_mask_bound(fb));
   }
-  std::mt19937_64 rng_out(456);
-  auto trunc_out_bundle =
-      compiler::lower_truncation_gate(ctx->trunc_backend(), rng_out, trunc_params_out, Y_share.numel());
+  std::shared_ptr<compiler::TruncationLoweringResult> trunc_out_bundle;
+  {
+    if (bench_cache_enabled()) {
+      const bool is_gpu_cache = (ctx && ctx->uses_gpu_backend());
+      static std::mutex mu;
+      static std::unordered_map<SoftmaxMatKey, std::shared_ptr<compiler::TruncationLoweringResult>, SoftmaxMatKeyHash>
+          cache_map;
+      SoftmaxMatKey key{is_gpu_cache,
+                        fb,
+                        Y_share.numel(),
+                        /*triple_need=*/0,
+                        /*which=*/7,
+                        /*nr_iters=*/0,
+                        /*per_element_masks=*/trunc_params_out.per_element_masks};
+      std::lock_guard<std::mutex> lk(mu);
+      auto it = cache_map.find(key);
+      if (it == cache_map.end()) {
+        std::mt19937_64 rng_out(0x6f757474ull);  // "outt"
+        auto res = std::make_shared<compiler::TruncationLoweringResult>(
+            compiler::lower_truncation_gate(ctx->trunc_backend(), rng_out, trunc_params_out, Y_share.numel()));
+        it = cache_map.emplace(key, std::move(res)).first;
+      } else if (party == 0) {
+        runtime::bench::charge_offline_bytes(runtime::bench::truncation_lowering_cost(*it->second));
+      }
+      trunc_out_bundle = it->second;
+    } else {
+      std::mt19937_64 rng_out(0x6f757474ull);  // "outt"
+      trunc_out_bundle = std::make_shared<compiler::TruncationLoweringResult>(
+          compiler::lower_truncation_gate(ctx->trunc_backend(), rng_out, trunc_params_out, Y_share.numel()));
+    }
+  }
   {
     runtime::PhaseResources truncR{};
     runtime::ProtoChanFromNet pch(*pfss_nc);
@@ -1619,7 +1762,7 @@ void attention_forward(const AttentionConfig& cfg,
     pe->begin_phase(runtime::PhaseExecutor::Phase::kOutProj);
     enter_phase();
     pe->add_task(std::make_unique<runtime::TruncTask>(
-        &trunc_out_bundle,
+        trunc_out_bundle.get(),
         std::span<const uint64_t>(Y_share.data, Y_share.numel()),
         std::span<uint64_t>(Y_share.data, Y_share.numel())));
     pe->run(truncR);

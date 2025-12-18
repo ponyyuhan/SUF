@@ -1,0 +1,14 @@
+{
+  "models": ["gpt2"],
+  "seq_lens": [128],
+  "batch_sizes": [1],
+  "backends": ["gpu"],
+  "n_iters": 3,
+  "sigma_root": "external/sigma_ezpc/GPU-MPC/experiments/sigma",
+  "sigma_binary": "sigma",
+  "sigma_cpu_threads": 64,
+  "results_dir": "bench/results/gpt2",
+  "suf_binary": "build_ninja/bench_suf_transformer",
+  "suf_extra_args": ["--open-pack", "1", "--omp-threads", "8", "--gelu-const", "1", "--gelu-const-segments", "256"],
+  "notes": "End-to-end comparison on GPT-2 (seq=128): Sigma GPU vs SUF GPU."
+}

@@ -53,6 +53,7 @@ class MatmulTask final : public detail::PhaseTask {
         // Form D (A - a) and E (B - b) for all products needed.
         size_t total = static_cast<size_t>(M_) * static_cast<size_t>(N_) * static_cast<size_t>(K_);
         buf_de_.resize(2 * total);
+        #pragma omp parallel for collapse(3) schedule(static)
         for (int m = 0; m < M_; ++m) {
           for (int n = 0; n < N_; ++n) {
             for (int k = 0; k < K_; ++k) {
@@ -65,7 +66,7 @@ class MatmulTask final : public detail::PhaseTask {
             }
           }
         }
-        h_open_ = R.opens->enqueue(buf_de_);
+        h_open_ = R.opens->enqueue(buf_de_, OpenKind::kBeaver);
         st_ = St::WaitOpen;
         return detail::Need::Open;
       }
@@ -77,7 +78,7 @@ class MatmulTask final : public detail::PhaseTask {
           throw std::runtime_error("MatmulTask: opened size mismatch");
         }
         // Reconstruct all products and accumulate into out.
-        std::vector<uint64_t> accum(out_.size(), 0);
+        #pragma omp parallel for collapse(2) schedule(static)
         for (int m = 0; m < M_; ++m) {
           for (int n = 0; n < N_; ++n) {
             uint64_t acc = 0;

@@ -17,6 +17,8 @@
 #include "gates/tables/rsqrt_piecewise_affine_init.hpp"
 #include "suf/suf_silu_builders.hpp"
 #include "runtime/phase_tasks.hpp"
+#include "runtime/bench_accounting.hpp"
+#include "runtime/bench_key_cost.hpp"
 
 namespace nn {
 
@@ -110,6 +112,10 @@ class CachedRowBroadcastTripleProvider : public runtime::RowBroadcastTripleProvi
     const auto& A = (party_ == 0) ? mat.A0 : mat.A1;
     const auto& B = (party_ == 0) ? mat.B0 : mat.B1;
     const auto& C = (party_ == 0) ? mat.C0 : mat.C1;
+    {
+      uint64_t bytes = static_cast<uint64_t>(A.size() + B.size() + C.size()) * sizeof(uint64_t);
+      runtime::bench::add_offline_bytes(runtime::bench::OfflineBytesKind::RowBroadcastTriple, bytes);
+    }
     return {std::span<const uint64_t>(A.data(), A.size()),
             std::span<const uint64_t>(B.data(), B.size()),
             std::span<const uint64_t>(C.data(), C.size())};
@@ -128,7 +134,11 @@ static std::vector<proto::BeaverTriple64Share>& ensure_cached_triples(
     size_t count,
     int party) {
   auto it = cache.find(count);
-  if (it != cache.end()) return it->second;
+  if (it != cache.end()) {
+    runtime::bench::add_offline_bytes(runtime::bench::OfflineBytesKind::BeaverTriple,
+                                      static_cast<uint64_t>(count) * static_cast<uint64_t>(sizeof(proto::BeaverTriple64Share)));
+    return it->second;
+  }
   std::mt19937_64 rng(seed_base ^ static_cast<uint64_t>(count));
   std::vector<proto::BeaverTriple64Share> triples(count);
   for (auto& tri : triples) {
@@ -144,10 +154,13 @@ static std::vector<proto::BeaverTriple64Share>& ensure_cached_triples(
                                                    proto::sub_mod(c, c0)};
   }
   auto [ins_it, _] = cache.emplace(count, std::move(triples));
+  runtime::bench::add_offline_bytes(runtime::bench::OfflineBytesKind::BeaverTriple,
+                                    static_cast<uint64_t>(count) * static_cast<uint64_t>(sizeof(proto::BeaverTriple64Share)));
   return ins_it->second;
 }
 
 inline void ensure_beaver_triples(gates::CompositeKeyPair& kp, size_t need, std::mt19937_64& rng) {
+  const size_t before = kp.k0.triples.size();
   auto fill = [&](std::vector<proto::BeaverTriple64Share>& dst0,
                   std::vector<proto::BeaverTriple64Share>& dst1) {
     while (dst0.size() < need || dst1.size() < need) {
@@ -165,6 +178,12 @@ inline void ensure_beaver_triples(gates::CompositeKeyPair& kp, size_t need, std:
     }
   };
   fill(kp.k0.triples, kp.k1.triples);
+  const size_t after = kp.k0.triples.size();
+  if (after > before) {
+    uint64_t bytes =
+        static_cast<uint64_t>(after - before) * static_cast<uint64_t>(sizeof(proto::BeaverTriple64Share));
+    runtime::bench::add_offline_bytes(runtime::bench::OfflineBytesKind::BeaverTriple, bytes);
+  }
 }
 
   // Build a SUF that emits affine-init coefficients adjusted for fixed-point
@@ -335,7 +354,8 @@ static std::shared_ptr<LayerNormMaterial> get_cached_layernorm_material(proto::P
                                                                         int cols,
                                                                         int rsqrt_iters,
                                                                         double eps,
-                                                                        double vmax) {
+                                                                        double vmax,
+                                                                        int party) {
   static std::mutex mu;
   static std::unordered_map<LayerNormMatKey, std::shared_ptr<LayerNormMaterial>, LayerNormMatKeyHash> cache;
 
@@ -343,7 +363,29 @@ static std::shared_ptr<LayerNormMaterial> get_cached_layernorm_material(proto::P
 
   std::lock_guard<std::mutex> lk(mu);
   auto it = cache.find(key);
-  if (it != cache.end()) return it->second;
+  if (it != cache.end()) {
+    if (party == 0) {
+      runtime::bench::OfflineBytesArray cost{};
+      auto add = [&](const runtime::bench::OfflineBytesArray& x) {
+        for (size_t i = 0; i < cost.size(); ++i) cost[i] += x[i];
+      };
+      auto add_rsqrt = [&](const RsqrtTaskMaterial& r) {
+        add(runtime::bench::composite_keypair_cost(r.keys));
+        add(runtime::bench::truncation_lowering_cost(r.trunc_f));
+        add(runtime::bench::truncation_lowering_cost(r.trunc_2f));
+      };
+      add(runtime::bench::truncation_lowering_cost(it->second->mean_faithful));
+      add(runtime::bench::truncation_lowering_cost(it->second->mean_gap));
+      add(runtime::bench::truncation_lowering_cost(it->second->var_faithful));
+      add(runtime::bench::truncation_lowering_cost(it->second->var_gap));
+      add(runtime::bench::truncation_lowering_cost(it->second->norm_faithful));
+      add(runtime::bench::truncation_lowering_cost(it->second->norm_gap));
+      add_rsqrt(it->second->rsqrt1);
+      add_rsqrt(it->second->rsqrt2);
+      runtime::bench::charge_offline_bytes(cost);
+    }
+    return it->second;
+  }
 
   auto mat = std::make_shared<LayerNormMaterial>();
 
@@ -554,7 +596,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   std::shared_ptr<LayerNormMaterial> ln_cache;
   LayerNormMaterial ln_local;
   if (bench_cache_enabled()) {
-    ln_cache = get_cached_layernorm_material(backend, fb, rows, cols, rsqrt_iters, eps, /*vmax=*/16.0);
+    ln_cache = get_cached_layernorm_material(backend, fb, rows, cols, rsqrt_iters, eps, /*vmax=*/16.0, party);
   } else {
     // Shared trunc bundles for LN.
     std::mt19937_64 rng_trunc(0x6c6e7472ull);

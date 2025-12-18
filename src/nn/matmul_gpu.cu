@@ -6,6 +6,7 @@
 #include <cstring>
 #include <mutex>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace {
 
@@ -111,6 +112,27 @@ __global__ void matmul_publicW_tiled(const uint64_t* __restrict__ X,
 }
 
 struct MatmulScratch {
+  struct HostBufKey {
+    const void* host = nullptr;
+    size_t bytes = 0;
+    bool operator==(const HostBufKey& o) const { return host == o.host && bytes == o.bytes; }
+  };
+  struct HostBufKeyHash {
+    size_t operator()(const HostBufKey& k) const noexcept {
+      size_t h = 1469598103934665603ull;
+      auto mix = [&](size_t v) {
+        h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+      };
+      mix(reinterpret_cast<size_t>(k.host));
+      mix(static_cast<size_t>(k.bytes));
+      return h;
+    }
+  };
+  struct DevBuf {
+    void* d = nullptr;
+    size_t bytes = 0;
+  };
+
   uint64_t* dX = nullptr;
   int64_t* dW = nullptr;
   int64_t* dB = nullptr;
@@ -121,13 +143,14 @@ struct MatmulScratch {
   size_t y_cap = 0;
   const void* last_x_host = nullptr;
   size_t last_x_bytes = 0;
-  const void* last_w_host = nullptr;
-  size_t last_w_bytes = 0;
-  const void* last_b_host = nullptr;
-  size_t last_b_bytes = 0;
   cudaEvent_t ready = nullptr;  // signals when scratch buffers are safe to reuse
   bool ready_recorded = false;
   std::mutex mu;
+
+  std::unordered_map<HostBufKey, DevBuf, HostBufKeyHash> w_cache;
+  std::unordered_map<HostBufKey, DevBuf, HostBufKeyHash> b_cache;
+  size_t w_cache_bytes = 0;
+  size_t b_cache_bytes = 0;
 
   bool ensure_alloc(size_t bytes, void** ptr, size_t& cap) {
     if (bytes <= cap) return true;
@@ -142,6 +165,20 @@ struct MatmulScratch {
     return true;
   }
 
+  template <typename MapT>
+  void clear_cache(MapT& m, size_t& total_bytes) {
+    for (auto& kv : m) {
+      if (kv.second.d) cudaFree(kv.second.d);
+    }
+    m.clear();
+    total_bytes = 0;
+  }
+
+  void clear_all_caches() {
+    clear_cache(w_cache, w_cache_bytes);
+    clear_cache(b_cache, b_cache_bytes);
+  }
+
   void release() {
     if (dX) cudaFree(dX);
     if (dW) cudaFree(dW);
@@ -149,8 +186,9 @@ struct MatmulScratch {
     if (dY) cudaFree(dY);
     dX = nullptr; dW = nullptr; dB = nullptr; dY = nullptr;
     x_cap = w_cap = b_cap = y_cap = 0;
-    last_x_host = last_w_host = last_b_host = nullptr;
-    last_x_bytes = last_w_bytes = last_b_bytes = 0;
+    last_x_host = nullptr;
+    last_x_bytes = 0;
+    clear_all_caches();
     if (ready) {
       cudaEventDestroy(ready);
       ready = nullptr;
@@ -259,17 +297,12 @@ bool matmul_publicW_gpu(const TensorView<uint64_t>& X_share,
 
   bool ok = true;
   ok &= sc.ensure_alloc(sizeof(uint64_t) * batch * M * K, reinterpret_cast<void**>(&sc.dX), sc.x_cap);
-  ok &= sc.ensure_alloc(sizeof(int64_t) * W_public.shape[0] * W_public.shape[1], reinterpret_cast<void**>(&sc.dW), sc.w_cap);
-  if (params.bias) {
-    ok &= sc.ensure_alloc(sizeof(int64_t) * params.bias->size(), reinterpret_cast<void**>(&sc.dB), sc.b_cap);
-  }
   ok &= sc.ensure_alloc(sizeof(uint64_t) * total_out, reinterpret_cast<void**>(&sc.dY), sc.y_cap);
   if (!ok) {
     sc.release();
     return false;
   }
   size_t X_bytes = sizeof(uint64_t) * batch * M * K;
-  size_t W_bytes = sizeof(int64_t) * W_public.shape[0] * W_public.shape[1];
   const bool cache_x = params.cache_input || (std::getenv("SUF_MATMUL_GPU_CACHE_X") != nullptr);
   const bool cache_w = params.cache_weights || (std::getenv("SUF_MATMUL_GPU_CACHE_W") != nullptr);
   const bool cache_b = params.cache_bias || (std::getenv("SUF_MATMUL_GPU_CACHE_B") != nullptr);
@@ -278,43 +311,84 @@ bool matmul_publicW_gpu(const TensorView<uint64_t>& X_share,
     sc.last_x_host = X_share.data;
     sc.last_x_bytes = X_bytes;
   }
-  if (!cache_w || W_public.data != sc.last_w_host || W_bytes != sc.last_w_bytes) {
-    ok &= check(cudaMemcpyAsync(sc.dW, W_public.data, W_bytes, cudaMemcpyHostToDevice, stream));
-    sc.last_w_host = W_public.data;
-    sc.last_w_bytes = W_bytes;
+  const size_t W_bytes = sizeof(int64_t) * W_public.shape[0] * W_public.shape[1];
+  auto cache_max_bytes = [&]() -> size_t {
+    const char* env = std::getenv("SUF_MATMUL_GPU_CACHE_MAX_MB");
+    if (!env) return size_t(2048ull) * 1024ull * 1024ull;
+    char* endp = nullptr;
+    unsigned long long mb = std::strtoull(env, &endp, 10);
+    if (!endp || endp == env) return size_t(2048ull) * 1024ull * 1024ull;
+    return static_cast<size_t>(mb) * 1024ull * 1024ull;
+  }();
+
+  auto cached_upload = [&](std::unordered_map<MatmulScratch::HostBufKey, MatmulScratch::DevBuf, MatmulScratch::HostBufKeyHash>& m,
+                           size_t& total,
+                           const void* host,
+                           size_t bytes,
+                           cudaStream_t st) -> void* {
+    if (bytes == 0 || host == nullptr) return nullptr;
+    MatmulScratch::HostBufKey key{host, bytes};
+    auto it = m.find(key);
+    if (it != m.end()) return it->second.d;
+    if (cache_max_bytes > 0 && bytes > cache_max_bytes) return nullptr;
+    if (cache_max_bytes > 0 && total + bytes > cache_max_bytes) {
+      sc.clear_all_caches();
+    }
+    void* d = nullptr;
+    if (cudaMalloc(&d, bytes) != cudaSuccess) return nullptr;
+    if (!check(cudaMemcpyAsync(d, host, bytes, cudaMemcpyHostToDevice, st))) {
+      cudaFree(d);
+      return nullptr;
+    }
+    m.emplace(key, MatmulScratch::DevBuf{d, bytes});
+    total += bytes;
+    return d;
+  };
+
+  const int64_t* dW = nullptr;
+  if (cache_w) {
+    dW = reinterpret_cast<const int64_t*>(
+        cached_upload(sc.w_cache, sc.w_cache_bytes, W_public.data, W_bytes, stream));
   }
+  if (!dW) {
+    ok &= sc.ensure_alloc(W_bytes, reinterpret_cast<void**>(&sc.dW), sc.w_cap);
+    ok &= check(cudaMemcpyAsync(sc.dW, W_public.data, W_bytes, cudaMemcpyHostToDevice, stream));
+    dW = sc.dW;
+  }
+
+  const int64_t* dB = nullptr;
   if (params.bias) {
-    size_t B_bytes = sizeof(int64_t) * params.bias->size();
-    if (!cache_b || params.bias->data() != sc.last_b_host || B_bytes != sc.last_b_bytes) {
+    const size_t B_bytes = sizeof(int64_t) * params.bias->size();
+    if (cache_b) {
+      dB = reinterpret_cast<const int64_t*>(
+          cached_upload(sc.b_cache, sc.b_cache_bytes, params.bias->data(), B_bytes, stream));
+    }
+    if (!dB) {
+      ok &= sc.ensure_alloc(B_bytes, reinterpret_cast<void**>(&sc.dB), sc.b_cap);
       ok &= check(cudaMemcpyAsync(sc.dB, params.bias->data(), B_bytes,
                                   cudaMemcpyHostToDevice, stream));
-      sc.last_b_host = params.bias->data();
-      sc.last_b_bytes = B_bytes;
+      dB = sc.dB;
     }
-  } else {
-    sc.dB = nullptr;
-    sc.last_b_host = nullptr;
-    sc.last_b_bytes = 0;
   }
   if (!ok) {
     sc.release();
     return false;
   }
-  int64_t* bias_ptr = params.bias ? sc.dB : nullptr;
+  int64_t* bias_ptr = params.bias ? const_cast<int64_t*>(dB) : nullptr;
   bool launched = false;
   TileMode mode = tile_mode_from_env();
   // Heuristic: prefer wider tiles for large N/K, allow env override; fall back to narrower.
   if ((mode == TileMode::Wide) || (mode == TileMode::Auto && N >= 128 && K >= 128)) {
     launched = launch_matmul_kernel<16, 64, 64, 4>(
-        sc.dX, sc.dW, bias_ptr, sc.dY, batch, M, K, N, params.w_transposed, stream);
+        sc.dX, dW, bias_ptr, sc.dY, batch, M, K, N, params.w_transposed, stream);
   }
   if (!launched) {
     launched = launch_matmul_kernel<16, 32, 64, 2>(
-        sc.dX, sc.dW, bias_ptr, sc.dY, batch, M, K, N, params.w_transposed, stream);
+        sc.dX, dW, bias_ptr, sc.dY, batch, M, K, N, params.w_transposed, stream);
   }
   if (!launched) {
     launched = launch_matmul_kernel<16, 32, 32, 2>(
-        sc.dX, sc.dW, bias_ptr, sc.dY, batch, M, K, N, params.w_transposed, stream);
+        sc.dX, dW, bias_ptr, sc.dY, batch, M, K, N, params.w_transposed, stream);
   }
   if (!launched) {
     sc.release();

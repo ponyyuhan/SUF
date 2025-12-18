@@ -5,6 +5,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EZPC_ROOT="${ROOT}/external/sigma_ezpc"
 SIGMA_ROOT="${EZPC_ROOT}/GPU-MPC"
+JOBS="${SIGMA_JOBS:-16}"
+
+if [[ "${JOBS}" -le 0 ]]; then
+  JOBS=16
+fi
+
+GEN=""
+if command -v ninja >/dev/null 2>&1; then
+  GEN="-GNinja"
+fi
 
 detect_cuda_bin() {
   if [[ -n "${CUDA_BIN:-}" ]]; then
@@ -72,7 +82,7 @@ if [[ ! -d "${SIGMA_ROOT}" ]]; then
 fi
 
 echo "[sigma] updating submodules"
-(cd "${SIGMA_ROOT}" && git submodule update --init --recursive)
+(cd "${SIGMA_ROOT}" && git submodule update --init --recursive --progress)
 
 PATCH="${ROOT}/scripts/patches/sigma_gpu_mpc.patch"
 if [[ -f "${PATCH}" ]]; then
@@ -108,12 +118,12 @@ fi
 echo "[sigma] building Sytorch (CUDA + g++ host)"
 SYTORCH_BUILD="${SIGMA_ROOT}/ext/sytorch/build"
 mkdir -p "${SYTORCH_BUILD}"
-"${CMAKE_BIN}" -S "${SIGMA_ROOT}/ext/sytorch" -B "${SYTORCH_BUILD}" \
+"${CMAKE_BIN}" ${GEN} -S "${SIGMA_ROOT}/ext/sytorch" -B "${SYTORCH_BUILD}" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CUDA_COMPILER="${CUDA_BIN}" \
   -DCMAKE_CUDA_HOST_COMPILER="${HOST_CXX}" \
   -DCUDAToolkit_ROOT="${CUDA_ROOT}"
-"${CMAKE_BIN}" --build "${SYTORCH_BUILD}" --target sytorch -j"$(nproc)"
+"${CMAKE_BIN}" --build "${SYTORCH_BUILD}" --target sytorch -j"${JOBS}"
 
 echo "[sigma] building CUTLASS (arch=${GPU_ARCH})"
 CUTLASS_BUILD="${SIGMA_ROOT}/ext/cutlass/build"
@@ -122,12 +132,12 @@ if [[ -f "${CUTLASS_LIB}" ]]; then
   echo "[sigma] CUTLASS already built: ${CUTLASS_LIB}"
 else
   mkdir -p "${CUTLASS_BUILD}"
-  "${CMAKE_BIN}" -S "${SIGMA_ROOT}/ext/cutlass" -B "${CUTLASS_BUILD}" \
+  "${CMAKE_BIN}" ${GEN} -S "${SIGMA_ROOT}/ext/cutlass" -B "${CUTLASS_BUILD}" \
     -DCUTLASS_NVCC_ARCHS="${GPU_ARCH}" \
     -DCMAKE_CUDA_COMPILER_WORKS=1 \
     -DCMAKE_CUDA_COMPILER="${CUDA_BIN}"
   # Build the CUTLASS library artifacts SIGMA links against (not built by default).
-  "${CMAKE_BIN}" --build "${CUTLASS_BUILD}" --target cutlass_lib -j"$(nproc)"
+  "${CMAKE_BIN}" --build "${CUTLASS_BUILD}" --target cutlass_lib -j"${JOBS}"
 fi
 
 echo "[sigma] building SIGMA binary"

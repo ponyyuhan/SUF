@@ -91,6 +91,16 @@ void launch_row_sum_kernel(const uint64_t* d_mat,
                            uint64_t* d_out_rows,
                            void* stream /* cudaStream_t */);
 
+// Row reduction for ragged packed rows: `d_vals` stores concatenated rows
+// back-to-back, and `d_row_offsets` stores prefix sums of lengths with
+// `d_row_offsets[r]` as start and `d_row_offsets[r+1]` as end.
+// All pointers are device. `d_row_offsets` must have length rows+1.
+void launch_row_sum_ragged_kernel(const uint64_t* d_vals,
+                                  const int* d_row_offsets,
+                                  int rows,
+                                  uint64_t* d_out_rows,
+                                  void* stream /* cudaStream_t */);
+
 // Row mean: mean = sum / len (len from valid_lens or cols). Operates mod 2^64.
 void launch_row_mean_kernel(const uint64_t* d_mat,
                             int rows,

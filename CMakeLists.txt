@@ -31,6 +31,13 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 add_library(suf_fss INTERFACE)
 target_include_directories(suf_fss INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(suf_fss INTERFACE OpenSSL::Crypto)
+if(OpenMP_FOUND)
+  if(TARGET OpenMP::OpenMP_CXX)
+    target_link_libraries(suf_fss INTERFACE OpenMP::OpenMP_CXX)
+  elseif(TARGET OpenMP::OpenMP_C)
+    target_link_libraries(suf_fss INTERFACE OpenMP::OpenMP_C)
+  endif()
+endif()
 
 option(SUF_USE_MYL7_FSS "Enable myl7/fss backend adapter" ON)
 option(SUF_FETCH_MYL7_FSS "Fetch myl7/fss from GitHub if not found" ON)
@@ -277,6 +284,7 @@ add_library(nn_ops STATIC
   src/nn/transformer_layer.cpp
   src/nn/model_specs.cpp
   src/gates/postproc_hooks.cpp
+  src/runtime/bench_accounting.cpp
   src/runtime/pfss_superbatch.cpp
   src/runtime/open_collector.cpp
   src/runtime/phase_executor.cpp)
@@ -293,6 +301,10 @@ endif()
 add_executable(bench_llm_gates src/bench/bench_llm_gates.cpp)
 target_include_directories(bench_llm_gates PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_link_libraries(bench_llm_gates PRIVATE suf_fss ${MYL7_LINK_LIBS})
+
+add_executable(bench_accuracy_primitives src/bench/bench_accuracy_primitives.cpp)
+target_include_directories(bench_accuracy_primitives PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(bench_accuracy_primitives PRIVATE nn_ops suf_fss ${MYL7_LINK_LIBS})
 
 add_executable(bench_attention src/bench/bench_attention.cpp)
 target_include_directories(bench_attention PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)

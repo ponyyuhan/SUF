@@ -3,7 +3,7 @@
   "seq_lens": [128],
   "batch_sizes": [1],
   "backends": ["gpu"],
-  "n_iters": 2,
+  "n_iters": 3,
   "sigma_root": "external/sigma_ezpc/GPU-MPC/experiments/sigma",
   "sigma_binary": "sigma",
   "sigma_cpu_threads": 64,
@@ -13,5 +13,12 @@
   "results_dir": "bench/results/large_models",
   "suf_binary": "build_ninja/bench_suf_transformer",
   "suf_extra_args": ["--open-pack", "1"],
+  "suf_extra_args_by_model": {
+    "bert-base": ["--omp-threads", "8", "--gelu-const", "1", "--gelu-const-segments", "256"],
+    "bert-large": ["--omp-threads", "16", "--gelu-const", "1", "--gelu-const-segments", "256"],
+    "gpt2": ["--omp-threads", "8", "--gelu-const", "1", "--gelu-const-segments", "256"],
+    "gpt-neo-1.3b": ["--omp-threads", "16", "--gelu-const", "1", "--gelu-const-segments", "256"]
+  },
   "notes": "End-to-end transformer forward-pass comparison (time + online comm + offline key material). Sigma runs two local parties on 127.0.0.1."
 }
+

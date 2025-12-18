@@ -9,6 +9,6 @@
   "sigma_cpu_threads": 64,
   "results_dir": "bench/results/bert_base",
   "suf_binary": "build_ninja/bench_suf_transformer",
+  "suf_extra_args": ["--open-pack", "1"],
   "notes": "End-to-end comparison on BERT-base (seq=128): Sigma GPU vs SUF CPU."
 }
-

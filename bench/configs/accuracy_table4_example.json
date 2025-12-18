@@ -1,0 +1,30 @@
+{
+  "n_bits": 50,
+  "frac_bits": 12,
+  "glue": [
+    {
+      "task": "sst2",
+      "model_id": "textattack/bert-base-uncased-SST-2"
+    },
+    {
+      "task": "mrpc",
+      "model_id": "textattack/bert-base-uncased-MRPC"
+    },
+    {
+      "task": "qnli",
+      "model_id": "textattack/bert-base-uncased-QNLI"
+    }
+  ],
+  "lambada": [
+    {
+      "model_id": "gpt2"
+    },
+    {
+      "model_id": "EleutherAI/gpt-neo-1.3B"
+    },
+    {
+      "model_id": "meta-llama/Llama-2-7b-hf"
+    }
+  ]
+}
+

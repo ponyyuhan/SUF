@@ -207,6 +207,33 @@ __global__ void row_sum_kernel(const uint64_t* __restrict__ mat,
   if (tid == 0) out_rows[r] = buf[0];
 }
 
+// Row-sum reduction for ragged packed rows: one block per row, row data is
+// stored in a single packed array with row_offsets prefix sums.
+__global__ void row_sum_ragged_kernel(const uint64_t* __restrict__ vals,
+                                      const int* __restrict__ row_offsets,
+                                      int rows,
+                                      uint64_t* __restrict__ out_rows) {
+  int r = blockIdx.x;
+  if (r >= rows) return;
+  int start = row_offsets ? row_offsets[r] : 0;
+  int end = row_offsets ? row_offsets[r + 1] : 0;
+  if (start < 0) start = 0;
+  if (end < start) end = start;
+  uint64_t acc = 0;
+  for (int i = start + threadIdx.x; i < end; i += blockDim.x) {
+    acc = add_mod(acc, vals[static_cast<size_t>(i)]);
+  }
+  __shared__ uint64_t buf[256];
+  int tid = threadIdx.x;
+  buf[tid] = acc;
+  __syncthreads();
+  for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+    if (tid < stride) buf[tid] = add_mod(buf[tid], buf[tid + stride]);
+    __syncthreads();
+  }
+  if (tid == 0) out_rows[r] = buf[0];
+}
+
 __global__ void row_mean_kernel(const uint64_t* __restrict__ mat,
                                 int rows,
                                 int cols,
@@ -417,6 +444,22 @@ extern "C" void launch_row_sum_kernel(const uint64_t* d_mat,
   dim3 grid(rows);
   dim3 block(256);
   row_sum_kernel<<<grid, block, 0, reinterpret_cast<cudaStream_t>(stream)>>>(d_mat, rows, cols, d_valid_lens, d_out_rows);
+#endif
+}
+
+extern "C" void launch_row_sum_ragged_kernel(const uint64_t* d_vals,
+                                              const int* d_row_offsets,
+                                              int rows,
+                                              uint64_t* d_out_rows,
+                                              void* stream) {
+#ifndef SUF_HAVE_CUDA
+  (void)d_vals; (void)d_row_offsets; (void)rows; (void)d_out_rows; (void)stream;
+#else
+  if (rows <= 0) return;
+  dim3 grid(rows);
+  dim3 block(256);
+  row_sum_ragged_kernel<<<grid, block, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+      d_vals, d_row_offsets, rows, d_out_rows);
 #endif
 }
 

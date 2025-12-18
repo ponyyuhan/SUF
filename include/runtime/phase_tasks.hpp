@@ -102,7 +102,7 @@ class MulTask final : public detail::PhaseTask {
           diff_[x_.size() + i] = proto::sub_mod(y_[i], triples_[i].b);
         }
         if (R.opens) {
-          h_ = R.opens->enqueue(diff_);
+          h_ = R.opens->enqueue(diff_, OpenKind::kBeaver);
           st_ = St::WaitOpen;
           return detail::Need::Open;
         }
@@ -227,6 +227,7 @@ class MulTask final : public detail::PhaseTask {
           (void)use_gpu;
 #endif
         } else {
+          #pragma omp parallel for schedule(static)
           for (size_t i = 0; i < x_.size(); ++i) {
             uint64_t d = static_cast<uint64_t>(opened_[i]);
             uint64_t e = static_cast<uint64_t>(opened_[x_.size() + i]);
@@ -384,7 +385,7 @@ class TruncTask final : public detail::PhaseTask {
           }
         }
         if (R.opens) {
-          h_open_ = R.opens->enqueue(masked_);
+          h_open_ = R.opens->enqueue(masked_, OpenKind::kMask);
           st_ = St::WaitOpen;
           return detail::Need::Open;
         }
@@ -999,7 +1000,7 @@ class RsqrtTask final : public detail::PhaseTask {
           masked_[i] = proto::add_mod(x_[i], rin);
         }
         if (!R.opens) throw std::runtime_error("RsqrtTask: no OpenCollector");
-        h_open_ = R.opens->enqueue(masked_);
+        h_open_ = R.opens->enqueue(masked_, OpenKind::kMask);
         st_ = St::WaitOpen;
         return detail::Need::Open;
       }
@@ -1347,7 +1348,7 @@ class MulRowBroadcastTask final : public detail::PhaseTask {
           buf_de_[off_e + r] = proto::sub_mod(vec_[r], triple_.B[r]);
         }
         if (!R.opens) throw std::runtime_error("MulRowBroadcastTask: no OpenCollector");
-        h_open_ = R.opens->enqueue(buf_de_);
+        h_open_ = R.opens->enqueue(buf_de_, OpenKind::kBeaver);
         st_ = St::WaitOpen;
         return detail::Need::Open;
       }
@@ -2032,7 +2033,7 @@ class CubicPolyTask final : public detail::PhaseTask {
           masked_[i] = proto::add_mod(x_[i], rin);
         }
         if (R.opens) {
-          h_open_ = R.opens->enqueue(masked_);
+          h_open_ = R.opens->enqueue(masked_, OpenKind::kMask);
           st_ = St::WaitXhatOpen;
           return detail::Need::Open;
         }
@@ -2157,7 +2158,7 @@ class CubicPolyTask final : public detail::PhaseTask {
             int64_t x_plain = static_cast<int64_t>(proto::sub_mod(static_cast<uint64_t>(opened_[i]), key_->compiled.r_in));
             int64_t out = eval_ref(x_plain, i);
             static bool logged_ref = false;
-            if (!logged_ref && R.party == 0) {
+            if (!logged_ref && R.party == 0 && std::getenv("SUF_CUBIC_TRACE")) {
               logged_ref = true;
               std::cerr << "CubicPolyTask ref eval x=" << x_plain << " out=" << out
                         << " gate=" << static_cast<int>(bundle_.gate_kind) << "\n";
@@ -2424,7 +2425,7 @@ class RecipTask final : public detail::PhaseTask {
           masked_[i] = proto::add_mod(x_[i], rin);
         }
         if (R.opens) {
-          h_open_ = R.opens->enqueue(masked_);
+          h_open_ = R.opens->enqueue(masked_, OpenKind::kMask);
           st_ = St::WaitXhatOpen;
           return detail::Need::Open;
         }

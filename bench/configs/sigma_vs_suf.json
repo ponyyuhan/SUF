@@ -9,5 +9,6 @@
   "sigma_cpu_threads": 16,
   "results_dir": "bench/results",
   "suf_binary": "build_ninja/bench_suf_transformer",
+  "suf_extra_args": ["--open-pack", "1"],
   "notes": "Sigma uses two local parties on 127.0.0.1; supported models: bert-tiny/base/large, gpt2, llama-7b/13b."
 }

@@ -11,6 +11,15 @@ namespace runtime {
 
 namespace {
 
+bool env_flag_enabled(const char* name) {
+  const char* env = std::getenv(name);
+  if (!env) return false;
+  std::string v(env);
+  std::transform(v.begin(), v.end(), v.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return !(v == "0" || v == "false" || v == "off" || v == "no");
+}
+
 int bits_needed_u64(uint64_t v) {
   int bits = 0;
   while (v) {
@@ -76,19 +85,26 @@ std::vector<uint64_t> pack_eff_bits_host(const std::vector<uint64_t>& xs, int ef
     throw std::runtime_error("OpenCollector: eff_bits out of range for pack");
   }
   if (eff_bits == 64) return xs;
-  size_t words = packed_words_host(xs.size(), eff_bits);
+  // Streaming bit pack using a 128-bit accumulator; avoids per-element div/mod.
+  const size_t words = packed_words_host(xs.size(), eff_bits);
   std::vector<uint64_t> packed(words, 0);
-  uint64_t mask = mask_bits_host(eff_bits);
+  const uint64_t mask = mask_bits_host(eff_bits);
+  unsigned __int128 acc = 0;
+  int acc_bits = 0;
+  size_t out_w = 0;
   for (size_t i = 0; i < xs.size(); ++i) {
     uint64_t v = xs[i] & mask;
-    size_t bit_idx = i * static_cast<size_t>(eff_bits);
-    size_t w = bit_idx >> 6;
-    int off = static_cast<int>(bit_idx & 63);
-    packed[w] |= (v << off);
-    int spill = off + eff_bits - 64;
-    if (spill > 0 && w + 1 < packed.size()) {
-      packed[w + 1] |= (v >> (eff_bits - spill));
+    acc |= (static_cast<unsigned __int128>(v) << acc_bits);
+    acc_bits += eff_bits;
+    while (acc_bits >= 64) {
+      if (out_w >= packed.size()) break;
+      packed[out_w++] = static_cast<uint64_t>(acc);
+      acc >>= 64;
+      acc_bits -= 64;
     }
+  }
+  if (acc_bits > 0 && out_w < packed.size()) {
+    packed[out_w++] = static_cast<uint64_t>(acc);
   }
   return packed;
 }
@@ -101,24 +117,27 @@ std::vector<uint64_t> unpack_eff_bits_host(const std::vector<uint64_t>& packed,
   }
   if (eff_bits == 64) return packed;
   std::vector<uint64_t> out(elems, 0);
-  uint64_t mask = mask_bits_host(eff_bits);
+  const uint64_t mask = mask_bits_host(eff_bits);
+  unsigned __int128 acc = 0;
+  int acc_bits = 0;
+  size_t in_w = 0;
   for (size_t i = 0; i < elems; ++i) {
-    size_t bit_idx = i * static_cast<size_t>(eff_bits);
-    size_t w = bit_idx >> 6;
-    int off = static_cast<int>(bit_idx & 63);
-    uint64_t v = (w < packed.size()) ? (packed[w] >> off) : 0ull;
-    int spill = off + eff_bits - 64;
-    if (spill > 0 && w + 1 < packed.size()) {
-      v |= (packed[w + 1] << (eff_bits - spill));
+    while (acc_bits < eff_bits) {
+      uint64_t w = (in_w < packed.size()) ? packed[in_w] : 0ull;
+      ++in_w;
+      acc |= (static_cast<unsigned __int128>(w) << acc_bits);
+      acc_bits += 64;
     }
-    out[i] = v & mask;
+    out[i] = static_cast<uint64_t>(acc) & mask;
+    acc >>= eff_bits;
+    acc_bits -= eff_bits;
   }
   return out;
 }
 
 }  // namespace
 
-OpenHandle OpenCollector::enqueue(const std::vector<uint64_t>& diff) {
+OpenHandle OpenCollector::enqueue(const std::vector<uint64_t>& diff, OpenKind kind) {
   size_t new_pending = pending_words_ + diff.size();
   if (limits_.max_pending_words > 0 && new_pending > limits_.max_pending_words) {
     throw std::runtime_error("OpenCollector: pending open budget exceeded");
@@ -135,6 +154,8 @@ OpenHandle OpenCollector::enqueue(const std::vector<uint64_t>& diff) {
   r.slot = slot;
   r.offset = h.offset;
   r.len = h.len;
+  r.kind = (static_cast<size_t>(kind) < static_cast<size_t>(OpenKind::kCount)) ? kind
+                                                                               : OpenKind::kOther;
   requests_.push_back(std::move(r));
   pending_words_ = new_pending;
   if (pending_words_ > stats_.max_pending_words) {
@@ -146,13 +167,14 @@ OpenHandle OpenCollector::enqueue(const std::vector<uint64_t>& diff) {
 void OpenCollector::flush(int party, net::Chan& ch) {
   if (requests_.empty()) return;
   auto t0 = std::chrono::steady_clock::now();
-  const bool want_pack = (std::getenv("SUF_OPEN_PACK_EFFBITS") != nullptr);
-  const bool signed_pack = (std::getenv("SUF_OPEN_PACK_SIGNED") != nullptr);
+  const bool want_pack = env_flag_enabled("SUF_OPEN_PACK_EFFBITS");
+  const bool signed_pack = env_flag_enabled("SUF_OPEN_PACK_SIGNED");
   const int max_pack_bits = []() {
     const char* env = std::getenv("SUF_OPEN_PACK_MAX_BITS");
-    if (!env) return 48;
+    // Default to 56 so 50–51 bit rings (SIGMA-style fixed-point) are packable.
+    if (!env) return 56;
     int v = std::atoi(env);
-    if (v <= 0 || v > 64) return 48;
+    if (v <= 0 || v > 64) return 56;
     return v;
   }();
   const bool pack = [&]() {
@@ -169,17 +191,20 @@ void OpenCollector::flush(int party, net::Chan& ch) {
   }();
 
   size_t total_words = 0;
+  std::array<size_t, static_cast<size_t>(OpenKind::kCount)> words_by_kind{};
+  for (const auto& req : requests_) {
+    if (!req.slot) {
+      throw std::runtime_error("OpenCollector: missing result slot");
+    }
+    if (req.offset + req.len > req.slot->opened.size()) {
+      throw std::runtime_error("OpenCollector: request out of range");
+    }
+    total_words += req.len;
+    const size_t k = static_cast<size_t>(req.kind);
+    if (k < words_by_kind.size()) words_by_kind[k] += req.len;
+  }
   if (!pack) {
     // Fast-path: one bulk exchange per flush, then scatter results.
-    for (const auto& req : requests_) {
-      if (!req.slot) {
-        throw std::runtime_error("OpenCollector: missing result slot");
-      }
-      if (req.offset + req.len > req.slot->opened.size()) {
-        throw std::runtime_error("OpenCollector: request out of range");
-      }
-      total_words += req.len;
-    }
     std::vector<uint64_t> send_flat;
     send_flat.reserve(total_words);
     for (const auto& req : requests_) {
@@ -205,6 +230,9 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     requests_.clear();
     stats_.flushes += 1;
     stats_.opened_words += total_words;
+    for (size_t k = 0; k < words_by_kind.size(); ++k) {
+      stats_.opened_words_by_kind[k] += words_by_kind[k];
+    }
     pending_words_ = 0;
     auto t1 = std::chrono::steady_clock::now();
     stats_.flush_ns += static_cast<uint64_t>(
@@ -212,92 +240,71 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     return;
   }
 
+  // Packed path: pack the entire flush with a single bitwidth decision.
+  // This mirrors Sigma’s “communication packing”: values live in Z_{2^n}, so we can safely pack to `n` bits.
+  std::vector<uint64_t> send_flat;
+  send_flat.reserve(total_words);
   for (const auto& req : requests_) {
-    if (!req.slot) {
-      throw std::runtime_error("OpenCollector: missing result slot");
-    }
-    if (req.offset + req.len > req.slot->opened.size()) {
-      throw std::runtime_error("OpenCollector: request out of range");
-    }
-    if (pack) {
-      int eff_need = 64;
-      if (!signed_pack) {
-        uint64_t or_acc = 0;
-        for (auto v : req.diff) or_acc |= v;
-        eff_need = bits_needed_u64(or_acc);
-      } else {
-        const int n_bits = proto::ring_bits();
-        int need = 1;
-        for (auto v : req.diff) {
-          need = std::max(need, bits_needed_twos_complement(v, n_bits));
-          if (need >= 64) break;
-        }
-        eff_need = need;
-      }
-      int eff_local =
-          (eff_need > 0 && eff_need < 64 && eff_need <= max_pack_bits) ? eff_need : 64;
-      int eff_remote = 0;
-      if (party == 0) {
-        ch.send_u64(static_cast<uint64_t>(eff_local));
-        eff_remote = static_cast<int>(ch.recv_u64());
-      } else {
-        eff_remote = static_cast<int>(ch.recv_u64());
-        ch.send_u64(static_cast<uint64_t>(eff_local));
-      }
-      int eff = std::max(eff_local, eff_remote);
-      if (eff > 0 && eff < 64) {
-        std::vector<uint64_t> packed_local = pack_eff_bits_host(req.diff, eff);
-        std::vector<uint64_t> packed_remote(packed_local.size(), 0);
-        if (party == 0) {
-          if (!packed_local.empty()) ch.send_u64s(packed_local.data(), packed_local.size());
-          if (!packed_remote.empty()) ch.recv_u64s(packed_remote.data(), packed_remote.size());
-        } else {
-          if (!packed_remote.empty()) ch.recv_u64s(packed_remote.data(), packed_remote.size());
-          if (!packed_local.empty()) ch.send_u64s(packed_local.data(), packed_local.size());
-        }
-        auto other = unpack_eff_bits_host(packed_remote, eff, req.len);
-        if (signed_pack) {
-          const int n_bits = proto::ring_bits();
-          for (auto& w : other) w = sign_extend_to_nbits(w, eff, n_bits);
-        }
-        for (size_t i = 0; i < req.len; ++i) {
-          uint64_t opened = proto::add_mod(req.diff[i], other[i]);
-          req.slot->opened[req.offset + i] = proto::to_signed(opened);
-        }
-      } else {
-        std::vector<uint64_t> other(req.len, 0);
-        if (party == 0) {
-          if (!req.diff.empty()) ch.send_u64s(req.diff.data(), req.diff.size());
-          if (!other.empty()) ch.recv_u64s(other.data(), other.size());
-        } else {
-          if (!other.empty()) ch.recv_u64s(other.data(), other.size());
-          if (!req.diff.empty()) ch.send_u64s(req.diff.data(), req.diff.size());
-        }
-        for (size_t i = 0; i < req.len; ++i) {
-          uint64_t opened = proto::add_mod(req.diff[i], other[i]);
-          req.slot->opened[req.offset + i] = proto::to_signed(opened);
-        }
-      }
+    send_flat.insert(send_flat.end(), req.diff.begin(), req.diff.end());
+  }
+
+  int eff_local = 64;
+  const int n_bits = proto::ring_bits();
+  if (n_bits > 0 && n_bits < 64 && n_bits <= max_pack_bits) {
+    eff_local = n_bits;
+  }
+  int eff_remote = 0;
+  if (party == 0) {
+    ch.send_u64(static_cast<uint64_t>(eff_local));
+    eff_remote = static_cast<int>(ch.recv_u64());
+  } else {
+    eff_remote = static_cast<int>(ch.recv_u64());
+    ch.send_u64(static_cast<uint64_t>(eff_local));
+  }
+  int eff = std::max(eff_local, eff_remote);
+  if (eff <= 0 || eff > 64) eff = 64;
+
+  std::vector<uint64_t> other_flat(total_words, 0);
+  if (eff > 0 && eff < 64) {
+    std::vector<uint64_t> packed_local = pack_eff_bits_host(send_flat, eff);
+    std::vector<uint64_t> packed_remote(packed_local.size(), 0);
+    if (party == 0) {
+      if (!packed_local.empty()) ch.send_u64s(packed_local.data(), packed_local.size());
+      if (!packed_remote.empty()) ch.recv_u64s(packed_remote.data(), packed_remote.size());
     } else {
-      std::vector<uint64_t> other(req.len, 0);
-      if (party == 0) {
-        if (!req.diff.empty()) ch.send_u64s(req.diff.data(), req.diff.size());
-        if (!other.empty()) ch.recv_u64s(other.data(), other.size());
-      } else {
-        if (!other.empty()) ch.recv_u64s(other.data(), other.size());
-        if (!req.diff.empty()) ch.send_u64s(req.diff.data(), req.diff.size());
-      }
-      for (size_t i = 0; i < req.len; ++i) {
-        uint64_t opened = proto::add_mod(req.diff[i], other[i]);
-        req.slot->opened[req.offset + i] = proto::to_signed(opened);
-      }
+      if (!packed_remote.empty()) ch.recv_u64s(packed_remote.data(), packed_remote.size());
+      if (!packed_local.empty()) ch.send_u64s(packed_local.data(), packed_local.size());
+    }
+    other_flat = unpack_eff_bits_host(packed_remote, eff, total_words);
+    if (signed_pack && n_bits > 0 && n_bits <= 64) {
+      for (auto& w : other_flat) w = sign_extend_to_nbits(w, eff, n_bits);
+    }
+  } else {
+    // Fallback: no packing.
+    if (party == 0) {
+      if (!send_flat.empty()) ch.send_u64s(send_flat.data(), send_flat.size());
+      if (!other_flat.empty()) ch.recv_u64s(other_flat.data(), other_flat.size());
+    } else {
+      if (!other_flat.empty()) ch.recv_u64s(other_flat.data(), other_flat.size());
+      if (!send_flat.empty()) ch.send_u64s(send_flat.data(), send_flat.size());
+    }
+  }
+
+  size_t off = 0;
+  for (const auto& req : requests_) {
+    for (size_t i = 0; i < req.len; ++i) {
+      uint64_t opened = proto::add_mod(req.diff[i], other_flat[off + i]);
+      req.slot->opened[req.offset + i] = proto::to_signed(opened);
     }
     req.slot->ready.store(true);
-    total_words += req.len;
+    off += req.len;
   }
   requests_.clear();
   stats_.flushes += 1;
   stats_.opened_words += total_words;
+  for (size_t k = 0; k < words_by_kind.size(); ++k) {
+    stats_.opened_words_by_kind[k] += words_by_kind[k];
+  }
   pending_words_ = 0;
   auto t1 = std::chrono::steady_clock::now();
   stats_.flush_ns += static_cast<uint64_t>(

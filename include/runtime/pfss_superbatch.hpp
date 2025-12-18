@@ -243,7 +243,9 @@ class PfssSuperBatch {
     size_t pending_device_bytes = 0;  // staged device bytes if GPU stager present
   };
   const Stats& stats() const { return stats_; }
+  const Stats& total_stats() const { return total_stats_; }
   void reset_stats() { stats_ = Stats{}; }
+  void reset_total_stats() { total_stats_ = Stats{}; }
 
  private:
   struct GroupResult {
@@ -284,6 +286,7 @@ class PfssSuperBatch {
   PfssGpuStager* gpu_stager_ = nullptr;  // optional device staging surface
   bool flushed_ = false;
   Stats stats_;
+  Stats total_stats_;
   Limits limits_;
   size_t pending_jobs_ = 0;
   size_t pending_hatx_words_ = 0;

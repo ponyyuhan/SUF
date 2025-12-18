@@ -1,0 +1,18 @@
+{
+  "models": ["llama2-7b"],
+  "seq_lens": [128],
+  "batch_sizes": [1],
+  "backends": ["gpu"],
+  "n_iters": 2,
+  "sigma_root": "external/sigma_ezpc/GPU-MPC/experiments/sigma",
+  "sigma_binary": "sigma",
+  "sigma_cpu_threads": 64,
+  "sigma_model_map": {
+    "llama2-7b": "llama7b"
+  },
+  "results_dir": "bench/results/llama2_7b",
+  "suf_binary": "build_ninja/bench_suf_transformer",
+  "suf_extra_args": ["--open-pack", "1", "--omp-threads", "16"],
+  "notes": "End-to-end comparison on LLaMA2-7B (seq=128): Sigma GPU vs SUF GPU."
+}
+

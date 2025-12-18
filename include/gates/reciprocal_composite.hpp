@@ -13,6 +13,7 @@
 #include "proto/pfss_backend_batch.hpp"
 #include "gates/tables/recip_piecewise_affine_init.hpp"
 #include "suf/suf_silu_builders.hpp"  // reuse piecewise→SUF helper
+#include "runtime/bench_accounting.hpp"
 
 namespace gates {
 
@@ -36,6 +37,8 @@ inline void ensure_recips_triples(gates::CompositeKeyPair& kp,
   batch_N = std::max<size_t>(batch_N, 1);
   const size_t per_elem = per_iter_need * static_cast<size_t>(nr_iters) + 1;
   size_t need = per_elem * batch_N;
+  const size_t before0 = kp.k0.triples.size();
+  const size_t before1 = kp.k1.triples.size();
   auto fill = [&](std::vector<proto::BeaverTriple64Share>& dst0,
                   std::vector<proto::BeaverTriple64Share>& dst1) {
     while (dst0.size() < need || dst1.size() < need) {
@@ -51,6 +54,14 @@ inline void ensure_recips_triples(gates::CompositeKeyPair& kp,
     }
   };
   fill(kp.k0.triples, kp.k1.triples);
+  const size_t after0 = kp.k0.triples.size();
+  const size_t after1 = kp.k1.triples.size();
+  if (after0 > before0 || after1 > before1) {
+    const uint64_t delta0 = static_cast<uint64_t>(after0 - before0);
+    const uint64_t delta1 = static_cast<uint64_t>(after1 - before1);
+    const uint64_t bytes = std::max(delta0, delta1) * static_cast<uint64_t>(sizeof(proto::BeaverTriple64Share));
+    runtime::bench::add_offline_bytes(runtime::bench::OfflineBytesKind::BeaverTriple, bytes);
+  }
 }
 
 inline RecipTaskMaterial dealer_make_recip_task_material(proto::PfssBackendBatch& backend,

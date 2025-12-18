@@ -20,6 +20,7 @@
 #include "proto/reference_backend.hpp"
 #include "compiler/matmul_truncation.hpp"
 #include "runtime/phase_executor.hpp"
+#include "runtime/bench_key_cost.hpp"
 
 namespace nn {
 
@@ -50,6 +51,40 @@ struct MlpActMatKeyHash {
     mix(static_cast<size_t>(k.frac_bits));
     mix(static_cast<size_t>(k.elems));
     mix(static_cast<size_t>(k.activation));
+    return h;
+  }
+};
+
+struct MlpTruncPlanKey {
+  bool is_gpu = false;
+  int frac_bits = 0;
+  size_t M = 0;
+  size_t K = 0;
+  size_t N = 0;
+  int which = 0;  // 1=hidden, 2=out
+  int row_l1_max = 0;
+  bool force_faithful = false;
+
+  bool operator==(const MlpTruncPlanKey& o) const {
+    return is_gpu == o.is_gpu && frac_bits == o.frac_bits && M == o.M && K == o.K && N == o.N &&
+           which == o.which && row_l1_max == o.row_l1_max && force_faithful == o.force_faithful;
+  }
+};
+
+struct MlpTruncPlanKeyHash {
+  size_t operator()(const MlpTruncPlanKey& k) const noexcept {
+    size_t h = 1469598103934665603ull;
+    auto mix = [&](size_t v) {
+      h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    };
+    mix(static_cast<size_t>(k.is_gpu));
+    mix(static_cast<size_t>(k.frac_bits));
+    mix(static_cast<size_t>(k.M));
+    mix(static_cast<size_t>(k.K));
+    mix(static_cast<size_t>(k.N));
+    mix(static_cast<size_t>(k.which));
+    mix(static_cast<size_t>(k.row_l1_max));
+    mix(static_cast<size_t>(k.force_faithful));
     return h;
   }
 };
@@ -133,6 +168,10 @@ void mlp_forward(const MLPConfig& cfg,
     }
     // Run GEMM on its own stream; PFSS (if GPU) will use its backend stream for overlap.
     mp.overlap_stream = ctx->uses_gpu_backend() ? nn::matmul_default_stream() : nullptr;
+    if (mp.overlap_stream) {
+      mp.cache_weights = true;
+      mp.cache_bias = true;
+    }
   }
   if (!ctx) {
     throw std::runtime_error("mlp_forward: LayerContext required (no local rescale fallback)");
@@ -379,9 +418,9 @@ void mlp_forward(const MLPConfig& cfg,
 
   if (use_phase) {
     // Faithful truncation via composite (no local shift) batched in phase executor.
-    std::mt19937_64 rng(0);
     bool force_faithful = std::getenv("MLP_FORCE_FAITHFUL") != nullptr;
-    auto make_plan = [&](size_t M,
+    auto gen_plan = [&](std::mt19937_64& rng,
+                        size_t M,
                          size_t K,
                          size_t N,
                          const compiler::RangeInterval& x_range,
@@ -431,14 +470,40 @@ void mlp_forward(const MLPConfig& cfg,
       return plan;
     };
 
-    auto plan1 = make_plan(B * T, D, H, mat1_x_range, mat1_w_range, row_l1_max1,
-                           have_x_abs ? std::optional<compiler::AbsBound>(x_abs_hint) : std::nullopt);
+    std::shared_ptr<compiler::MatmulTruncationPlan> plan1_cached;
+    compiler::MatmulTruncationPlan plan1_local;
+    compiler::MatmulTruncationPlan* plan1 = nullptr;
+    if (bench_cache_enabled()) {
+      static std::mutex mu;
+      static std::unordered_map<MlpTruncPlanKey, std::shared_ptr<compiler::MatmulTruncationPlan>, MlpTruncPlanKeyHash>
+          cache;
+      const bool is_gpu = (ctx && ctx->uses_gpu_backend());
+      MlpTruncPlanKey key{is_gpu, cfg.frac_bits, B * T, D, H, /*which=*/1, row_l1_max1, force_faithful};
+      std::lock_guard<std::mutex> lk(mu);
+      auto it = cache.find(key);
+      if (it == cache.end()) {
+        std::mt19937_64 rng(static_cast<uint64_t>(MlpTruncPlanKeyHash{}(key)) ^ 0x6d6c7031ull);  // "mlp1"
+        auto p = std::make_shared<compiler::MatmulTruncationPlan>(
+            gen_plan(rng, B * T, D, H, mat1_x_range, mat1_w_range, row_l1_max1,
+                     have_x_abs ? std::optional<compiler::AbsBound>(x_abs_hint) : std::nullopt));
+        it = cache.emplace(key, std::move(p)).first;
+      } else if (party == 0) {
+        runtime::bench::charge_offline_bytes(runtime::bench::truncation_lowering_cost(it->second->bundle));
+      }
+      plan1_cached = it->second;
+      plan1 = plan1_cached.get();
+    } else {
+      std::mt19937_64 rng(0);
+      plan1_local = gen_plan(rng, B * T, D, H, mat1_x_range, mat1_w_range, row_l1_max1,
+                             have_x_abs ? std::optional<compiler::AbsBound>(x_abs_hint) : std::nullopt);
+      plan1 = &plan1_local;
+    }
     if (std::getenv("MLP_TRUNC_DEBUG")) {
-      std::cerr << "[mlp] plan1 kind=" << static_cast<int>(plan1.kind)
-                << " batch=" << plan1.batch << "\n";
+      std::cerr << "[mlp] plan1 kind=" << static_cast<int>(plan1->kind)
+                << " batch=" << plan1->batch << "\n";
     }
     auto trunc_task1 = std::make_unique<runtime::TruncTask>(
-        &plan1.bundle, std::span<const uint64_t>(hidden.data(), hidden.size()),
+        &plan1->bundle, std::span<const uint64_t>(hidden.data(), hidden.size()),
         std::span<uint64_t>(hidden_scaled.data(), hidden_scaled.size()));
     std::mt19937_64 rng2(0);
     std::unique_ptr<runtime::CubicPolyTask> act_task;
@@ -476,6 +541,8 @@ void mlp_forward(const MLPConfig& cfg,
                 hidden_scaled.size(),
                 const_segments));
             it = cache_const.emplace(key, std::move(mat)).first;
+          } else if (party == 0) {
+            runtime::bench::charge_offline_bytes(runtime::bench::composite_keypair_cost(it->second->keys));
           }
           gelu_const_mat = it->second;
         } else {
@@ -517,6 +584,15 @@ void mlp_forward(const MLPConfig& cfg,
                 3 * hidden_scaled.size(),
                 hidden_scaled.size()));
             it = cache.emplace(key, std::move(mat)).first;
+          } else if (party == 0) {
+            runtime::bench::OfflineBytesArray cost{};
+            auto add = [&](const runtime::bench::OfflineBytesArray& x) {
+              for (size_t i = 0; i < cost.size(); ++i) cost[i] += x[i];
+            };
+            add(runtime::bench::composite_keypair_cost(it->second->keys));
+            add(runtime::bench::truncation_lowering_cost(it->second->trunc_f));
+            add(runtime::bench::truncation_lowering_cost(it->second->trunc_2f));
+            runtime::bench::charge_offline_bytes(cost);
           }
           gelu_mat = it->second;
         } else {
@@ -562,6 +638,15 @@ void mlp_forward(const MLPConfig& cfg,
               3 * hidden_scaled.size(),
               hidden_scaled.size()));
           it = cache.emplace(key, std::move(mat)).first;
+        } else if (party == 0) {
+          runtime::bench::OfflineBytesArray cost{};
+          auto add = [&](const runtime::bench::OfflineBytesArray& x) {
+            for (size_t i = 0; i < cost.size(); ++i) cost[i] += x[i];
+          };
+          add(runtime::bench::composite_keypair_cost(it->second->keys));
+          add(runtime::bench::truncation_lowering_cost(it->second->trunc_f));
+          add(runtime::bench::truncation_lowering_cost(it->second->trunc_2f));
+          runtime::bench::charge_offline_bytes(cost);
         }
         silu_mat = it->second;
       } else {
@@ -625,18 +710,43 @@ void mlp_forward(const MLPConfig& cfg,
     }
 
     // Second wave: trunc output matmul accum.
-    std::mt19937_64 rng_out(1);
-    auto plan2 = make_plan(B * T, H, D, mat2_x_range, mat2_w_range, row_l1_max2,
-                           have_act_abs ? std::optional<compiler::AbsBound>(act_abs_hint) : std::nullopt);
+    std::shared_ptr<compiler::MatmulTruncationPlan> plan2_cached;
+    compiler::MatmulTruncationPlan plan2_local;
+    compiler::MatmulTruncationPlan* plan2 = nullptr;
+    if (bench_cache_enabled()) {
+      static std::mutex mu;
+      static std::unordered_map<MlpTruncPlanKey, std::shared_ptr<compiler::MatmulTruncationPlan>, MlpTruncPlanKeyHash>
+          cache;
+      const bool is_gpu = (ctx && ctx->uses_gpu_backend());
+      MlpTruncPlanKey key{is_gpu, cfg.frac_bits, B * T, H, D, /*which=*/2, row_l1_max2, force_faithful};
+      std::lock_guard<std::mutex> lk(mu);
+      auto it = cache.find(key);
+      if (it == cache.end()) {
+        std::mt19937_64 rng(static_cast<uint64_t>(MlpTruncPlanKeyHash{}(key)) ^ 0x6d6c7032ull);  // "mlp2"
+        auto p = std::make_shared<compiler::MatmulTruncationPlan>(
+            gen_plan(rng, B * T, H, D, mat2_x_range, mat2_w_range, row_l1_max2,
+                     have_act_abs ? std::optional<compiler::AbsBound>(act_abs_hint) : std::nullopt));
+        it = cache.emplace(key, std::move(p)).first;
+      } else if (party == 0) {
+        runtime::bench::charge_offline_bytes(runtime::bench::truncation_lowering_cost(it->second->bundle));
+      }
+      plan2_cached = it->second;
+      plan2 = plan2_cached.get();
+    } else {
+      std::mt19937_64 rng(1);
+      plan2_local = gen_plan(rng, B * T, H, D, mat2_x_range, mat2_w_range, row_l1_max2,
+                             have_act_abs ? std::optional<compiler::AbsBound>(act_abs_hint) : std::nullopt);
+      plan2 = &plan2_local;
+    }
     if (std::getenv("MLP_TRUNC_DEBUG")) {
-      std::cerr << "[mlp] plan2 kind=" << static_cast<int>(plan2.kind)
-                << " batch=" << plan2.batch << "\n";
+      std::cerr << "[mlp] plan2 kind=" << static_cast<int>(plan2->kind)
+                << " batch=" << plan2->batch << "\n";
     }
     std::vector<uint64_t> y_scaled(Y_share.numel(), 0);
     pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
     enter_phase();
     pe->add_task(std::make_unique<runtime::TruncTask>(
-        &plan2.bundle, std::span<const uint64_t>(Y_share.data, Y_share.numel()),
+        &plan2->bundle, std::span<const uint64_t>(Y_share.data, Y_share.numel()),
         std::span<uint64_t>(y_scaled.data(), y_scaled.size())));
     pe->run(R);
     barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,

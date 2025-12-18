@@ -234,6 +234,7 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
           uint64_t* d_exp = d_exp_device_;
           uint64_t* d_sum = nullptr;
           int* d_valid = nullptr;
+          int* d_offsets = nullptr;
           size_t elems = exp_packed_.size();
           size_t bytes_exp = elems * sizeof(uint64_t);
           if (!d_exp) {
@@ -241,13 +242,26 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
             cudaMemcpyAsync(d_exp, exp_packed_.data(), bytes_exp, cudaMemcpyHostToDevice, stream);
           }
           cudaMalloc(&d_sum, static_cast<size_t>(plan_.rows) * sizeof(uint64_t));
-          if (!plan_.valid_lens.empty()) {
-            cudaMalloc(&d_valid, static_cast<size_t>(plan_.rows) * sizeof(int));
-            cudaMemcpyAsync(d_valid, plan_.valid_lens.data(),
-                            static_cast<size_t>(plan_.rows) * sizeof(int),
+          const bool ragged = !plan_.valid_lens.empty();
+          if (ragged) {
+            if (row_offsets_.size() != static_cast<size_t>(plan_.rows) + 1) {
+              throw std::runtime_error("SoftmaxTask: missing row_offsets for ragged GPU row-sum");
+            }
+            cudaMalloc(&d_offsets, row_offsets_.size() * sizeof(int));
+            cudaMemcpyAsync(d_offsets, row_offsets_.data(),
+                            row_offsets_.size() * sizeof(int),
                             cudaMemcpyHostToDevice, stream);
+            launch_row_sum_ragged_kernel(d_exp, d_offsets, plan_.rows, d_sum, stream);
+          } else {
+            // Dense exp (rows*cols): support optional valid_lens (should be empty here).
+            if (!plan_.valid_lens.empty()) {
+              cudaMalloc(&d_valid, static_cast<size_t>(plan_.rows) * sizeof(int));
+              cudaMemcpyAsync(d_valid, plan_.valid_lens.data(),
+                              static_cast<size_t>(plan_.rows) * sizeof(int),
+                              cudaMemcpyHostToDevice, stream);
+            }
+            launch_row_sum_kernel(d_exp, plan_.rows, plan_.cols, d_valid, d_sum, stream);
           }
-          launch_row_sum_kernel(d_exp, plan_.rows, plan_.cols, d_valid, d_sum, stream);
           sum_qf_.assign(static_cast<size_t>(plan_.rows), 0);
           cudaMemcpyAsync(sum_qf_.data(), d_sum,
                           static_cast<size_t>(plan_.rows) * sizeof(uint64_t),
@@ -257,6 +271,7 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
           if (d_exp && d_exp != d_exp_device_) cudaFree(d_exp);
           if (d_sum) cudaFree(d_sum);
           if (d_valid) cudaFree(d_valid);
+          if (d_offsets) cudaFree(d_offsets);
           prob_abs_.is_signed = true;
           prob_abs_.max_abs = static_cast<uint64_t>(1ull << plan_.frac_bits);
           prob_abs_.kind = compiler::RangeKind::Proof;

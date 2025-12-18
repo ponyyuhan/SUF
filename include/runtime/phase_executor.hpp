@@ -68,6 +68,9 @@ class PhaseExecutor {
     size_t pfss_coeff_flushes = 0;
     size_t pfss_trunc_flushes = 0;
     size_t opened_words = 0;
+    size_t opened_words_beaver = 0;
+    size_t opened_words_mask = 0;
+    size_t opened_words_other = 0;
     size_t pfss_coeff_jobs = 0;
     size_t pfss_coeff_arith_words = 0;
     size_t pfss_coeff_pred_bits = 0;
@@ -271,8 +274,14 @@ class PhaseExecutor {
     const auto& os = opens_.stats();
     stats_.open_flushes = os.flushes;
     stats_.opened_words = os.opened_words;
-    const auto& pcs = pfss_coeff_.stats();
-    const auto& pts = pfss_trunc_.stats();
+    stats_.opened_words_beaver =
+        os.opened_words_by_kind[static_cast<size_t>(OpenKind::kBeaver)];
+    stats_.opened_words_mask =
+        os.opened_words_by_kind[static_cast<size_t>(OpenKind::kMask)];
+    stats_.opened_words_other =
+        os.opened_words_by_kind[static_cast<size_t>(OpenKind::kOther)];
+    const auto& pcs = pfss_coeff_.total_stats();
+    const auto& pts = pfss_trunc_.total_stats();
     stats_.pfss_coeff_flushes = pcs.flushes;
     stats_.pfss_coeff_jobs = pcs.jobs;
     stats_.pfss_coeff_arith_words = pcs.arith_words;
@@ -405,8 +414,14 @@ class PhaseExecutor {
     const auto& os = opens_.stats();
     stats_.open_flushes = os.flushes;
     stats_.opened_words = os.opened_words;
-    const auto& pcs = pfss_coeff_.stats();
-    const auto& pts = pfss_trunc_.stats();
+    stats_.opened_words_beaver =
+        os.opened_words_by_kind[static_cast<size_t>(OpenKind::kBeaver)];
+    stats_.opened_words_mask =
+        os.opened_words_by_kind[static_cast<size_t>(OpenKind::kMask)];
+    stats_.opened_words_other =
+        os.opened_words_by_kind[static_cast<size_t>(OpenKind::kOther)];
+    const auto& pcs = pfss_coeff_.total_stats();
+    const auto& pts = pfss_trunc_.total_stats();
     stats_.pfss_coeff_flushes = pcs.flushes;
     stats_.pfss_coeff_jobs = pcs.jobs;
     stats_.pfss_coeff_arith_words = pcs.arith_words;

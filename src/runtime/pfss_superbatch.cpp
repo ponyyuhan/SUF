@@ -197,6 +197,8 @@ PfssHandle PfssSuperBatch::enqueue_composite(PreparedCompositeJob job) {
   pending_hatx_words_ = new_pending_hatx;
   stats_.active_elems += job.shape.total_elems;
   stats_.cost_effbits += static_cast<size_t>(job.shape.total_elems) * static_cast<size_t>(job.shape.eff_bits);
+  total_stats_.active_elems += job.shape.total_elems;
+  total_stats_.cost_effbits += static_cast<size_t>(job.shape.total_elems) * static_cast<size_t>(job.shape.eff_bits);
   stats_.pending_jobs = pending_jobs_;
   stats_.pending_hatx = pending_hatx_words_;
   stats_.pending_device_bytes = pending_dev_bytes_;
@@ -233,6 +235,8 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
   }
   stats_.flushes += 1;
   stats_.jobs += jobs_.size();
+  total_stats_.flushes += 1;
+  total_stats_.jobs += jobs_.size();
   size_t total_hatx_words = 0;
   struct GroupKey {
     int r = 0;
@@ -456,6 +460,8 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
     for (auto& b : buckets) {
       stats_.max_bucket_hatx = std::max(stats_.max_bucket_hatx, b.hatx.size());
       stats_.max_bucket_jobs = std::max(stats_.max_bucket_jobs, b.jobs.size());
+      total_stats_.max_bucket_hatx = std::max(total_stats_.max_bucket_hatx, b.hatx.size());
+      total_stats_.max_bucket_jobs = std::max(total_stats_.max_bucket_jobs, b.jobs.size());
       bool dev_capable = gpu_stager_ && (dynamic_cast<runtime::CpuPassthroughStager*>(gpu_stager_) == nullptr);
       auto free_bucket_hatx = [&]() {
         if (!gpu_stager_ || !dev_capable) return;
@@ -600,6 +606,10 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
   stats_.pred_bits += total_bool_words * 64;
   stats_.hatx_words += total_hatx_words;
   stats_.hatx_bytes += total_hatx_words * sizeof(uint64_t);
+  total_stats_.arith_words += total_arith_words;
+  total_stats_.pred_bits += total_bool_words * 64;
+  total_stats_.hatx_words += total_hatx_words;
+  total_stats_.hatx_bytes += total_hatx_words * sizeof(uint64_t);
   pending_jobs_ = 0;
   pending_hatx_words_ = 0;
   pending_dev_bytes_ = 0;

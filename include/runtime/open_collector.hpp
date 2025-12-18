@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -48,6 +49,14 @@
 
 namespace runtime {
 
+// Categorize openings for benchmark statistics.
+enum class OpenKind : uint8_t {
+  kOther = 0,
+  kBeaver = 1,  // Beaver-style opens: (x-a), (y-b), matmul (A-a,B-b), row-broadcast, etc.
+  kMask = 2,    // Masked-value opens: x_hat = x + r_in (for PFSS predicate/coeff evaluation).
+  kCount = 3,
+};
+
 struct OpenSlot {
   std::vector<int64_t> opened;
   size_t n = 0;
@@ -64,12 +73,13 @@ struct OpenHandle {
 // performs one send/recv burst on flush. Optional env-gated eff-bits packing
 // can reduce traffic when shares are known to have small magnitude:
 // - enable: `SUF_OPEN_PACK_EFFBITS=1`
-// - cap bits: `SUF_OPEN_PACK_MAX_BITS` (default 48)
+// - cap bits: `SUF_OPEN_PACK_MAX_BITS` (default 56)
 class OpenCollector {
  public:
   struct Stats {
     size_t flushes = 0;
     size_t opened_words = 0;
+    std::array<size_t, static_cast<size_t>(OpenKind::kCount)> opened_words_by_kind{};
     size_t max_pending_words = 0;
     uint64_t flush_ns = 0;
   };
@@ -78,7 +88,7 @@ class OpenCollector {
   };
 
   // Enqueue a buffer of local shares to be opened; returns a handle to view later.
-  OpenHandle enqueue(const std::vector<uint64_t>& diff);
+  OpenHandle enqueue(const std::vector<uint64_t>& diff, OpenKind kind = OpenKind::kOther);
 
   // Flush all enqueued opens over the channel; results become available via view().
   void flush(int party, net::Chan& ch);
@@ -107,6 +117,7 @@ class OpenCollector {
     std::shared_ptr<OpenSlot> slot;
     size_t offset = 0;
     size_t len = 0;
+    OpenKind kind = OpenKind::kOther;
   };
   std::vector<Request> requests_;
   Stats stats_;

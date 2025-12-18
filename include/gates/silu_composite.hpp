@@ -10,6 +10,7 @@
 #include "gates/silu_spline_gate.hpp"
 #include "runtime/pfss_superbatch.hpp"
 #include "runtime/phase_tasks.hpp"
+#include "runtime/bench_accounting.hpp"
 #include "suf/suf_silu_builders.hpp"
 #include "proto/pfss_backend_batch.hpp"
 
@@ -18,6 +19,8 @@ namespace gates {
 inline void ensure_beaver_triples(gates::CompositeKeyPair& keys,
                                   size_t need,
                                   std::mt19937_64& rng) {
+  const size_t before0 = keys.k0.triples.size();
+  const size_t before1 = keys.k1.triples.size();
   auto fill = [&](std::vector<proto::BeaverTriple64Share>& dst0,
                   std::vector<proto::BeaverTriple64Share>& dst1) {
     while (dst0.size() < need || dst1.size() < need) {
@@ -33,6 +36,14 @@ inline void ensure_beaver_triples(gates::CompositeKeyPair& keys,
     }
   };
   fill(keys.k0.triples, keys.k1.triples);
+  const size_t after0 = keys.k0.triples.size();
+  const size_t after1 = keys.k1.triples.size();
+  if (after0 > before0 || after1 > before1) {
+    const uint64_t delta0 = static_cast<uint64_t>(after0 - before0);
+    const uint64_t delta1 = static_cast<uint64_t>(after1 - before1);
+    const uint64_t bytes = std::max(delta0, delta1) * static_cast<uint64_t>(sizeof(proto::BeaverTriple64Share));
+    runtime::bench::add_offline_bytes(runtime::bench::OfflineBytesKind::BeaverTriple, bytes);
+  }
 }
 
 // Task-friendly bundle for CubicPolyTask (coeff PFSS + two trunc bundles).
@@ -166,6 +177,8 @@ inline PreparedSiluJob prepare_silu_batch(SiluCompositeKeys& ks,
   job.token = static_cast<size_t>(-1);
   // Ensure enough Beaver triples for Horner (3 muls per element).
   size_t need_triples = 3 * hatx_copy.size();
+  const size_t before0 = ks.keys.k0.triples.size();
+  const size_t before1 = ks.keys.k1.triples.size();
   while (ks.keys.k0.triples.size() < need_triples ||
          ks.keys.k1.triples.size() < need_triples) {
     uint64_t a = rng(), b = rng(), c = proto::mul_mod(a, b);
@@ -177,6 +190,14 @@ inline PreparedSiluJob prepare_silu_batch(SiluCompositeKeys& ks,
     uint64_t c1 = c - c0;
     ks.keys.k0.triples.push_back({a0, b0, c0});
     ks.keys.k1.triples.push_back({a1, b1, c1});
+  }
+  const size_t after0 = ks.keys.k0.triples.size();
+  const size_t after1 = ks.keys.k1.triples.size();
+  if (after0 > before0 || after1 > before1) {
+    const uint64_t delta0 = static_cast<uint64_t>(after0 - before0);
+    const uint64_t delta1 = static_cast<uint64_t>(after1 - before1);
+    const uint64_t bytes = std::max(delta0, delta1) * static_cast<uint64_t>(sizeof(proto::BeaverTriple64Share));
+    runtime::bench::add_offline_bytes(runtime::bench::OfflineBytesKind::BeaverTriple, bytes);
   }
   auto handle = batch.enqueue_composite(std::move(job));
   PreparedSiluJob prep;

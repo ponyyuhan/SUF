@@ -9,5 +9,6 @@
   "sigma_cpu_threads": 64,
   "results_dir": "bench/results/bert_tiny",
   "suf_binary": "build_ninja/bench_suf_transformer",
+  "suf_extra_args": ["--open-pack", "1"],
   "notes": "Smoke end-to-end run on a small-memory machine (Sigma large models will not fit)."
 }
