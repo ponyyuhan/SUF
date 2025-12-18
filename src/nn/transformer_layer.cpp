@@ -6,6 +6,8 @@
 #include <random>
 #include <cctype>
 #include <cstdlib>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -31,6 +33,19 @@ static bool per_element_masks_enabled() {
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   return !(v == "0" || v == "false" || v == "off" || v == "no");
 }
+
+static bool bench_cache_enabled() {
+  const char* env = std::getenv("SUF_BENCH_CACHE_MATERIAL");
+  return env && std::string(env) != "0";
+}
+
+#ifdef SUF_HAVE_CUDA
+static bool is_gpu_backend(const proto::PfssBackendBatch& b) {
+  return dynamic_cast<const proto::PfssGpuStagedEval*>(&b) != nullptr;
+}
+#else
+static bool is_gpu_backend(const proto::PfssBackendBatch&) { return false; }
+#endif
 
 struct RowBroadcastTripleMaterial {
   int rows = 0;
@@ -275,6 +290,102 @@ runtime::RsqrtTaskBundle make_rsqrt_bundle(RsqrtTaskMaterial& mat) {
   return b;
 }
 
+struct LayerNormMatKey {
+  bool is_gpu = false;
+  int frac_bits = 0;
+  int rows = 0;
+  int cols = 0;
+  bool per_element_masks = true;
+
+  bool operator==(const LayerNormMatKey& o) const {
+    return is_gpu == o.is_gpu && frac_bits == o.frac_bits && rows == o.rows && cols == o.cols &&
+           per_element_masks == o.per_element_masks;
+  }
+};
+
+struct LayerNormMatKeyHash {
+  size_t operator()(const LayerNormMatKey& k) const noexcept {
+    size_t h = 1469598103934665603ull;
+    auto mix = [&](size_t v) {
+      h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+    };
+    mix(static_cast<size_t>(k.is_gpu));
+    mix(static_cast<size_t>(k.frac_bits));
+    mix(static_cast<size_t>(k.rows));
+    mix(static_cast<size_t>(k.cols));
+    mix(static_cast<size_t>(k.per_element_masks));
+    return h;
+  }
+};
+
+struct LayerNormMaterial {
+  compiler::TruncationLoweringResult mean_faithful;
+  compiler::TruncationLoweringResult mean_gap;
+  compiler::TruncationLoweringResult var_faithful;
+  compiler::TruncationLoweringResult var_gap;
+  compiler::TruncationLoweringResult norm_faithful;
+  compiler::TruncationLoweringResult norm_gap;
+  RsqrtTaskMaterial rsqrt1;
+  RsqrtTaskMaterial rsqrt2;
+};
+
+static std::shared_ptr<LayerNormMaterial> get_cached_layernorm_material(proto::PfssBackendBatch& backend,
+                                                                        int frac_bits,
+                                                                        int rows,
+                                                                        int cols,
+                                                                        int rsqrt_iters,
+                                                                        double eps,
+                                                                        double vmax) {
+  static std::mutex mu;
+  static std::unordered_map<LayerNormMatKey, std::shared_ptr<LayerNormMaterial>, LayerNormMatKeyHash> cache;
+
+  LayerNormMatKey key{is_gpu_backend(backend), frac_bits, rows, cols, per_element_masks_enabled()};
+
+  std::lock_guard<std::mutex> lk(mu);
+  auto it = cache.find(key);
+  if (it != cache.end()) return it->second;
+
+  auto mat = std::make_shared<LayerNormMaterial>();
+
+  // Shared trunc bundles for LN.
+  std::mt19937_64 rng_trunc(0x6c6e7472ull);
+  compiler::GateParams p_faithful;
+  p_faithful.kind = compiler::GateKind::FaithfulARS;
+  p_faithful.frac_bits = frac_bits;
+  p_faithful.per_element_masks = key.per_element_masks;
+  compiler::GateParams p_gap = p_faithful;
+  p_gap.kind = compiler::GateKind::GapARS;
+
+  mat->mean_faithful = compiler::lower_truncation_gate(backend, rng_trunc, p_faithful, static_cast<size_t>(rows));
+  compiler::GateParams p_var_faithful = p_faithful;
+  p_var_faithful.frac_bits = 2 * frac_bits;
+  mat->var_faithful = compiler::lower_truncation_gate(backend, rng_trunc, p_var_faithful, static_cast<size_t>(rows));
+  mat->norm_faithful = compiler::lower_truncation_gate(
+      backend, rng_trunc, p_faithful, static_cast<size_t>(rows) * static_cast<size_t>(cols));
+
+  mat->mean_gap = compiler::lower_truncation_gate(backend, rng_trunc, p_gap, static_cast<size_t>(rows));
+  compiler::GateParams p_var_gap = p_gap;
+  p_var_gap.frac_bits = 2 * frac_bits;
+  mat->var_gap = compiler::lower_truncation_gate(backend, rng_trunc, p_var_gap, static_cast<size_t>(rows));
+  mat->norm_gap = compiler::lower_truncation_gate(
+      backend, rng_trunc, p_gap, static_cast<size_t>(rows) * static_cast<size_t>(cols));
+
+  std::mt19937_64 rng_rsqrt1(0x6c6e7273ull);
+  mat->rsqrt1 = make_rsqrt_material(backend, frac_bits, rsqrt_iters, eps, vmax, rng_rsqrt1, rows);
+  ensure_beaver_triples(mat->rsqrt1.keys,
+                        static_cast<size_t>(rows) * (3 * static_cast<size_t>(mat->rsqrt1.nr_iters) + 1),
+                        rng_rsqrt1);
+
+  std::mt19937_64 rng_rsqrt2(0x6c6e7274ull);
+  mat->rsqrt2 = make_rsqrt_material(backend, frac_bits, rsqrt_iters, eps, vmax, rng_rsqrt2, rows);
+  ensure_beaver_triples(mat->rsqrt2.keys,
+                        static_cast<size_t>(rows) * (3 * static_cast<size_t>(mat->rsqrt2.nr_iters) + 1),
+                        rng_rsqrt2);
+
+  it = cache.emplace(key, mat).first;
+  return it->second;
+}
+
 }  // namespace
 
 void transformer_layer_forward(const TransformerConfig& cfg,
@@ -440,31 +551,55 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   double eps = 1.0 / 1024.0;
   int rsqrt_iters = 1;
 
-  // Shared trunc bundles for LN.
-  std::mt19937_64 rng_trunc(0x6c6e7472ull);
-  compiler::GateParams p_faithful;
-  p_faithful.kind = compiler::GateKind::FaithfulARS;
-  p_faithful.frac_bits = fb;
-  p_faithful.per_element_masks = per_element_masks_enabled();
-  compiler::GateParams p_gap = p_faithful;
-  p_gap.kind = compiler::GateKind::GapARS;
+  std::shared_ptr<LayerNormMaterial> ln_cache;
+  LayerNormMaterial ln_local;
+  if (bench_cache_enabled()) {
+    ln_cache = get_cached_layernorm_material(backend, fb, rows, cols, rsqrt_iters, eps, /*vmax=*/16.0);
+  } else {
+    // Shared trunc bundles for LN.
+    std::mt19937_64 rng_trunc(0x6c6e7472ull);
+    compiler::GateParams p_faithful;
+    p_faithful.kind = compiler::GateKind::FaithfulARS;
+    p_faithful.frac_bits = fb;
+    p_faithful.per_element_masks = per_element_masks_enabled();
+    compiler::GateParams p_gap = p_faithful;
+    p_gap.kind = compiler::GateKind::GapARS;
 
-  auto mean_faithful = compiler::lower_truncation_gate(backend, rng_trunc, p_faithful, static_cast<size_t>(rows));
-  compiler::GateParams p_var_faithful = p_faithful;
-  p_var_faithful.frac_bits = 2 * fb;
-  auto var_faithful = compiler::lower_truncation_gate(backend, rng_trunc, p_var_faithful, static_cast<size_t>(rows));
-  auto norm_faithful = compiler::lower_truncation_gate(
-      backend, rng_trunc, p_faithful, static_cast<size_t>(rows) * static_cast<size_t>(cols));
-  auto mean_gap = compiler::lower_truncation_gate(backend, rng_trunc, p_gap, static_cast<size_t>(rows));
-  compiler::GateParams p_var_gap = p_gap;
-  p_var_gap.frac_bits = 2 * fb;
-  auto var_gap = compiler::lower_truncation_gate(backend, rng_trunc, p_var_gap, static_cast<size_t>(rows));
-  auto norm_gap = compiler::lower_truncation_gate(
-      backend, rng_trunc, p_gap, static_cast<size_t>(rows) * static_cast<size_t>(cols));
+    ln_local.mean_faithful =
+        compiler::lower_truncation_gate(backend, rng_trunc, p_faithful, static_cast<size_t>(rows));
+    compiler::GateParams p_var_faithful = p_faithful;
+    p_var_faithful.frac_bits = 2 * fb;
+    ln_local.var_faithful =
+        compiler::lower_truncation_gate(backend, rng_trunc, p_var_faithful, static_cast<size_t>(rows));
+    ln_local.norm_faithful = compiler::lower_truncation_gate(
+        backend, rng_trunc, p_faithful, static_cast<size_t>(rows) * static_cast<size_t>(cols));
+    ln_local.mean_gap = compiler::lower_truncation_gate(backend, rng_trunc, p_gap, static_cast<size_t>(rows));
+    compiler::GateParams p_var_gap = p_gap;
+    p_var_gap.frac_bits = 2 * fb;
+    ln_local.var_gap = compiler::lower_truncation_gate(backend, rng_trunc, p_var_gap, static_cast<size_t>(rows));
+    ln_local.norm_gap = compiler::lower_truncation_gate(
+        backend, rng_trunc, p_gap, static_cast<size_t>(rows) * static_cast<size_t>(cols));
 
-  runtime::TruncChoice mean_choice{&mean_gap, &mean_faithful, fb, true};
-  runtime::TruncChoice var_choice{&var_gap, &var_faithful, 2 * fb, true};
-  runtime::TruncChoice norm_choice{&norm_gap, &norm_faithful, fb, true};
+    std::mt19937_64 rng_rsqrt1(0x6c6e7273ull);
+    ln_local.rsqrt1 = make_rsqrt_material(
+        backend, fb, rsqrt_iters, eps, /*vmax=*/16.0, rng_rsqrt1, rows);
+    ensure_beaver_triples(ln_local.rsqrt1.keys,
+                          static_cast<size_t>(rows) * (3 * static_cast<size_t>(ln_local.rsqrt1.nr_iters) + 1),
+                          rng_rsqrt1);
+
+    std::mt19937_64 rng_rsqrt2(0x6c6e7274ull);
+    ln_local.rsqrt2 = make_rsqrt_material(
+        backend, fb, rsqrt_iters, eps, /*vmax=*/16.0, rng_rsqrt2, rows);
+    ensure_beaver_triples(ln_local.rsqrt2.keys,
+                          static_cast<size_t>(rows) * (3 * static_cast<size_t>(ln_local.rsqrt2.nr_iters) + 1),
+                          rng_rsqrt2);
+  }
+
+  LayerNormMaterial& ln_mat = ln_cache ? *ln_cache : ln_local;
+
+  runtime::TruncChoice mean_choice{&ln_mat.mean_gap, &ln_mat.mean_faithful, fb, true};
+  runtime::TruncChoice var_choice{&ln_mat.var_gap, &ln_mat.var_faithful, 2 * fb, true};
+  runtime::TruncChoice norm_choice{&ln_mat.norm_gap, &ln_mat.norm_faithful, fb, true};
 
   uint64_t inv_len_qf =
       static_cast<uint64_t>(std::llround((1.0 / static_cast<double>(cols)) * std::ldexp(1.0, fb)));
@@ -482,21 +617,8 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   auto& ln1_triples = ensure_cached_triples(ln_triple_cache, 0x6c6e316eull, ln_elems, party);
   auto& ln2_triples = ensure_cached_triples(ln_triple_cache, 0x6c6e326eull, ln_elems, party);
 
-  std::mt19937_64 rng_rsqrt1(0x6c6e7273ull);
-  auto rsqrt_mat1 = make_rsqrt_material(
-      backend, fb, rsqrt_iters, eps, /*vmax=*/16.0, rng_rsqrt1, rows);
-  ensure_beaver_triples(rsqrt_mat1.keys,
-                        static_cast<size_t>(rows) * (3 * static_cast<size_t>(rsqrt_mat1.nr_iters) + 1),
-                        rng_rsqrt1);
-  auto rsqrt_bundle1 = make_rsqrt_bundle(rsqrt_mat1);
-
-  std::mt19937_64 rng_rsqrt2(0x6c6e7274ull);
-  auto rsqrt_mat2 = make_rsqrt_material(
-      backend, fb, rsqrt_iters, eps, /*vmax=*/16.0, rng_rsqrt2, rows);
-  ensure_beaver_triples(rsqrt_mat2.keys,
-                        static_cast<size_t>(rows) * (3 * static_cast<size_t>(rsqrt_mat2.nr_iters) + 1),
-                        rng_rsqrt2);
-  auto rsqrt_bundle2 = make_rsqrt_bundle(rsqrt_mat2);
+  auto rsqrt_bundle1 = make_rsqrt_bundle(ln_mat.rsqrt1);
+  auto rsqrt_bundle2 = make_rsqrt_bundle(ln_mat.rsqrt2);
 
   auto build_ln_bundle = [&](const runtime::RsqrtTaskBundle& rsqrt_bundle,
                              std::span<const proto::BeaverTriple64Share> mul_triples) {
