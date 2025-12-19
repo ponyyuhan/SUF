@@ -491,20 +491,20 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   proto::IChannel* pfss_chan_override = (ctx && ctx->pfss_chan) ? ctx->pfss_chan : nullptr;
   // Apply conservative limits to PFSS batches and opens to avoid runaway buffering.
   runtime::PfssSuperBatch::Limits pfss_lim;
-  pfss_lim.max_pending_jobs = 1ull << 12;
-  pfss_lim.max_pending_hatx_words = 1ull << 20;
+  pfss_lim.max_pending_jobs = 1ull << 13;
+  pfss_lim.max_pending_hatx_words = 1ull << 21;
   pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
   pfss_lim.max_flushes = 1ull << 10;
   if (ctx && ctx->uses_gpu_backend()) {
-    pfss_lim.max_pending_jobs = 1ull << 15;
-    pfss_lim.max_pending_hatx_words = 1ull << 22;
+    pfss_lim.max_pending_jobs = 1ull << 16;
+    pfss_lim.max_pending_hatx_words = 1ull << 23;
     pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
     pfss_lim.max_pending_device_bytes = pfss_lim.max_pending_hatx_bytes;
   }
   pe->pfss_coeff_batch().set_limits(pfss_lim);
   pe->pfss_trunc_batch().set_limits(pfss_lim);
   runtime::OpenCollector::Limits open_lim;
-  open_lim.max_pending_words = 1ull << 22;
+  open_lim.max_pending_words = 1ull << 23;
   pe->open_collector().set_limits(open_lim);
   runtime::PhaseExecutor::LazyLimits lazy_lim;
   lazy_lim.open_pending_words = open_lim.max_pending_words;

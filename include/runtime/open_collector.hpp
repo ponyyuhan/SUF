@@ -74,6 +74,8 @@ struct OpenHandle {
 // can reduce traffic when shares are known to have small magnitude:
 // - enable: `SUF_OPEN_PACK_EFFBITS=1`
 // - cap bits: `SUF_OPEN_PACK_MAX_BITS` (default 56)
+// - auto pack: `SUF_OPEN_PACK_AUTO=1` with `SUF_OPEN_PACK_MIN_SAVINGS_PCT`
+// - dynamic bits: `SUF_OPEN_PACK_DYNAMIC=1` (uses per-flush max bitwidth)
 class OpenCollector {
  public:
   struct Stats {
@@ -123,6 +125,12 @@ class OpenCollector {
   Stats stats_;
   Limits limits_;
   size_t pending_words_ = 0;
+  // Scratch buffers to avoid per-flush allocations in hot paths.
+  std::vector<uint64_t> send_flat_buf_;
+  std::vector<uint64_t> recv_flat_buf_;
+  std::vector<uint64_t> other_flat_buf_;
+  std::vector<uint64_t> packed_local_buf_;
+  std::vector<uint64_t> packed_remote_buf_;
 };
 
 }  // namespace runtime

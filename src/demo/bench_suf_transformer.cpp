@@ -711,10 +711,16 @@ int main(int argc, char** argv) {
     if (args.open_pack_effbits == 0 || args.open_pack_effbits == 1) {
       ::setenv("SUF_OPEN_PACK_EFFBITS", args.open_pack_effbits ? "1" : "0", /*overwrite=*/1);
     } else {
-      // Open packing can reduce wire bytes but adds local pack/unpack overhead.
-      // Default OFF for stable end-to-end timing; enable explicitly for WAN/LAN benches.
-      ::setenv("SUF_OPEN_PACK_EFFBITS", "0", /*overwrite=*/0);
+      // Default to allowing packed opens on GPU; auto-pack skips when savings are small.
+      // Keep CPU default OFF to avoid extra host overhead.
+      if (args.backend == "gpu") {
+        ::setenv("SUF_OPEN_PACK_EFFBITS", "1", /*overwrite=*/0);
+      } else {
+        ::setenv("SUF_OPEN_PACK_EFFBITS", "0", /*overwrite=*/0);
+      }
     }
+    // Auto-packing: skip bit-packing when savings are small to reduce CPU overhead.
+    ::setenv("SUF_OPEN_PACK_AUTO", "1", /*overwrite=*/0);
     if (args.gelu_const == 0) {
       ::unsetenv("SUF_GELU_CONST");
     } else if (args.gelu_const == 1) {
@@ -733,6 +739,8 @@ int main(int argc, char** argv) {
         // This keeps the benchmark faithful to paper.md's offline/online split while
         // avoiding CPU-side O(MNK) hot loops that dominate large-model runs.
         ::setenv("SUF_MATMUL_BEAVER_GPU", "1", /*overwrite=*/0);
+        // Larger net ring reduces backpressure for big models (bench harness only).
+        ::setenv("SUF_BENCH_NET_RING_POW2", "24", /*overwrite=*/0);
 	    }
 	    const auto& spec = nn::get_model_spec(args.model);
 	    proto::set_ring_bits(static_cast<int>(spec.n_bits));

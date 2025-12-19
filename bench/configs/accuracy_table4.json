@@ -1,0 +1,137 @@
+{
+  "frac_bits": 12,
+  "glue": [
+    {
+      "model": "bert-tiny",
+      "task": "sst2",
+      "model_id": "M-FAC/bert-tiny-finetuned-sst2",
+      "n_bits": 37,
+      "sigma_accuracy": 82.57,
+      "pytorch_accuracy": 82.45,
+      "train_size": "67k",
+      "val_size": 872
+    },
+    {
+      "model": "bert-tiny",
+      "task": "mrpc",
+      "model_id": "M-FAC/bert-tiny-finetuned-mrpc",
+      "n_bits": 37,
+      "sigma_accuracy": 70.34,
+      "pytorch_accuracy": 71.07,
+      "train_size": "3.7k",
+      "val_size": 408
+    },
+    {
+      "model": "bert-tiny",
+      "task": "qnli",
+      "model_id": "M-FAC/bert-tiny-finetuned-qnli",
+      "n_bits": 37,
+      "sigma_accuracy": 81.93,
+      "pytorch_accuracy": 81.42,
+      "train_size": "105k",
+      "val_size": 5463
+    },
+    {
+      "model": "bert-base",
+      "task": "sst2",
+      "model_id": "textattack/bert-base-uncased-SST-2",
+      "n_bits": 50,
+      "sigma_accuracy": 92.55,
+      "pytorch_accuracy": 92.55,
+      "train_size": "67k",
+      "val_size": 872
+    },
+    {
+      "model": "bert-base",
+      "task": "mrpc",
+      "model_id": "textattack/bert-base-uncased-MRPC",
+      "n_bits": 50,
+      "sigma_accuracy": 87.25,
+      "pytorch_accuracy": 84.31,
+      "train_size": "3.7k",
+      "val_size": 408
+    },
+    {
+      "model": "bert-base",
+      "task": "qnli",
+      "model_id": "textattack/bert-base-uncased-QNLI",
+      "n_bits": 50,
+      "sigma_accuracy": 91.63,
+      "pytorch_accuracy": 91.60,
+      "train_size": "105k",
+      "val_size": 5463
+    },
+    {
+      "model": "bert-large",
+      "task": "sst2",
+      "model_id": "yoshitomo-matsubara/bert-large-uncased-sst2",
+      "n_bits": 50,
+      "sigma_accuracy": 93.35,
+      "pytorch_accuracy": 93.58,
+      "train_size": "67k",
+      "val_size": 872
+    },
+    {
+      "model": "bert-large",
+      "task": "mrpc",
+      "model_id": "yoshitomo-matsubara/bert-large-uncased-mrpc",
+      "n_bits": 50,
+      "sigma_accuracy": 88.48,
+      "pytorch_accuracy": 87.99,
+      "train_size": "3.7k",
+      "val_size": 408
+    },
+    {
+      "model": "bert-large",
+      "task": "qnli",
+      "model_id": "yoshitomo-matsubara/bert-large-uncased-qnli",
+      "n_bits": 50,
+      "sigma_accuracy": 92.26,
+      "pytorch_accuracy": 92.23,
+      "train_size": "105k",
+      "val_size": 5463
+    }
+  ],
+  "lambada": [
+    {
+      "model": "gpt2",
+      "model_id": "gpt2",
+      "n_bits": 50,
+      "sigma_accuracy": 33.28,
+      "pytorch_accuracy": 32.46,
+      "train_size": "-",
+      "val_size": 5153
+    },
+    {
+      "model": "gpt-neo-1.3b",
+      "model_id": "EleutherAI/gpt-neo-1.3B",
+      "n_bits": 51,
+      "sigma_accuracy": 57.81,
+      "pytorch_accuracy": 57.46,
+      "train_size": "-",
+      "val_size": 5153
+    },
+    {
+      "model": "llama2-7b",
+      "model_id": "meta-llama/Llama-2-7b-hf",
+      "n_bits": 48,
+      "sigma_accuracy": 69.92,
+      "pytorch_accuracy": 70.17,
+      "train_size": "-",
+      "val_size": 5153,
+      "skip": true,
+      "skip_reason": "requires gated HF weights"
+    },
+    {
+      "model": "llama2-13b",
+      "model_id": "meta-llama/Llama-2-13b-hf",
+      "n_bits": 48,
+      "sigma_accuracy": 72.99,
+      "pytorch_accuracy": 73.14,
+      "train_size": "-",
+      "val_size": 5153,
+      "skip": true,
+      "skip_reason": "requires gated HF weights"
+    }
+  ]
+}

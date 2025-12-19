@@ -392,13 +392,13 @@ void mlp_forward(const MLPConfig& cfg,
     R.pfss_trunc = &pe->pfss_trunc_batch();
     R.opens = &pe->open_collector();
     runtime::PfssSuperBatch::Limits pfss_lim;
-    pfss_lim.max_pending_jobs = 1ull << 12;
-    pfss_lim.max_pending_hatx_words = 1ull << 20;
+    pfss_lim.max_pending_jobs = 1ull << 13;
+    pfss_lim.max_pending_hatx_words = 1ull << 21;
     pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
     pfss_lim.max_flushes = 1ull << 9;
     if (ctx && ctx->uses_gpu_backend()) {
-      pfss_lim.max_pending_jobs = 1ull << 15;
-      pfss_lim.max_pending_hatx_words = 1ull << 22;
+      pfss_lim.max_pending_jobs = 1ull << 16;
+      pfss_lim.max_pending_hatx_words = 1ull << 23;
       pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
       if (ctx->pfss_gpu_stager) {
         pfss_lim.max_pending_device_bytes = pfss_lim.max_pending_hatx_bytes;
@@ -407,7 +407,7 @@ void mlp_forward(const MLPConfig& cfg,
     pe->pfss_coeff_batch().set_limits(pfss_lim);
     pe->pfss_trunc_batch().set_limits(pfss_lim);
     runtime::OpenCollector::Limits open_lim;
-    open_lim.max_pending_words = 1ull << 22;
+    open_lim.max_pending_words = 1ull << 23;
     pe->open_collector().set_limits(open_lim);
     pe->set_max_flushes(1ull << 10);
     pfss_phase_planner.bind(R.pfss_coeff, R.pfss_trunc);

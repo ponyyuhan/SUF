@@ -125,12 +125,13 @@ def eval_glue_classification(
     device: str,
     quant_spec: Optional[FixedPointSpec],
 ) -> Dict[str, Any]:
+    train_ds = load_dataset("glue", task, split="train")
     ds = load_dataset("glue", task, split="validation")
     if max_examples is not None:
         ds = ds.select(range(min(max_examples, len(ds))))
 
     tok = AutoTokenizer.from_pretrained(model_id, use_fast=True)
-    model = AutoModelForSequenceClassification.from_pretrained(model_id)
+    model = AutoModelForSequenceClassification.from_pretrained(model_id, use_safetensors=True)
     model.eval()
     model.to(device)
 
@@ -151,6 +152,17 @@ def eval_glue_classification(
     else:
         raise ValueError(f"unsupported GLUE task: {task}")
 
+    def safe_max_length(tok, fallback: int) -> int:
+        try:
+            v = int(tok.model_max_length)
+        except Exception:
+            return fallback
+        if v <= 0 or v > 100000:
+            return fallback
+        return v
+
+    max_len = safe_max_length(tok, 512)
+
     with torch.no_grad():
         for ex in ds:
             texts = [ex[f] for f in fields]
@@ -158,7 +170,7 @@ def eval_glue_classification(
                 *texts,
                 return_tensors="pt",
                 truncation=True,
-                max_length=tok.model_max_length,
+                max_length=max_len,
             )
             enc = {k: v.to(device) for k, v in enc.items()}
             out = model(**enc)
@@ -173,6 +185,10 @@ def eval_glue_classification(
         "task": task,
         "model_id": model_id,
         "n": len(labels),
+        "train_size": len(train_ds),
+        "val_size": len(ds),
+        "n_bits": quant_spec.n_bits if quant_spec is not None else None,
+        "frac_bits": quant_spec.frac_bits if quant_spec is not None else None,
         "metric": "accuracy",
         "accuracy": _accuracy(preds, labels),
     }
@@ -193,7 +209,7 @@ def eval_lambada_next_token(
     if tok.pad_token_id is None and tok.eos_token_id is not None:
         tok.pad_token = tok.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(model_id)
+    model = AutoModelForCausalLM.from_pretrained(model_id, use_safetensors=True)
     model.eval()
     model.to(device)
 
@@ -204,10 +220,21 @@ def eval_lambada_next_token(
     total = 0
     correct = 0
 
+    def safe_max_length(tok, fallback: int) -> int:
+        try:
+            v = int(tok.model_max_length)
+        except Exception:
+            return fallback
+        if v <= 0 or v > 100000:
+            return fallback
+        return v
+
+    max_len = safe_max_length(tok, 1024)
+
     with torch.no_grad():
         for ex in ds:
             text = ex["text"]
-            ids = tok(text, return_tensors="pt", truncation=True, max_length=tok.model_max_length)["input_ids"][0]
+            ids = tok(text, return_tensors="pt", truncation=True, max_length=max_len)["input_ids"][0]
             if ids.numel() < 2:
                 continue
             inp = ids[:-1].unsqueeze(0).to(device)
@@ -224,6 +251,10 @@ def eval_lambada_next_token(
         "task": "lambada",
         "model_id": model_id,
         "n": total,
+        "train_size": None,
+        "val_size": len(ds),
+        "n_bits": quant_spec.n_bits if quant_spec is not None else None,
+        "frac_bits": quant_spec.frac_bits if quant_spec is not None else None,
         "metric": "next_token_acc",
         "accuracy": float(correct) / float(total) if total else float("nan"),
     }
@@ -249,8 +280,12 @@ def main() -> None:
 
     max_examples: Optional[int] = None if args.max_examples == 0 else int(args.max_examples)
 
-    spec = FixedPointSpec(int(cfg["n_bits"]), int(cfg["frac_bits"]))
-    quant_spec = spec if args.suf_emulate else None
+    def spec_from_run(run: Dict[str, Any]) -> FixedPointSpec:
+        n_bits = run.get("n_bits", cfg.get("n_bits"))
+        frac_bits = run.get("frac_bits", cfg.get("frac_bits"))
+        if n_bits is None or frac_bits is None:
+            raise SystemExit("Missing n_bits/frac_bits in config or run entry")
+        return FixedPointSpec(int(n_bits), int(frac_bits))
 
     results: Dict[str, Any] = {
         "config": cfg,
@@ -261,6 +296,7 @@ def main() -> None:
     }
 
     for run in cfg.get("glue", []):
+        quant_spec = spec_from_run(run) if args.suf_emulate else None
         results["runs"].append(
             eval_glue_classification(
                 task=str(run["task"]),
@@ -272,6 +308,7 @@ def main() -> None:
         )
 
     for run in cfg.get("lambada", []):
+        quant_spec = spec_from_run(run) if args.suf_emulate else None
         results["runs"].append(
             eval_lambada_next_token(
                 model_id=str(run["model_id"]),
@@ -289,4 +326,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

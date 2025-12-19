@@ -1,16 +1,24 @@
 # Sigma vs SUF benchmarks (updated)
 
-Generated: `2025-12-18`
+Generated: `2025-12-19`
 
 ## Commands run
 
 - Tests: `ctest --test-dir build_ninja --output-on-failure`
-- Benchmarks:
-  - `python3 bench/run_sigma_vs_suf.py --config bench/configs/sigma_vs_suf_bert_tiny.json --timeout-sigma-s 7200`
-  - `python3 bench/run_sigma_vs_suf.py --config bench/configs/sigma_vs_suf_gpt2.json --timeout-sigma-s 7200`
-  - `python3 bench/run_sigma_vs_suf.py --config bench/configs/sigma_vs_suf_bert_base.json --timeout-sigma-s 7200`
-  - `python3 bench/run_sigma_vs_suf.py --config bench/configs/sigma_vs_suf_large_opt.json --skip-sigma`
-  - Attempted (failed SIGMA run): `python3 bench/run_sigma_vs_suf.py --config bench/configs/sigma_vs_suf_llama2_7b.json --timeout-sigma-s 20000`
+- SUF GPU benches (seq=128, batch=1):
+  - `build_ninja/bench_suf_transformer --model bert-tiny --backend gpu --seq-len 128 --batch-size 1 --n-iters 1 --log-json bench/results/opt_runs/bert-tiny_gpu_buf.json`
+  - `build_ninja/bench_suf_transformer --model bert-base --backend gpu --seq-len 128 --batch-size 1 --n-iters 1 --log-json bench/results/opt_runs/bert-base_gpu_buf.json`
+  - `build_ninja/bench_suf_transformer --model bert-large --backend gpu --seq-len 128 --batch-size 1 --n-iters 1 --log-json bench/results/opt_runs/bert-large_gpu_buf.json`
+  - `build_ninja/bench_suf_transformer --model gpt2 --backend gpu --seq-len 128 --batch-size 1 --n-iters 1 --log-json bench/results/opt_runs/gpt2_gpu_buf.json`
+  - `build_ninja/bench_suf_transformer --model gpt-neo-1.3b --backend gpu --seq-len 128 --batch-size 1 --n-iters 1 --log-json bench/results/opt_runs/gpt-neo-1.3b_gpu_buf.json`
+- SUF CPU benches (seq=128, batch=1):
+  - `build_ninja/bench_suf_transformer --model bert-tiny --backend cpu --seq-len 128 --batch-size 1 --n-iters 1 --log-json bench/results/opt_runs/bert-tiny_cpu_buf.json`
+  - `build_ninja/bench_suf_transformer --model bert-base --backend cpu --seq-len 128 --batch-size 1 --n-iters 1 --log-json bench/results/opt_runs/bert-base_cpu_buf.json`
+  - `build_ninja/bench_suf_transformer --model bert-large --backend cpu --seq-len 128 --batch-size 1 --n-iters 1 --log-json bench/results/opt_runs/bert-large_cpu_buf.json`
+  - `build_ninja/bench_suf_transformer --model gpt2 --backend cpu --seq-len 128 --batch-size 1 --n-iters 1 --log-json bench/results/opt_runs/gpt2_cpu_buf.json`
+- Profiling highlight:
+  - `SUF_BENCH_PROFILE=1 build_ninja/bench_suf_transformer --model gpt-neo-1.3b --backend gpu --seq-len 128 --batch-size 1 --n-iters 1 --log-json bench/results/opt_runs/gpt-neo-1.3b_gpu_profile_buf.json`
+- Note: SIGMA benchmarks were not rerun due to prior build deadlocks; see “Sigma baseline” below.
 
 ## Stats consistency notes (paper.md)
 
@@ -21,41 +29,53 @@ Generated: `2025-12-18`
 - **SIGMA schema normalization**: `bench/run_sigma_vs_suf.py` now maps SIGMA’s `Total Comm` to `communication.net_bytes` so Sigma/SUF comparisons use consistent byte objects.
 - **More open breakdown**: SUF logs now include `pfss.opened_words_{beaver,mask,other}` (and corresponding `communication.open_bytes_*`) to align the “what are we counting?” question with Sigma’s single `Total Comm` bucket.
 
-## Results (selected)
+## Results (latest SUF-only)
 
-### BERT-Tiny (seq=128)
+### GPU (seq=128, batch=1)
 
-Source: `bench/results/bert_tiny/summary.csv`
+Source: `bench/results/opt_runs/*_gpu_buf.json`
 
-| system | backend | preprocessing.key_bytes | timing.online_time_s | communication.net_bytes |
-| --- | --- | ---: | ---: | ---: |
-| sigma | gpu | 350,064,640 | 0.186802 | 21,675,034 |
-| suf | gpu | 26,063,948 | 0.158082 | 16,623,616 |
-| suf | cpu | 33,511,972 | 0.220452 | 8,087,424 |
+| model | preprocessing.key_bytes | timing.online_time_s | communication.net_bytes |
+| --- | ---: | ---: | ---: |
+| bert-tiny | 26,054,620 | 0.508969 | 16,623,616 |
+| bert-base | 1,785,520,576 | 5.93575 | 1,608,214,464 |
+| bert-large | 5,441,517,076 | 16.2673 | 4,288,139,136 |
+| gpt2 | 1,728,894,396 | 5.17519 | 1,402,218,432 |
+| gpt-neo-1.3b | 8,100,843,680 | 44.1131 | 6,607,720,320 |
 
-### GPT-2 (seq=128)
+### CPU (seq=128, batch=1)
 
-Source: `bench/results/gpt2/summary.csv`
+Source: `bench/results/opt_runs/*_cpu_buf.json`
 
-| system | backend | preprocessing.key_bytes | timing.online_time_s | communication.net_bytes | pfss.open_flushes | pfss.opened_words |
-| --- | --- | ---: | ---: | ---: | ---: | ---: |
-| sigma | gpu | 15,346,094,080 | 2.947291 | 885,146,258 | 0 | 0 |
-| suf | gpu | 1,135,322,556 | 2.830700 | 627,795,456 | 1,152 | 97,400,832 |
+| model | preprocessing.key_bytes | timing.online_time_s | communication.net_bytes |
+| --- | ---: | ---: | ---: |
+| bert-tiny | 33,511,972 | 0.245207 | 12,075,328 |
+| bert-base | 1,059,609,376 | 45.113 | 434,702,208 |
+| bert-large | 3,390,247,064 | 263.356 | 1,159,204,608 |
+| gpt2 | 1,002,096,824 | 49.1632 | 378,521,472 |
 
-### Larger models (optimized SUF flags, seq=128)
+### Online profile highlight (gpt-neo-1.3b, GPU)
 
-Source: `bench/results/large_models/summary.csv`
+Source: `bench/results/opt_runs/gpt-neo-1.3b_gpu_profile_buf.json`
 
-| system | model | preprocessing.key_bytes | timing.online_time_s | communication.online_bytes |
-| --- | --- | ---: | ---: | ---: |
-| sigma | bert-base | 18,075,947,008 | 3.386349 | 1,062,390,674 |
-| suf | bert-base | 1,135,322,184 | 3.282370 | 792,826,368 |
-| sigma | bert-large | 48,799,535,104 | 8.253441 | 2,832,800,546 |
-| suf | bert-large | 3,696,971,852 | 9.306610 | 2,190,297,600 |
-| sigma | gpt2 | 15,346,094,080 | 2.985616 | 885,146,258 |
-| suf | gpt2 | 1,077,808,588 | 2.686140 | 627,795,456 |
-| sigma | gpt-neo-1.3b | 81,805,541,376 | 13.723769 | 4,325,592,866 |
-| suf | gpt-neo-1.3b | 4,401,605,224 | 23.363000 | 2,745,113,088 |
+| metric | value (ns) |
+| --- | ---: |
+| open_flush_ns | 13,943,162,902 |
+| open_pack_ns | 678,436,741 |
+| open_comm_ns | 9,419,577,990 |
+| open_scatter_ns | 3,576,591,938 |
+
+Note: with scratch-buffer reuse, `open_pack_ns` dropped below 1s for gpt-neo-1.3b; `open_comm_ns` and PFSS flush eval remain dominant.
+
+## Sigma baseline (from 2025-12-18 run)
+
+| model | preprocessing.key_bytes | timing.online_time_s | communication.net_bytes |
+| --- | ---: | ---: | ---: |
+| bert-tiny | 350,064,640 | 0.186802 | 21,675,034 |
+| bert-base | 18,075,947,008 | 3.386349 | 1,062,390,674 |
+| bert-large | 48,799,535,104 | 8.253441 | 2,832,800,546 |
+| gpt2 | 15,346,094,080 | 2.947291 | 885,146,258 |
+| gpt-neo-1.3b | 81,805,541,376 | 13.723769 | 4,325,592,866 |
 
 ## LLaMA2-7B status (not rerun)
 
