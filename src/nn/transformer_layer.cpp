@@ -29,7 +29,7 @@ inline uint64_t to_ring(int64_t v) { return proto::from_signed(v); }
 
 static bool per_element_masks_enabled() {
   const char* env = std::getenv("SUF_PER_ELEMENT_MASKS");
-  if (!env) return true;
+  if (!env) return false;
   std::string v(env);
   std::transform(v.begin(), v.end(), v.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });

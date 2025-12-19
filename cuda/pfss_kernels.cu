@@ -541,6 +541,28 @@ extern "C" __global__ void unpack_eff_bits_kernel(const uint64_t* packed,
   out[idx] = val;
 }
 
+// Pack fixed-width integers into a dense bitstream (little-endian in each word).
+extern "C" __global__ void pack_eff_bits_kernel(const uint64_t* in,
+                                                int eff_bits,
+                                                uint64_t* packed,
+                                                size_t N) {
+  size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= N) return;
+  if (eff_bits <= 0 || eff_bits > 64) return;
+  uint64_t mask = (eff_bits == 64) ? ~0ull : ((1ull << eff_bits) - 1ull);
+  uint64_t v = in[idx] & mask;
+  size_t bit_idx = idx * static_cast<size_t>(eff_bits);
+  size_t word_idx = bit_idx >> 6;
+  int bit_off = static_cast<int>(bit_idx & 63);
+  unsigned long long* out = reinterpret_cast<unsigned long long*>(packed);
+  atomicOr(out + word_idx, static_cast<unsigned long long>(v << bit_off));
+  int spill = bit_off + eff_bits - 64;
+  if (spill > 0) {
+    atomicOr(out + word_idx + 1,
+             static_cast<unsigned long long>(v >> (eff_bits - spill)));
+  }
+}
+
 namespace cuda_pfss {
 
 DeviceKey upload_key(const uint8_t* /*key_bytes*/, size_t /*key_len*/) {

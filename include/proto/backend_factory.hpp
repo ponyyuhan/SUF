@@ -10,10 +10,14 @@
 
 #include "proto/backend_clear.hpp"
 #include "proto/backend_gpu.hpp"
+#include "proto/sigma_fast_backend_ext.hpp"
+#ifdef SUF_HAVE_LIBDPF
+#include "proto/grotto_backend.hpp"
+#endif
 
 namespace proto {
 
-enum class PfssBackendKind { Auto, Cpu, Gpu };
+enum class PfssBackendKind { Auto, Cpu, Gpu, SigmaFast, Grotto };
 
 struct PfssBackendOptions {
   PfssBackendKind kind = PfssBackendKind::Auto;
@@ -26,6 +30,8 @@ inline PfssBackendKind parse_backend_kind(const char* env) {
   std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
   if (v == "gpu") return PfssBackendKind::Gpu;
   if (v == "cpu") return PfssBackendKind::Cpu;
+  if (v == "sigma" || v == "sigmafast" || v == "sigma_fast") return PfssBackendKind::SigmaFast;
+  if (v == "grotto") return PfssBackendKind::Grotto;
   return PfssBackendKind::Auto;
 }
 
@@ -34,6 +40,27 @@ inline std::unique_ptr<PfssBackendBatch> make_pfss_backend(const PfssBackendOpti
   if (kind == PfssBackendKind::Auto) {
     const char* env = std::getenv("SUF_PFSS_BACKEND");
     kind = parse_backend_kind(env);
+  }
+
+  if (kind == PfssBackendKind::Auto) {
+#ifdef SUF_HAVE_LIBDPF
+    return std::make_unique<GrottoBackend>();
+#else
+    return std::make_unique<SigmaFastBackend>();
+#endif
+  }
+
+  if (kind == PfssBackendKind::SigmaFast) {
+    return std::make_unique<SigmaFastBackend>();
+  }
+
+  if (kind == PfssBackendKind::Grotto) {
+#ifdef SUF_HAVE_LIBDPF
+    return std::make_unique<GrottoBackend>();
+#else
+    // Fall back to SigmaFast when libdpf is unavailable.
+    return std::make_unique<SigmaFastBackend>();
+#endif
   }
 
   if (kind == PfssBackendKind::Gpu) {

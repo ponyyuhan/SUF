@@ -161,7 +161,7 @@ static bool bench_cache_enabled() {
 
 static bool per_element_masks_enabled() {
   const char* env = std::getenv("SUF_PER_ELEMENT_MASKS");
-  if (!env) return true;
+  if (!env) return false;
   std::string v(env);
   std::transform(v.begin(), v.end(), v.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -1293,7 +1293,8 @@ void attention_forward(const AttentionConfig& cfg,
     phase_R.pfss_backend = &ctx->trunc_backend();
     phase_R.pfss_chan = pfss_chan_override ? pfss_chan_override : &pch;
     phase_R.pfss_coeff = &pe->pfss_coeff_batch();
-    phase_R.pfss_trunc = &pe->pfss_trunc_batch();
+    // Share a single PFSS batch for coeff + trunc to maximize per-phase batching.
+    phase_R.pfss_trunc = &pe->pfss_coeff_batch();
     phase_R.opens = &pe->open_collector();
     phase_planner.bind(phase_R.pfss_coeff, phase_R.pfss_trunc);
     if (!(ctx && ctx->force_eager_pfss)) {

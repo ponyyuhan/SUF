@@ -2,6 +2,14 @@
 
 Generated: `2025-12-19`
 
+## Implementation updates since last benchmark run
+
+- Integrated libdpf/grotto PFSS backend (predicate eval) while keeping paper.md semantics; interval/LUT paths still use sigmafast for parity.
+- Batched coeff + trunc PFSS jobs per phase and disabled per-element masks by default to reduce flushes.
+- Added GPU-side open packing/unpacking (`SUF_OPEN_PACK_DEVICE=1`) with a large-flush threshold.
+- Tests rerun: `ctest --test-dir build_ninja --output-on-failure`.
+- Benchmarks below were **not** rerun after these changes.
+
 ## Commands run
 
 - Tests: `ctest --test-dir build_ninja --output-on-failure`

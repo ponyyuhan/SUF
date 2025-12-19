@@ -8,6 +8,10 @@
 
 #include "proto/common.hpp"
 #include "runtime/bench_online_profile.hpp"
+#ifdef SUF_HAVE_CUDA
+#include <cuda_runtime.h>
+#include "runtime/cuda_primitives.hpp"
+#endif
 
 namespace runtime {
 
@@ -223,6 +227,15 @@ void unpack_eff_bits_host_into(const std::vector<uint64_t>& packed,
 
 }  // namespace
 
+OpenCollector::~OpenCollector() {
+#ifdef SUF_HAVE_CUDA
+  if (pack_scratch_.d_in) cudaFree(pack_scratch_.d_in);
+  if (pack_scratch_.d_packed) cudaFree(pack_scratch_.d_packed);
+  if (pack_scratch_.d_out) cudaFree(pack_scratch_.d_out);
+  pack_scratch_ = DevicePackScratch{};
+#endif
+}
+
 OpenHandle OpenCollector::enqueue(const std::vector<uint64_t>& diff, OpenKind kind) {
   size_t new_pending = pending_words_ + diff.size();
   if (limits_.max_pending_words > 0 && new_pending > limits_.max_pending_words) {
@@ -278,6 +291,14 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     int v = std::atoi(env);
     if (v <= 0 || v > 64) return 56;
     return v;
+  }();
+  const bool device_pack = env_flag_enabled("SUF_OPEN_PACK_DEVICE");
+  const size_t device_min_words = []() -> size_t {
+    const char* env = std::getenv("SUF_OPEN_PACK_DEVICE_MIN_WORDS");
+    if (!env) return 1ull << 18;
+    long long v = std::atoll(env);
+    if (v <= 0) return 1ull << 18;
+    return static_cast<size_t>(v);
   }();
   size_t total_words = 0;
   std::vector<size_t> req_offsets;
@@ -457,31 +478,115 @@ void OpenCollector::flush(int party, net::Chan& ch) {
   other_flat.resize(total_words);
   uint64_t pack2_ns = 0;
   if (eff > 0 && eff < 64) {
-    const auto t_pack2_0 = std::chrono::steady_clock::now();
     auto& packed_local = packed_local_buf_;
     auto& packed_remote = packed_remote_buf_;
-    pack_eff_bits_host_into(send_flat, eff, packed_local);
-    packed_remote.resize(packed_local.size());
-    const auto t_pack2_1 = std::chrono::steady_clock::now();
-    const auto t_comm4 = std::chrono::steady_clock::now();
-    if (party == 0) {
-      if (!packed_local.empty()) ch.send_u64s(packed_local.data(), packed_local.size());
-      if (!packed_remote.empty()) ch.recv_u64s(packed_remote.data(), packed_remote.size());
-    } else {
-      if (!packed_remote.empty()) ch.recv_u64s(packed_remote.data(), packed_remote.size());
-      if (!packed_local.empty()) ch.send_u64s(packed_local.data(), packed_local.size());
+    const size_t packed_words = packed_words_host(total_words, eff);
+    packed_local.resize(packed_words);
+    packed_remote.resize(packed_words);
+    bool used_device_pack = false;
+#ifdef SUF_HAVE_CUDA
+    const bool want_device_pack = device_pack && total_words >= device_min_words;
+    if (want_device_pack) {
+      auto check_cuda = [](cudaError_t st, const char* what) {
+        if (st != cudaSuccess) {
+          throw std::runtime_error(std::string(what) + ": " + cudaGetErrorString(st));
+        }
+      };
+      auto ensure_buffers = [&](size_t words, size_t packed_words_local) {
+        const size_t in_bytes = words * sizeof(uint64_t);
+        const size_t packed_bytes = packed_words_local * sizeof(uint64_t);
+        if (pack_scratch_.in_cap < in_bytes) {
+          if (pack_scratch_.d_in) cudaFree(pack_scratch_.d_in);
+          check_cuda(cudaMalloc(&pack_scratch_.d_in, in_bytes), "cudaMalloc open_pack d_in");
+          pack_scratch_.in_cap = in_bytes;
+        }
+        if (pack_scratch_.packed_cap < packed_bytes) {
+          if (pack_scratch_.d_packed) cudaFree(pack_scratch_.d_packed);
+          check_cuda(cudaMalloc(&pack_scratch_.d_packed, packed_bytes), "cudaMalloc open_pack d_packed");
+          pack_scratch_.packed_cap = packed_bytes;
+        }
+        if (pack_scratch_.out_cap < in_bytes) {
+          if (pack_scratch_.d_out) cudaFree(pack_scratch_.d_out);
+          check_cuda(cudaMalloc(&pack_scratch_.d_out, in_bytes), "cudaMalloc open_pack d_out");
+          pack_scratch_.out_cap = in_bytes;
+        } else if (!pack_scratch_.d_out) {
+          check_cuda(cudaMalloc(&pack_scratch_.d_out, in_bytes), "cudaMalloc open_pack d_out");
+          pack_scratch_.out_cap = in_bytes;
+        }
+      };
+      try {
+        const auto t_pack2_0 = std::chrono::steady_clock::now();
+        ensure_buffers(total_words, packed_words);
+        check_cuda(cudaMemcpy(pack_scratch_.d_in, send_flat.data(),
+                              total_words * sizeof(uint64_t),
+                              cudaMemcpyHostToDevice),
+                   "cudaMemcpy H2D open_pack");
+        launch_pack_eff_bits_kernel(pack_scratch_.d_in, eff, pack_scratch_.d_packed,
+                                    total_words, nullptr);
+        check_cuda(cudaMemcpy(packed_local.data(), pack_scratch_.d_packed,
+                              packed_words * sizeof(uint64_t),
+                              cudaMemcpyDeviceToHost),
+                   "cudaMemcpy D2H open_pack");
+        const auto t_pack2_1 = std::chrono::steady_clock::now();
+        const auto t_comm4 = std::chrono::steady_clock::now();
+        if (party == 0) {
+          if (!packed_local.empty()) ch.send_u64s(packed_local.data(), packed_local.size());
+          if (!packed_remote.empty()) ch.recv_u64s(packed_remote.data(), packed_remote.size());
+        } else {
+          if (!packed_remote.empty()) ch.recv_u64s(packed_remote.data(), packed_remote.size());
+          if (!packed_local.empty()) ch.send_u64s(packed_local.data(), packed_local.size());
+        }
+        const auto t_comm5 = std::chrono::steady_clock::now();
+        const auto t_pack2_2 = std::chrono::steady_clock::now();
+        check_cuda(cudaMemcpy(pack_scratch_.d_packed, packed_remote.data(),
+                              packed_words * sizeof(uint64_t),
+                              cudaMemcpyHostToDevice),
+                   "cudaMemcpy H2D open_unpack");
+        launch_unpack_eff_bits_kernel(pack_scratch_.d_packed, eff, pack_scratch_.d_out,
+                                      total_words, nullptr);
+        check_cuda(cudaMemcpy(other_flat.data(), pack_scratch_.d_out,
+                              total_words * sizeof(uint64_t),
+                              cudaMemcpyDeviceToHost),
+                   "cudaMemcpy D2H open_unpack");
+        if (signed_pack && n_bits > 0 && n_bits <= 64) {
+          for (auto& w : other_flat) w = sign_extend_to_nbits(w, eff, n_bits);
+        }
+        const auto t_pack2_3 = std::chrono::steady_clock::now();
+        pack2_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                             (t_pack2_1 - t_pack2_0) + (t_pack2_3 - t_pack2_2))
+                                             .count());
+        add_ns(runtime::bench::OnlineTimeKind::OpenComm, t_comm4, t_comm5);
+        used_device_pack = true;
+      } catch (const std::exception&) {
+        used_device_pack = false;
+      }
     }
-    const auto t_comm5 = std::chrono::steady_clock::now();
-    const auto t_pack2_2 = std::chrono::steady_clock::now();
-    unpack_eff_bits_host_into(packed_remote, eff, total_words, other_flat);
-    if (signed_pack && n_bits > 0 && n_bits <= 64) {
-      for (auto& w : other_flat) w = sign_extend_to_nbits(w, eff, n_bits);
+#endif
+    if (!used_device_pack) {
+      const auto t_pack2_0 = std::chrono::steady_clock::now();
+      pack_eff_bits_host_into(send_flat, eff, packed_local);
+      packed_remote.resize(packed_local.size());
+      const auto t_pack2_1 = std::chrono::steady_clock::now();
+      const auto t_comm4 = std::chrono::steady_clock::now();
+      if (party == 0) {
+        if (!packed_local.empty()) ch.send_u64s(packed_local.data(), packed_local.size());
+        if (!packed_remote.empty()) ch.recv_u64s(packed_remote.data(), packed_remote.size());
+      } else {
+        if (!packed_remote.empty()) ch.recv_u64s(packed_remote.data(), packed_remote.size());
+        if (!packed_local.empty()) ch.send_u64s(packed_local.data(), packed_local.size());
+      }
+      const auto t_comm5 = std::chrono::steady_clock::now();
+      const auto t_pack2_2 = std::chrono::steady_clock::now();
+      unpack_eff_bits_host_into(packed_remote, eff, total_words, other_flat);
+      if (signed_pack && n_bits > 0 && n_bits <= 64) {
+        for (auto& w : other_flat) w = sign_extend_to_nbits(w, eff, n_bits);
+      }
+      const auto t_pack2_3 = std::chrono::steady_clock::now();
+      pack2_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                           (t_pack2_1 - t_pack2_0) + (t_pack2_3 - t_pack2_2))
+                                           .count());
+      add_ns(runtime::bench::OnlineTimeKind::OpenComm, t_comm4, t_comm5);
     }
-    const auto t_pack2_3 = std::chrono::steady_clock::now();
-    pack2_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                         (t_pack2_1 - t_pack2_0) + (t_pack2_3 - t_pack2_2))
-                                         .count());
-    add_ns(runtime::bench::OnlineTimeKind::OpenComm, t_comm4, t_comm5);
   } else {
     // Fallback: no packing.
     const auto t_comm4 = std::chrono::steady_clock::now();

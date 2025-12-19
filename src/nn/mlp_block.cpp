@@ -389,7 +389,8 @@ void mlp_forward(const MLPConfig& cfg,
     R.pfss_chan = pfss_chan_override ? pfss_chan_override : &pch;
     R.net_chan = &ch;
     R.pfss_coeff = &pe->pfss_coeff_batch();
-    R.pfss_trunc = &pe->pfss_trunc_batch();
+    // Share a single PFSS batch for coeff + trunc to maximize per-phase batching.
+    R.pfss_trunc = &pe->pfss_coeff_batch();
     R.opens = &pe->open_collector();
     runtime::PfssSuperBatch::Limits pfss_lim;
     pfss_lim.max_pending_jobs = 1ull << 13;

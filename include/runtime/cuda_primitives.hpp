@@ -173,6 +173,14 @@ void launch_unpack_eff_bits_kernel(const uint64_t* d_packed,
                                    size_t n,
                                    void* stream /* cudaStream_t */);
 
+// Pack fixed-width integers into a dense bitstream on device.
+// d_in holds n u64 values; d_packed must have ceil(n*eff_bits/64) words.
+void launch_pack_eff_bits_kernel(const uint64_t* d_in,
+                                 int eff_bits,
+                                 uint64_t* d_packed,
+                                 size_t n,
+                                 void* stream /* cudaStream_t */);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

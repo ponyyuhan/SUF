@@ -89,6 +89,8 @@ class OpenCollector {
     size_t max_pending_words = 1ull << 24;  // generous guardrail
   };
 
+  ~OpenCollector();
+
   // Enqueue a buffer of local shares to be opened; returns a handle to view later.
   OpenHandle enqueue(const std::vector<uint64_t>& diff, OpenKind kind = OpenKind::kOther);
 
@@ -131,6 +133,17 @@ class OpenCollector {
   std::vector<uint64_t> other_flat_buf_;
   std::vector<uint64_t> packed_local_buf_;
   std::vector<uint64_t> packed_remote_buf_;
+#ifdef SUF_HAVE_CUDA
+  struct DevicePackScratch {
+    uint64_t* d_in = nullptr;
+    uint64_t* d_packed = nullptr;
+    uint64_t* d_out = nullptr;
+    size_t in_cap = 0;
+    size_t packed_cap = 0;
+    size_t out_cap = 0;
+  };
+  DevicePackScratch pack_scratch_;
+#endif
 };
 
 }  // namespace runtime

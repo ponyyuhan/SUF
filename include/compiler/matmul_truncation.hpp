@@ -15,7 +15,7 @@ namespace compiler {
 
 inline bool per_element_masks_enabled_from_env() {
   const char* env = std::getenv("SUF_PER_ELEMENT_MASKS");
-  if (!env) return true;
+  if (!env) return false;
   std::string v(env);
   std::transform(v.begin(), v.end(), v.begin(),
                  [](unsigned char c) { return static_cast<char>(std::tolower(c)); });

@@ -6,6 +6,10 @@ extern "C" __global__ void unpack_eff_bits_kernel(const uint64_t* packed,
                                                   int eff_bits,
                                                   uint64_t* out,
                                                   size_t N);
+extern "C" __global__ void pack_eff_bits_kernel(const uint64_t* in,
+                                                int eff_bits,
+                                                uint64_t* packed,
+                                                size_t N);
 
 namespace {
 
@@ -737,5 +741,26 @@ extern "C" void launch_unpack_eff_bits_kernel(const uint64_t* d_packed,
   int grid = static_cast<int>((n + kBlock - 1) / kBlock);
   unpack_eff_bits_kernel<<<grid, kBlock, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
       d_packed, eff_bits, d_out, n);
+#endif
+}
+
+extern "C" void launch_pack_eff_bits_kernel(const uint64_t* d_in,
+                                            int eff_bits,
+                                            uint64_t* d_packed,
+                                            size_t n,
+                                            void* stream) {
+#ifndef SUF_HAVE_CUDA
+  (void)d_in; (void)eff_bits; (void)d_packed; (void)n; (void)stream;
+#else
+  if (n == 0) return;
+  if (eff_bits <= 0 || eff_bits > 64) return;
+  unsigned __int128 total_bits = static_cast<unsigned __int128>(n) *
+                                 static_cast<unsigned __int128>(eff_bits);
+  size_t packed_words = static_cast<size_t>((total_bits + 63) / 64);
+  cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+  cudaMemsetAsync(d_packed, 0, packed_words * sizeof(uint64_t), s);
+  constexpr int kBlock = 256;
+  int grid = static_cast<int>((n + kBlock - 1) / kBlock);
+  pack_eff_bits_kernel<<<grid, kBlock, 0, s>>>(d_in, eff_bits, d_packed, n);
 #endif
 }
