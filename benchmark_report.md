@@ -66,6 +66,7 @@ Source: `bench/results/opt_runs/gpt-neo-1.3b_gpu_profile_buf.json`
 | open_scatter_ns | 3,576,591,938 |
 
 Note: with scratch-buffer reuse, `open_pack_ns` dropped below 1s for gpt-neo-1.3b; `open_comm_ns` and PFSS flush eval remain dominant.
+Packing at 50–51 bits still increased total time in local tests because CPU pack/unpack adds multiple seconds per run; net-byte savings did not offset the cost.
 
 ## Sigma baseline (from 2025-12-18 run)
 

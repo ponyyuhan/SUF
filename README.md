@@ -149,6 +149,7 @@ SIGMA is also an online two-party protocol; in the Sigma-vs-SUF harness we norma
   - Prefer `PhaseExecutor` lazy scheduling (default) so it batches opens/PFSS work until tasks stall.
   - Keep batches alive across phases (`PhaseExecutor::set_keep_batches(true)` is used in the transformer stack).
   - When profiling shows `open_pack_ns` or `open_scatter_ns` dominating, focus on host-side packaging before touching PFSS kernels.
+  - If `pfss.num_flushes` ≈ `pfss.num_jobs`, the run is latency-bound by PFSS round trips; improving this typically requires batching more jobs per phase or swapping in a faster PFSS backend.
 - **Exploit GPU overlap where safe**:
   - `attention_block.cpp` uses an **overlap GEMM stream** (`MatmulParams::overlap_stream`) so GPU PFSS kernels can overlap with matmul.
   - Enable weight/bias caching on GPU where pointers are stable: `MatmulParams::cache_weights/cache_bias`.
@@ -158,6 +159,7 @@ SIGMA is also an online two-party protocol; in the Sigma-vs-SUF harness we norma
 - **Watch host-side packaging**:
   - `OpenCollector` flatten/scatter can dominate `online_profile.open_pack_ns` / `open_scatter_ns` on large models.
   - The current implementation parallelizes request flattening and reuses scratch buffers to reduce allocation overhead.
+  - Bit-packing uses block-aligned chunks to enable OpenMP parallelization where `eff_bits` aligns to 64-bit words.
   - If open-pack time is still high, keep `SUF_OPEN_PACK_AUTO=1` and avoid forcing packing at 50–51-bit rings.
 
 ## Latest Benchmark Snapshot (SUF-only)

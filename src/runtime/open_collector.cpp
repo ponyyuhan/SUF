@@ -87,6 +87,15 @@ uint64_t mask_bits_host(int eff_bits) {
   return (uint64_t(1) << eff_bits) - 1;
 }
 
+size_t gcd_size_t(size_t a, size_t b) {
+  while (b != 0) {
+    size_t t = a % b;
+    a = b;
+    b = t;
+  }
+  return a;
+}
+
 void pack_eff_bits_host_into(const std::vector<uint64_t>& xs,
                              int eff_bits,
                              std::vector<uint64_t>& out) {
@@ -101,22 +110,54 @@ void pack_eff_bits_host_into(const std::vector<uint64_t>& xs,
   const size_t words = packed_words_host(xs.size(), eff_bits);
   out.assign(words, 0);
   const uint64_t mask = mask_bits_host(eff_bits);
-  unsigned __int128 acc = 0;
-  int acc_bits = 0;
-  size_t out_w = 0;
-  for (size_t i = 0; i < xs.size(); ++i) {
-    uint64_t v = xs[i] & mask;
-    acc |= (static_cast<unsigned __int128>(v) << acc_bits);
-    acc_bits += eff_bits;
-    while (acc_bits >= 64) {
-      if (out_w >= out.size()) break;
-      out[out_w++] = static_cast<uint64_t>(acc);
-      acc >>= 64;
-      acc_bits -= 64;
+  const size_t n = xs.size();
+  if (n == 0) return;
+  const size_t g = gcd_size_t(static_cast<size_t>(eff_bits), 64);
+  const size_t block_in = 64 / g;
+  const size_t block_out = (block_in * static_cast<size_t>(eff_bits)) / 64;
+  const size_t full_blocks = n / block_in;
+  const size_t tail = n - full_blocks * block_in;
+
+#ifdef _OPENMP
+#pragma omp parallel for if (full_blocks >= 8) schedule(static)
+#endif
+  for (size_t b = 0; b < full_blocks; ++b) {
+    const size_t in_off = b * block_in;
+    const size_t out_off = b * block_out;
+    unsigned __int128 acc = 0;
+    int acc_bits = 0;
+    size_t out_w = 0;
+    for (size_t i = 0; i < block_in; ++i) {
+      uint64_t v = xs[in_off + i] & mask;
+      acc |= (static_cast<unsigned __int128>(v) << acc_bits);
+      acc_bits += eff_bits;
+      while (acc_bits >= 64) {
+        out[out_off + out_w++] = static_cast<uint64_t>(acc);
+        acc >>= 64;
+        acc_bits -= 64;
+      }
     }
   }
-  if (acc_bits > 0 && out_w < out.size()) {
-    out[out_w++] = static_cast<uint64_t>(acc);
+  if (tail) {
+    const size_t in_off = full_blocks * block_in;
+    const size_t out_off = full_blocks * block_out;
+    unsigned __int128 acc = 0;
+    int acc_bits = 0;
+    size_t out_w = 0;
+    for (size_t i = 0; i < tail; ++i) {
+      uint64_t v = xs[in_off + i] & mask;
+      acc |= (static_cast<unsigned __int128>(v) << acc_bits);
+      acc_bits += eff_bits;
+      while (acc_bits >= 64) {
+        if (out_off + out_w >= out.size()) break;
+        out[out_off + out_w++] = static_cast<uint64_t>(acc);
+        acc >>= 64;
+        acc_bits -= 64;
+      }
+    }
+    if (acc_bits > 0 && out_off + out_w < out.size()) {
+      out[out_off + out_w++] = static_cast<uint64_t>(acc);
+    }
   }
 }
 
@@ -133,19 +174,50 @@ void unpack_eff_bits_host_into(const std::vector<uint64_t>& packed,
   }
   out.assign(elems, 0);
   const uint64_t mask = mask_bits_host(eff_bits);
-  unsigned __int128 acc = 0;
-  int acc_bits = 0;
-  size_t in_w = 0;
-  for (size_t i = 0; i < elems; ++i) {
-    while (acc_bits < eff_bits) {
-      uint64_t w = (in_w < packed.size()) ? packed[in_w] : 0ull;
-      ++in_w;
-      acc |= (static_cast<unsigned __int128>(w) << acc_bits);
-      acc_bits += 64;
+  if (elems == 0) return;
+  const size_t g = gcd_size_t(static_cast<size_t>(eff_bits), 64);
+  const size_t block_in = 64 / g;
+  const size_t block_out = (block_in * static_cast<size_t>(eff_bits)) / 64;
+  const size_t full_blocks = elems / block_in;
+  const size_t tail = elems - full_blocks * block_in;
+
+#ifdef _OPENMP
+#pragma omp parallel for if (full_blocks >= 8) schedule(static)
+#endif
+  for (size_t b = 0; b < full_blocks; ++b) {
+    const size_t out_off = b * block_in;
+    const size_t in_off = b * block_out;
+    unsigned __int128 acc = 0;
+    int acc_bits = 0;
+    size_t in_w = 0;
+    for (size_t i = 0; i < block_in; ++i) {
+      while (acc_bits < eff_bits) {
+        uint64_t w = packed[in_off + in_w++];
+        acc |= (static_cast<unsigned __int128>(w) << acc_bits);
+        acc_bits += 64;
+      }
+      out[out_off + i] = static_cast<uint64_t>(acc) & mask;
+      acc >>= eff_bits;
+      acc_bits -= eff_bits;
     }
-    out[i] = static_cast<uint64_t>(acc) & mask;
-    acc >>= eff_bits;
-    acc_bits -= eff_bits;
+  }
+  if (tail) {
+    const size_t out_off = full_blocks * block_in;
+    const size_t in_off = full_blocks * block_out;
+    unsigned __int128 acc = 0;
+    int acc_bits = 0;
+    size_t in_w = 0;
+    for (size_t i = 0; i < tail; ++i) {
+      while (acc_bits < eff_bits) {
+        uint64_t w = (in_off + in_w < packed.size()) ? packed[in_off + in_w] : 0ull;
+        ++in_w;
+        acc |= (static_cast<unsigned __int128>(w) << acc_bits);
+        acc_bits += 64;
+      }
+      out[out_off + i] = static_cast<uint64_t>(acc) & mask;
+      acc >>= eff_bits;
+      acc_bits -= eff_bits;
+    }
   }
 }
 
@@ -237,7 +309,7 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     int max_bits_local = 1;
     if (signed_pack) {
 #ifdef _OPENMP
-#pragma omp parallel for if (nreq >= 8) reduction(max : max_bits_local)
+#pragma omp parallel for if (nreq >= 8) reduction(max : max_bits_local) schedule(static)
 #endif
       for (size_t idx = 0; idx < nreq; ++idx) {
         const auto& req = requests_[idx];
@@ -254,7 +326,7 @@ void OpenCollector::flush(int party, net::Chan& ch) {
       }
     } else {
 #ifdef _OPENMP
-#pragma omp parallel for if (nreq >= 8) reduction(max : max_bits_local)
+#pragma omp parallel for if (nreq >= 8) reduction(max : max_bits_local) schedule(static)
 #endif
       for (size_t idx = 0; idx < nreq; ++idx) {
         const auto& req = requests_[idx];
@@ -273,7 +345,7 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     max_bits = max_bits_local;
   } else {
 #ifdef _OPENMP
-#pragma omp parallel for if (nreq >= 8)
+#pragma omp parallel for if (nreq >= 8) schedule(static)
 #endif
     for (size_t idx = 0; idx < nreq; ++idx) {
       const auto& req = requests_[idx];
@@ -327,11 +399,14 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     const auto t_scatter0 = std::chrono::steady_clock::now();
     const uint64_t* recv_ptr = recv_flat.data();
 #ifdef _OPENMP
-#pragma omp parallel for if (nreq >= 8)
+#pragma omp parallel for if (nreq >= 8) schedule(static)
 #endif
     for (size_t idx = 0; idx < nreq; ++idx) {
       const auto& req = requests_[idx];
       size_t off = req_offsets[idx];
+#ifdef _OPENMP
+#pragma omp simd
+#endif
       for (size_t i = 0; i < req.len; ++i) {
         uint64_t opened = proto::add_mod(req.diff[i], recv_ptr[off + i]);
         req.slot->opened[req.offset + i] = proto::to_signed(opened);
@@ -424,11 +499,14 @@ void OpenCollector::flush(int party, net::Chan& ch) {
   const auto t_scatter0 = std::chrono::steady_clock::now();
   const uint64_t* other_ptr = other_flat.data();
 #ifdef _OPENMP
-#pragma omp parallel for if (nreq >= 8)
+#pragma omp parallel for if (nreq >= 8) schedule(static)
 #endif
   for (size_t idx = 0; idx < nreq; ++idx) {
     const auto& req = requests_[idx];
     size_t off = req_offsets[idx];
+#ifdef _OPENMP
+#pragma omp simd
+#endif
     for (size_t i = 0; i < req.len; ++i) {
       uint64_t opened = proto::add_mod(req.diff[i], other_ptr[off + i]);
       req.slot->opened[req.offset + i] = proto::to_signed(opened);
