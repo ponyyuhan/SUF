@@ -20,6 +20,7 @@
 #include "proto/pfss_backend_batch.hpp"
 #include "runtime/phase_executor.hpp"
 #include "runtime/pfss_phase_planner.hpp"
+#include "runtime/pfss_gpu_staging.hpp"
 
 namespace {
 
@@ -220,9 +221,23 @@ int main(int argc, char** argv) {
         nn::LayerContext ctx;
         ctx.trunc_ctx = &trunc_ctx;
         ctx.pfss_backend_override = &be;
+        // Use the dedicated PFSS byte channel for Beaver/PFSS traffic so we can
+        // measure PFSS-side bytes separately from net opens.
+        ctx.pfss_chan = &pfss_ch;
         ctx.frac_bits = fb;
         runtime::PfssLayerPlanner layer_planner;
         ctx.pfss_layer_planner = &layer_planner;
+#ifdef SUF_HAVE_CUDA
+        std::unique_ptr<runtime::CudaPfssStager> cuda_stager;
+        if (ctx.uses_gpu_backend()) {
+          void* stream = nullptr;
+          if (auto* gpu_eval = dynamic_cast<proto::PfssGpuStagedEval*>(&be)) {
+            stream = gpu_eval->device_stream();
+          }
+          cuda_stager = std::make_unique<runtime::CudaPfssStager>(stream);
+          ctx.pfss_gpu_stager = cuda_stager.get();
+        }
+#endif
 
         runtime::PhaseResources R{};
         R.party = party;

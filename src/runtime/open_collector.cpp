@@ -300,9 +300,10 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     if (v <= 0 || v > 64) return 56;
     return v;
   }();
-  const bool device_pack = env_flag_enabled("SUF_OPEN_PACK_DEVICE");
-  const bool device_scatter = env_flag_enabled_default("SUF_OPEN_PACK_DEVICE_SCATTER", false);
-  const bool device_keep_opened = env_flag_enabled_default("SUF_OPEN_PACK_DEVICE_KEEP_OPENED", false);
+  const bool have_cuda_stream = (cuda_stream_ != nullptr);
+  const bool device_pack = env_flag_enabled_default("SUF_OPEN_PACK_DEVICE", have_cuda_stream);
+  const bool device_scatter = env_flag_enabled_default("SUF_OPEN_PACK_DEVICE_SCATTER", have_cuda_stream);
+  const bool device_keep_opened = env_flag_enabled_default("SUF_OPEN_PACK_DEVICE_KEEP_OPENED", have_cuda_stream);
   const size_t device_min_words = []() -> size_t {
     const char* env = std::getenv("SUF_OPEN_PACK_DEVICE_MIN_WORDS");
     if (!env) return 1ull << 18;

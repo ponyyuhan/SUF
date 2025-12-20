@@ -1445,6 +1445,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     return xs_vec;
   };
   if (dbg) std::cerr << "[party " << party << "] pred eval start packed=" << (packed && k.use_packed_pred) << " N=" << N << "\n";
+  const bool need_pred_bits = (compiled.ell > 0) && !compiled.pred.queries.empty();
   if (packed && k.use_packed_pred && !k.packed_pred_groups.empty()) {
     pred_masks.assign(N * static_cast<size_t>(k.packed_pred_words), 0);
     for (const auto& grp : k.packed_pred_groups) {
@@ -1487,8 +1488,12 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       }
     }
   } else {
-    pred_bits_xor.resize(compiled.pred.queries.size() * N, 0);
-    for (size_t qi = 0; qi < compiled.pred.queries.size(); qi++) {
+    if (!need_pred_bits) {
+      pred_bits_xor.clear();
+      pred_masks.clear();
+    }
+    pred_bits_xor.resize(need_pred_bits ? (compiled.pred.queries.size() * N) : 0, 0);
+    for (size_t qi = 0; qi < (need_pred_bits ? compiled.pred.queries.size() : 0); qi++) {
       const bool prof = ::runtime::bench::online_profiling_enabled();
       int bits_in = (compiled.pred.queries[qi].kind == compiler::RawPredKind::kLtU64)
                         ? ((compiled.pred.eff_bits > 0 && compiled.pred.eff_bits <= compiled.pred.n)
@@ -1533,98 +1538,101 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
   if (dbg) std::cerr << "[party " << party << "] pred eval done\n";
 
   // Cut predicate bits (XOR)
-  std::vector<uint64_t> cut_bits_xor(k.cut_pred_keys.size() * N, 0);
-  if (dbg) std::cerr << "[party " << party << "] cut eval start packed=" << (packed && k.use_packed_cut) << "\n";
-  if (packed && k.use_packed_cut && !k.packed_cut_groups.empty()) {
-    cut_masks.assign(N * static_cast<size_t>(k.packed_cut_words), 0);
-    for (const auto& grp : k.packed_cut_groups) {
-      const bool prof = ::runtime::bench::online_profiling_enabled();
-      size_t key_bytes = grp.key.bytes.size();
-      std::vector<uint64_t> masks(N * static_cast<size_t>(grp.out_words), 0);
-      const auto t_eval0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-      if (staged && in.hatx_device) {
-        staged->eval_packed_lt_many_device_broadcast(key_bytes, grp.key.bytes.data(),
-                                           reinterpret_cast<const uint64_t*>(in.hatx_device),
-                                           N, grp.in_bits, grp.out_words, masks.data());
-      } else {
-        const auto& xs = ensure_xs_vec();
-        std::vector<uint8_t> keys_flat(N * key_bytes);
-        for (size_t i = 0; i < N; i++) {
-          std::memcpy(keys_flat.data() + i * key_bytes, grp.key.bytes.data(), key_bytes);
-        }
-        packed->eval_packed_lt_many(key_bytes, keys_flat.data(), xs,
-                                    grp.in_bits, grp.out_words, masks.data());
-      }
-      if (prof) {
-        const auto t_eval1 = std::chrono::steady_clock::now();
-        ::runtime::bench::add_online_ns(
-            ::runtime::bench::OnlineTimeKind::PfssPredEval,
-            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t_eval1 - t_eval0).count()));
-      }
-      for (size_t i = 0; i < N; i++) {
-        uint64_t* dst = cut_masks.data() + i * static_cast<size_t>(k.packed_cut_words);
-        const uint64_t* src = masks.data() + i * static_cast<size_t>(grp.out_words);
-        for (size_t b = 0; b < grp.num_bits; b++) {
-          size_t global = grp.bit_base + b;
-          if (global >= k.cut_pred_keys.size()) break;
-          size_t w = b >> 6;
-          size_t bit = b & 63;
-          uint64_t val = (src[w] >> bit) & 1ull;
-          size_t dw = global >> 6;
-          size_t db = global & 63;
-          dst[dw] |= (val << db);
-        }
-      }
-    }
-    for (size_t i = 0; i < N; i++) {
-      PredViewPacked pc{cut_masks.data() + i * static_cast<size_t>(k.packed_cut_words),
-                        static_cast<size_t>(k.packed_cut_words)};
-      for (size_t ci = 0; ci < k.cut_pred_keys.size(); ci++) {
-        cut_bits_xor[ci * N + i] = pc.get(ci);
-      }
-    }
-  } else {
-    int cut_bits_in = (compiled.coeff.eff_bits > 0 && compiled.coeff.eff_bits <= compiled.coeff.n)
-                          ? compiled.coeff.eff_bits
-                          : compiled.coeff.n;
-    for (size_t ci = 0; ci < k.cut_pred_keys.size(); ci++) {
-      const bool prof = ::runtime::bench::online_profiling_enabled();
-      size_t key_bytes = k.cut_pred_keys[ci].bytes.size();
-      size_t out_bytes = static_cast<size_t>(k.cut_pred_meta.out_bytes);
-      if (out_bytes == 0) throw std::runtime_error("cut_pred_meta.out_bytes must be >0");
-      std::vector<uint8_t> outs_flat(N * out_bytes);
-      const auto t_eval0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-      if (staged && in.hatx_device) {
-        staged->eval_dcf_many_u64_device_broadcast(cut_bits_in, key_bytes, k.cut_pred_keys[ci].bytes.data(),
-                                         reinterpret_cast<const uint64_t*>(in.hatx_device),
-                                         N, k.cut_pred_meta.out_bytes, outs_flat.data());
-      } else {
-        const auto& xs = ensure_xs_vec();
-        std::vector<uint8_t> keys_flat(N * key_bytes);
-        for (size_t i = 0; i < N; i++) {
-          std::memcpy(keys_flat.data() + i * key_bytes, k.cut_pred_keys[ci].bytes.data(), key_bytes);
-        }
-        backend.eval_dcf_many_u64(cut_bits_in, key_bytes, keys_flat.data(), xs,
-                                  k.cut_pred_meta.out_bytes, outs_flat.data());
-      }
-      if (prof) {
-        const auto t_eval1 = std::chrono::steady_clock::now();
-        ::runtime::bench::add_online_ns(
-            ::runtime::bench::OnlineTimeKind::PfssPredEval,
-            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t_eval1 - t_eval0).count()));
-      }
-      for (size_t i = 0; i < N; i++) {
-        if (k.cut_pred_meta.sem == proto::ShareSemantics::XorBytes) {
-          cut_bits_xor[ci * N + i] = static_cast<uint64_t>(outs_flat[i * out_bytes] & 1u);
+  const bool need_cut_bits = (compiled.ell > 0) && !k.cut_pred_keys.empty();
+  std::vector<uint64_t> cut_bits_xor(need_cut_bits ? (k.cut_pred_keys.size() * N) : 0, 0);
+  if (need_cut_bits) {
+    if (dbg) std::cerr << "[party " << party << "] cut eval start packed=" << (packed && k.use_packed_cut) << "\n";
+    if (packed && k.use_packed_cut && !k.packed_cut_groups.empty()) {
+      cut_masks.assign(N * static_cast<size_t>(k.packed_cut_words), 0);
+      for (const auto& grp : k.packed_cut_groups) {
+        const bool prof = ::runtime::bench::online_profiling_enabled();
+        size_t key_bytes = grp.key.bytes.size();
+        std::vector<uint64_t> masks(N * static_cast<size_t>(grp.out_words), 0);
+        const auto t_eval0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        if (staged && in.hatx_device) {
+          staged->eval_packed_lt_many_device_broadcast(key_bytes, grp.key.bytes.data(),
+                                             reinterpret_cast<const uint64_t*>(in.hatx_device),
+                                             N, grp.in_bits, grp.out_words, masks.data());
         } else {
-          uint64_t v = 0;
-          std::memcpy(&v, outs_flat.data() + i * out_bytes, std::min<size_t>(8, out_bytes));
-          cut_bits_xor[ci * N + i] = v & 1ull;
+          const auto& xs = ensure_xs_vec();
+          std::vector<uint8_t> keys_flat(N * key_bytes);
+          for (size_t i = 0; i < N; i++) {
+            std::memcpy(keys_flat.data() + i * key_bytes, grp.key.bytes.data(), key_bytes);
+          }
+          packed->eval_packed_lt_many(key_bytes, keys_flat.data(), xs,
+                                      grp.in_bits, grp.out_words, masks.data());
+        }
+        if (prof) {
+          const auto t_eval1 = std::chrono::steady_clock::now();
+          ::runtime::bench::add_online_ns(
+              ::runtime::bench::OnlineTimeKind::PfssPredEval,
+              static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t_eval1 - t_eval0).count()));
+        }
+        for (size_t i = 0; i < N; i++) {
+          uint64_t* dst = cut_masks.data() + i * static_cast<size_t>(k.packed_cut_words);
+          const uint64_t* src = masks.data() + i * static_cast<size_t>(grp.out_words);
+          for (size_t b = 0; b < grp.num_bits; b++) {
+            size_t global = grp.bit_base + b;
+            if (global >= k.cut_pred_keys.size()) break;
+            size_t w = b >> 6;
+            size_t bit = b & 63;
+            uint64_t val = (src[w] >> bit) & 1ull;
+            size_t dw = global >> 6;
+            size_t db = global & 63;
+            dst[dw] |= (val << db);
+          }
+        }
+      }
+      for (size_t i = 0; i < N; i++) {
+        PredViewPacked pc{cut_masks.data() + i * static_cast<size_t>(k.packed_cut_words),
+                          static_cast<size_t>(k.packed_cut_words)};
+        for (size_t ci = 0; ci < k.cut_pred_keys.size(); ci++) {
+          cut_bits_xor[ci * N + i] = pc.get(ci);
+        }
+      }
+    } else {
+      int cut_bits_in = (compiled.coeff.eff_bits > 0 && compiled.coeff.eff_bits <= compiled.coeff.n)
+                            ? compiled.coeff.eff_bits
+                            : compiled.coeff.n;
+      for (size_t ci = 0; ci < k.cut_pred_keys.size(); ci++) {
+        const bool prof = ::runtime::bench::online_profiling_enabled();
+        size_t key_bytes = k.cut_pred_keys[ci].bytes.size();
+        size_t out_bytes = static_cast<size_t>(k.cut_pred_meta.out_bytes);
+        if (out_bytes == 0) throw std::runtime_error("cut_pred_meta.out_bytes must be >0");
+        std::vector<uint8_t> outs_flat(N * out_bytes);
+        const auto t_eval0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        if (staged && in.hatx_device) {
+          staged->eval_dcf_many_u64_device_broadcast(cut_bits_in, key_bytes, k.cut_pred_keys[ci].bytes.data(),
+                                           reinterpret_cast<const uint64_t*>(in.hatx_device),
+                                           N, k.cut_pred_meta.out_bytes, outs_flat.data());
+        } else {
+          const auto& xs = ensure_xs_vec();
+          std::vector<uint8_t> keys_flat(N * key_bytes);
+          for (size_t i = 0; i < N; i++) {
+            std::memcpy(keys_flat.data() + i * key_bytes, k.cut_pred_keys[ci].bytes.data(), key_bytes);
+          }
+          backend.eval_dcf_many_u64(cut_bits_in, key_bytes, keys_flat.data(), xs,
+                                    k.cut_pred_meta.out_bytes, outs_flat.data());
+        }
+        if (prof) {
+          const auto t_eval1 = std::chrono::steady_clock::now();
+          ::runtime::bench::add_online_ns(
+              ::runtime::bench::OnlineTimeKind::PfssPredEval,
+              static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t_eval1 - t_eval0).count()));
+        }
+        for (size_t i = 0; i < N; i++) {
+          if (k.cut_pred_meta.sem == proto::ShareSemantics::XorBytes) {
+            cut_bits_xor[ci * N + i] = static_cast<uint64_t>(outs_flat[i * out_bytes] & 1u);
+          } else {
+            uint64_t v = 0;
+            std::memcpy(&v, outs_flat.data() + i * out_bytes, std::min<size_t>(8, out_bytes));
+            cut_bits_xor[ci * N + i] = v & 1ull;
+          }
         }
       }
     }
+    if (dbg) std::cerr << "[party " << party << "] cut eval done\n";
   }
-  if (dbg) std::cerr << "[party " << party << "] cut eval done\n";
 
   // Step-DCF coefficient selection (Beaver-free):
   //   coeff(x) = base + total_delta - Σ_i DCF_i(x),
@@ -1716,24 +1724,91 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
   const proto::BeaverTripleBitShare* bit_ptr =
       k.bit_triples.empty() ? nullptr : k.bit_triples.data();
   if (dbg) std::cerr << "[party " << party << "] enter packed composite path\n";
-  if (k.use_packed_pred && !pred_masks.empty() && k.packed_pred_words > 0) {
-    auto read_block_sz = [&](size_t N) -> size_t {
-      // Larger blocks amortize Beaver rounds (mul_batch sends one message per block),
-      // but very large blocks can increase scratch allocations (pieces*block_sz)
-      // and hurt cache behavior. Default conservatively; allow env override.
-      size_t v = 1024;
-      if (const char* env = std::getenv("SUF_COMPOSITE_BLOCK")) {
-        long long x = std::atoll(env);
-        if (x > 0) v = static_cast<size_t>(x);
+  auto read_block_sz = [&](size_t N) -> size_t {
+    // Larger blocks amortize Beaver rounds (mul_batch sends one message per block),
+    // but very large blocks can increase scratch allocations (pieces*block_sz)
+    // and hurt cache behavior. Default conservatively; allow env override.
+    // For GPU-backed end-to-end runs we strongly prefer large blocks to reduce
+    // the number of Beaver/open rounds (a major bottleneck vs Sigma).
+    // Keep CPU default smaller to avoid large transient allocations.
+    size_t v = (staged && in.hatx_device) ? 65536 : 16384;
+    if (const char* env = std::getenv("SUF_COMPOSITE_BLOCK")) {
+      long long x = std::atoll(env);
+      if (x > 0) v = static_cast<size_t>(x);
+    }
+    const size_t kMin = 64;
+    const size_t kMax = 65536;
+    v = std::max(v, kMin);
+    v = std::min(v, kMax);
+    v = std::min(v, std::max<size_t>(1, N));
+    return v;
+  };
+
+  // Horner-only fast path for gates with no boolean outputs: avoid selector scratch
+  // and use larger blocks to dramatically reduce the number of Beaver rounds.
+  if (compiled.ell == 0) {
+    const size_t block_sz = read_block_sz(N);
+    const int degree = compiled.degree;
+    const size_t r_words = static_cast<size_t>(compiled.r);
+    const size_t stride = static_cast<size_t>(degree + 1);
+    std::vector<uint64_t> x_share_vec;
+    for (size_t blk = 0; blk < N; blk += block_sz) {
+      const size_t bsize = std::min(block_sz, N - blk);
+      x_share_vec.resize(bsize);
+      for (size_t off = 0; off < bsize; ++off) {
+        uint64_t rin = r_in_at(k, blk + off);
+        x_share_vec[off] = (party == 0) ? proto::sub_mod(in.hatx[blk + off], rin)
+                                        : proto::sub_mod(0ull, rin);
       }
-      // Keep allocations bounded: selectors are pieces*block_sz words.
-      const size_t kMin = 64;
-      const size_t kMax = 65536;
-      v = std::max(v, kMin);
-      v = std::min(v, kMax);
-      v = std::min(v, std::max<size_t>(1, N));
-      return v;
-    };
+      if (degree <= 0) {
+        for (size_t j = 0; j < r_words; ++j) {
+          const size_t base = j * stride;
+          const uint64_t rout = (j < k.r_out_share.size()) ? k.r_out_share[j] : 0ull;
+          for (size_t off = 0; off < bsize; ++off) {
+            const uint64_t c0 = coeff_selected_soa[base * N + (blk + off)];
+            out.haty_share[(blk + off) * r_words + j] = proto::add_mod(c0, rout);
+          }
+        }
+      } else {
+        const size_t horner_n = r_words * bsize;
+        horner_acc.resize(horner_n);
+        horner_y.resize(horner_n);
+        for (size_t j = 0; j < r_words; ++j) {
+          const size_t base = j * stride;
+          for (size_t off = 0; off < bsize; ++off) {
+            horner_acc[j * bsize + off] =
+                coeff_selected_soa[(base + static_cast<size_t>(degree)) * N + (blk + off)];
+          }
+        }
+        for (size_t j = 0; j < r_words; ++j) {
+          uint64_t* ydst = horner_y.data() + j * bsize;
+          for (size_t off = 0; off < bsize; ++off) ydst[off] = x_share_vec[off];
+        }
+        for (int d = degree - 1; d >= 0; --d) {
+          mul_single.mul_batch(horner_acc, horner_y, horner_prod);
+          for (size_t j = 0; j < r_words; ++j) {
+            const size_t base = j * stride;
+            for (size_t off = 0; off < bsize; ++off) {
+              horner_acc[j * bsize + off] =
+                  proto::add_mod(horner_prod[j * bsize + off],
+                                 coeff_selected_soa[(base + static_cast<size_t>(d)) * N + (blk + off)]);
+            }
+          }
+        }
+        for (size_t j = 0; j < r_words; ++j) {
+          const uint64_t rout = (j < k.r_out_share.size()) ? k.r_out_share[j] : 0ull;
+          for (size_t off = 0; off < bsize; ++off) {
+            out.haty_share[(blk + off) * r_words + j] =
+                proto::add_mod(horner_acc[j * bsize + off], rout);
+          }
+        }
+      }
+    }
+    if (dbg) std::cerr << "[party " << party << "] exit horner-only path mul_used=" << mul_single.idx << "\n";
+    return out;
+  }
+
+  if (k.use_packed_pred && !pred_masks.empty() && k.packed_pred_words > 0) {
     const size_t block_sz = read_block_sz(N);
     size_t pieces = k.cut_pred_keys.size() + 1;
     size_t stride = compiled.degree + 1;
@@ -1842,7 +1917,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
 
   // Fallback scalar path (no packed predicates). We still batch selector-weighted
   // bool/coeff selection over blocks to amortize Beaver rounds.
-  auto read_block_sz = [&](size_t N) -> size_t {
+  auto read_block_sz_fallback = [&](size_t N) -> size_t {
     // Larger blocks amortize Beaver rounds (mul_batch sends one message per block),
     // but very large blocks can increase scratch allocations (pieces*block_sz)
     // and hurt cache behavior. Default conservatively; allow env override.
@@ -1858,28 +1933,41 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     v = std::min(v, std::max<size_t>(1, N));
     return v;
   };
-  const size_t block_sz = read_block_sz(N);
   size_t pieces = k.cut_pred_keys.size() + 1;
   size_t stride = compiled.degree + 1;
   std::vector<uint64_t> preds_i(compiled.pred.queries.size(), 0);
+  // Only a subset of pieces may expose boolean outputs; avoid wasting Beaver work
+  // on empty bool-per-piece slots.
+  std::vector<size_t> active_bool_pieces;
+  active_bool_pieces.reserve(pieces);
+  for (size_t p = 0; p < pieces && p < compiled.bool_per_piece.size(); ++p) {
+    if (!compiled.bool_per_piece[p].empty()) active_bool_pieces.push_back(p);
+  }
+
+  size_t block_sz = read_block_sz_fallback(N);
+
   std::vector<uint64_t> selectors_block(pieces * block_sz, 0);
   std::vector<uint64_t> sel_vec;
   std::vector<uint64_t> rhs_vec;
   std::vector<uint64_t> prod_vec;
   std::vector<uint64_t> bool_piece_block;
+  thread_local std::vector<uint64_t> b2a_xs;
+  thread_local std::vector<uint64_t> b2a_ys;
+  thread_local std::vector<uint64_t> b2a_prod;
 
   for (size_t blk = 0; blk < N; blk += block_sz) {
     size_t bsize = std::min(block_sz, N - blk);
     std::fill(selectors_block.begin(), selectors_block.end(), 0ull);
-    if (compiled.ell > 0 && pieces > 0) {
-      bool_piece_block.assign(pieces * static_cast<size_t>(compiled.ell) * bsize, 0ull);
+    if (compiled.ell > 0 && !active_bool_pieces.empty()) {
+      bool_piece_block.assign(active_bool_pieces.size() * static_cast<size_t>(compiled.ell) * bsize, 0ull);
     }
 
     // Block-batched selectors from cut bits.
     selectors_from_cutbits_block(cut_bits_xor.data(), k.cut_pred_keys.size(), N, blk, bsize,
                                  party, mul_single, selectors_block.data(), block_sz);
 
-    // Per-element predicates -> bool DAG to additive bits.
+    // Per-element predicates -> bool DAG. We first compute XOR-shared bits, then
+    // batch-convert to additive shares to avoid millions of tiny Beaver opens.
     for (size_t off = 0; off < bsize; off++) {
       size_t i = blk + off;
       const auto& wrap_vars = k.wrap_share;
@@ -1890,34 +1978,53 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
         preds_i[qi] = pred_bits_xor[qi * N + i] & 1ull;
       }
 
-      if (compiled.ell > 0 && pieces > 0) {
+      if (compiled.ell > 0 && !active_bool_pieces.empty()) {
         size_t bit_idx = 0;  // reset for each element, matching legacy order
-        for (size_t p = 0; p < pieces && p < compiled.bool_per_piece.size(); p++) {
+        for (size_t ap = 0; ap < active_bool_pieces.size(); ++ap) {
+          const size_t p = active_bool_pieces[ap];
           const auto& exprs = compiled.bool_per_piece[p];
-          if (exprs.empty()) continue;
           for (int j = 0; j < compiled.ell; j++) {
             uint64_t bx =
                 gates::eval_bool_xor_view(exprs[static_cast<size_t>(j)],
                                           get_pred, wrap_vars, mul_single,
                                           bit_ptr, &bit_idx) &
                 1ull;
-            uint64_t badd = gates::b2a_bit(bx, party, mul_single);
-            bool_piece_block[(p * static_cast<size_t>(compiled.ell) + static_cast<size_t>(j)) * bsize + off] = badd;
+            // Temporarily store XOR bit; converted in one batch below.
+            bool_piece_block[(ap * static_cast<size_t>(compiled.ell) + static_cast<size_t>(j)) * bsize + off] = bx;
           }
         }
       }
     }
 
+    // Batch XOR->additive conversion for all bool_piece_block bits in this block.
+    if (compiled.ell > 0 && !active_bool_pieces.empty()) {
+      const size_t ell = static_cast<size_t>(compiled.ell);
+      const size_t total_bits = active_bool_pieces.size() * ell * bsize;
+      b2a_xs.resize(total_bits);
+      b2a_ys.resize(total_bits);
+      for (size_t t = 0; t < total_bits; ++t) {
+        uint64_t bx = bool_piece_block[t] & 1ull;
+        b2a_xs[t] = (party == 0) ? bx : 0ull;
+        b2a_ys[t] = (party == 1) ? bx : 0ull;
+      }
+      mul_single.mul_batch(b2a_xs, b2a_ys, b2a_prod);
+      for (size_t t = 0; t < total_bits; ++t) {
+        uint64_t two_prod = proto::add_mod(b2a_prod[t], b2a_prod[t]);
+        bool_piece_block[t] = proto::sub_mod(proto::add_mod(b2a_xs[t], b2a_ys[t]), two_prod);
+      }
+    }
+
     // Selector-weighted bool outputs (batched over block).
-    if (compiled.ell > 0 && pieces > 0) {
+    if (compiled.ell > 0 && !active_bool_pieces.empty()) {
       const size_t ell = static_cast<size_t>(compiled.ell);
       const size_t mul_n = ell * bsize;
       sel_mul_x.resize(mul_n);
       sel_mul_y.resize(mul_n);
-      for (size_t p = 0; p < pieces && p < compiled.bool_per_piece.size(); ++p) {
+      for (size_t ap = 0; ap < active_bool_pieces.size(); ++ap) {
+        const size_t p = active_bool_pieces[ap];
         for (size_t j = 0; j < ell; ++j) {
           const uint64_t* rhs =
-              bool_piece_block.data() + (p * ell + j) * bsize;
+              bool_piece_block.data() + (ap * ell + j) * bsize;
           uint64_t* xdst = sel_mul_x.data() + j * bsize;
           uint64_t* ydst = sel_mul_y.data() + j * bsize;
           for (size_t off = 0; off < bsize; ++off) {

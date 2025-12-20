@@ -60,7 +60,7 @@ ctest --test-dir build_cuda --output-on-failure
 Notes:
 - `SUF_USE_MYL7_FSS` / `SUF_FETCH_MYL7_FSS` control the optional myl7/fss adapter (default ON/ON).
 - `CMAKE_CUDA_ARCHITECTURES` defaults to `80;86` if not specified.
-- `SUF_USE_LIBDPF` / `SUF_FETCH_LIBDPF` control the libdpf/grotto PFSS backend (default OFF/OFF in this repo snapshot; see “Notes on libdpf / grotto backend” below).
+- `SUF_USE_LIBDPF` / `SUF_FETCH_LIBDPF` control the libdpf/grotto PFSS backend (default ON/ON).
 
 ## Tests
 
@@ -156,19 +156,22 @@ Recent concrete optimizations (keeps `paper.md` semantics unchanged):
 - **Selector-weighted blending fusion:** `include/gates/composite_fss.hpp` fuses selector-weighted boolean blending so each piece uses a single `mul_batch` over `ell * block_size` products, instead of one `mul_batch` per boolean output.
 - **Horner fusion across outputs:** `include/gates/composite_fss.hpp` fuses Horner’s rule multiplications across all arithmetic outputs, reducing Beaver rounds from `r * degree` to `degree` per block.
 - **Beaver scratch reuse:** `include/proto/beaver_mul64.hpp` uses thread-local scratch buffers inside `BeaverMul64::mul_batch` so short-lived `BeaverMul64` instances (common inside composite evaluation) don’t repeatedly allocate/resize large `(e,f)` buffers.
+- **PFSS GPU key upload fast-path:** `cuda/pfss_backend_gpu.cu` removes hash-based “cache” checks for device key uploads (they scanned O(bytes) on the CPU); inputs are now copied directly via `cudaMemcpyAsync`.
 - **GPU DCF compare fast-path:** `cuda/pfss_backend_gpu.cu` packs `alpha` into a u64 in the DCF key header so the GPU DCF kernels can do `x < alpha` directly instead of per-bit comparisons.
 
 Practical strategies to push SUF toward Sigma-like performance (without changing `paper.md` semantics):
 - **Reduce PFSS jobs (`pfss.num_jobs`):** fewer Composite-FSS invocations means fewer hatx opens and fewer Composite-FSS “flush” boundaries. Targets include rescale/truncation hoisting, folding public scaling into existing phases, and avoiding per-head fragmentation in attention.
 - **Reduce Beaver rounds per job:** reduce the number of `BeaverMul64::mul_batch` calls within Composite-FSS evaluation by fusing independent products (selectors, selector-weighted blends, multi-output Horner) and by preferring XOR-only predicate rewrites when possible.
+- **Reduce PFSS bytes:** enable PFSS-channel Beaver packing (`SUF_BEAVER_PACK_EFFBITS=1`, default-on) so opened `(e,f)` words are sent in `ceil(n_bits/8)` bytes rather than 8 bytes.
 - **Reduce packing/scatter overhead:** prefer `SUF_OPEN_PACK_DEVICE=1` + `SUF_OPEN_PACK_DEVICE_KEEP_OPENED=1` (GPU runs) so large Beaver opens do not bottleneck on host bitpacking and redundant D2H/H2D for opened values.
 - **Use the profiler:** `SUF_BENCH_PROFILE=1` should make it obvious whether the next win is in `open_*` vs `pfss_*` counters; `resources.cpu_util_avg` helps distinguish CPU-bound orchestration vs GPU kernels.
+- **Composite block size:** `SUF_COMPOSITE_BLOCK` controls the Composite‑FSS block size.
 
 ### Notes on libdpf / grotto backend
 
 This prototype includes a fast, self-contained CPU predicate backend (`sigmafast`) and an optional libdpf/grotto-backed backend.
 
-- Default: `sigmafast` is used when `SUF_HAVE_LIBDPF` is not enabled.
+- Default: libdpf/grotto is enabled by default at build time; select at runtime with `SUF_PFSS_BACKEND=grotto` (or `sigmafast`).
 - To experiment with grotto, enable it at build time (`-DSUF_USE_LIBDPF=ON -DSUF_FETCH_LIBDPF=ON`) and run with `SUF_PFSS_BACKEND=grotto`. If libdpf is unavailable, the build falls back to `sigmafast`.
 - Semantics constraints (paper.md): all backends must use the same public masked input model (`hatx`) and must preserve the predicate/coeff semantics of the compiled Composite‑FSS gates.
 
@@ -224,7 +227,8 @@ python3 bench/run_sigma_vs_suf.py --config bench/configs/sigma_vs_suf_quick_gpu.
 - `proto::set_ring_bits(spec.n_bits)` (BERT-Tiny uses `n_bits=37`)
 - `SUF_OPEN_PACK_EFFBITS=1` by default on GPU (auto-pack can still skip small savings); CPU default OFF
 - `SUF_OPEN_PACK_AUTO=1` (skip packing when savings are small)
-- `SUF_OPEN_PACK_DEVICE=1` (optional: pack/unpack on GPU for large flushes)
+- `SUF_OPEN_PACK_DEVICE=1` / `SUF_OPEN_PACK_DEVICE_SCATTER=1` / `SUF_OPEN_PACK_DEVICE_KEEP_OPENED=1` default-on on GPU when a CUDA stream is available (set any of these to `0` to force host packing/host scatter)
+- `SUF_BEAVER_PACK_EFFBITS=1` default-on (packs PFSS-channel Beaver opens to `ceil(n_bits/8)` bytes/value)
 - `SUF_PER_ELEMENT_MASKS=0` (avoid per-element trunc/ARS masks that prevent batching)
 - GPU runs: `SUF_FORCE_PFSS=1` (stable PFSS accounting); CPU runs keep the deterministic reference fast-path unless you export `SUF_FORCE_PFSS=1`
 - GPU runs: `SUF_BENCH_NET_RING_POW2=24` (larger net ring to reduce backpressure)

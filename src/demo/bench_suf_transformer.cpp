@@ -301,6 +301,10 @@ struct CountingChan : proto::IChannel {
     std::atomic<uint64_t> bytes1{0};
     std::atomic<uint64_t> bytes8{0};
     std::atomic<uint64_t> bytes_other{0};
+    // Optional message-size histogram for PFSS channel debugging.
+    // Buckets are upper bounds in bytes: {16,32,64,128,256,512,1k,4k,16k,>16k}.
+    std::array<std::atomic<uint64_t>, 10> size_calls{};
+    std::array<std::atomic<uint64_t>, 10> size_bytes{};
   };
 
   Shared* sh = nullptr;
@@ -321,6 +325,21 @@ struct CountingChan : proto::IChannel {
     if (n == 1) sh->bytes1.fetch_add(1, std::memory_order_relaxed);
     else if (n == 8) sh->bytes8.fetch_add(8, std::memory_order_relaxed);
     else sh->bytes_other.fetch_add(n, std::memory_order_relaxed);
+    if (std::getenv("SUF_BENCH_CHAN_HIST")) {
+      size_t b = 0;
+      if (n <= 16) b = 0;
+      else if (n <= 32) b = 1;
+      else if (n <= 64) b = 2;
+      else if (n <= 128) b = 3;
+      else if (n <= 256) b = 4;
+      else if (n <= 512) b = 5;
+      else if (n <= 1024) b = 6;
+      else if (n <= 4096) b = 7;
+      else if (n <= 16384) b = 8;
+      else b = 9;
+      sh->size_calls[b].fetch_add(1, std::memory_order_relaxed);
+      sh->size_bytes[b].fetch_add(n, std::memory_order_relaxed);
+    }
   }
   void recv_bytes(void* data, size_t n) override {
     if (n == 0) return;
@@ -1005,7 +1024,7 @@ int main(int argc, char** argv) {
 	        runtime::bench::reset_online_profile();
 	      }
 	      // Reset comm counters between iterations.
-	      {
+      {
         pfss_sh.sent0.store(0, std::memory_order_relaxed);
         pfss_sh.sent1.store(0, std::memory_order_relaxed);
         pfss_sh.calls0.store(0, std::memory_order_relaxed);
@@ -1013,6 +1032,8 @@ int main(int argc, char** argv) {
         pfss_sh.bytes1.store(0, std::memory_order_relaxed);
         pfss_sh.bytes8.store(0, std::memory_order_relaxed);
         pfss_sh.bytes_other.store(0, std::memory_order_relaxed);
+        for (auto& x : pfss_sh.size_calls) x.store(0, std::memory_order_relaxed);
+        for (auto& x : pfss_sh.size_bytes) x.store(0, std::memory_order_relaxed);
         pfss_sh.q0to1.reset();
         pfss_sh.q1to0.reset();
       }
@@ -1062,6 +1083,18 @@ int main(int argc, char** argv) {
                      (unsigned long long)b1,
                      (unsigned long long)b8,
                      (unsigned long long)bo);
+        const char* names[] = {"<=16","<=32","<=64","<=128","<=256","<=512","<=1k","<=4k","<=16k",">16k"};
+        for (size_t bi = 0; bi < 10; ++bi) {
+          uint64_t cc = pfss_sh.size_calls[bi].load(std::memory_order_relaxed);
+          uint64_t bb = pfss_sh.size_bytes[bi].load(std::memory_order_relaxed);
+          if (cc == 0) continue;
+          std::fprintf(stderr,
+                       "  bucket[%s]: calls=%llu bytes=%llu avg=%.1f\n",
+                       names[bi],
+                       (unsigned long long)cc,
+                       (unsigned long long)bb,
+                       cc ? (double)bb / (double)cc : 0.0);
+        }
       }
       uint64_t net_bytes = net_sh.sent0 + net_sh.sent1;
       it_pfss_bytes.push_back(pfss_bytes);
