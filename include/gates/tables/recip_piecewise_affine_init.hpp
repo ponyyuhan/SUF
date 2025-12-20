@@ -49,12 +49,18 @@ inline PiecewisePolySpec make_recip_affine_init_spec(
     append_interval_signed(spec, scale_x(L), scale_x(U), pack);
   }
 
-  // x >= nmax => clamp to 1/nmax
+  // x >= nmax => clamp to 1/nmax.
+  //
+  // NOTE: Callers ensure `x` is non-negative and typically clamp to a bounded
+  // range. We nevertheless extend the last interval to cover the full unsigned
+  // domain so SUF→PFSS interval-LUT compilation produces a contiguous partition.
   double tail = 1.0 / nmax;
   CoeffPack above;
   above.offset = 0;
   above.coeffs = {scale_y(tail)};
-  append_interval_signed(spec, scale_x(nmax), std::numeric_limits<int64_t>::max(), above);
+  // Extend through the surrogate domain end (~0ull) used by the PFSS compiler.
+  spec.intervals.push_back(
+      {to_u64_twos(scale_x(nmax)), ~0ull, above});
 
   return spec;
 }

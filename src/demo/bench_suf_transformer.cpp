@@ -767,6 +767,9 @@ int main(int argc, char** argv) {
         // Also compute the final opened value on GPU (unpack + add_mod + to_signed)
         // so host-side scatter doesn't dominate large-model runs.
         ::setenv("SUF_OPEN_PACK_DEVICE_SCATTER", "1", /*overwrite=*/0);
+        // Keep device-resident opened values for Beaver-only flushes so GPU matmul
+        // tasks can consume them without a redundant D2H->H2D roundtrip.
+        ::setenv("SUF_OPEN_PACK_DEVICE_KEEP_OPENED", "1", /*overwrite=*/0);
         // Larger net ring reduces backpressure for big models (bench harness only).
         ::setenv("SUF_BENCH_NET_RING_POW2", "24", /*overwrite=*/0);
 	    }

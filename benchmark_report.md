@@ -1,36 +1,32 @@
 # Sigma vs SUF benchmark report
 
-Generated: `2025-12-20`
+Generated: `2025-12-20` (updated)
 
 This report follows the benchmarking/protocol accounting design in `paper.md`.
 
 ## Data sources
 
-- SUF (this repo) logs: `bench/results/current_compare/2025-12-20_prefillfix_gpu`
-- Sigma logs: `bench/results/current_compare/2025-12-20_prefillfix_gpu/sigma_*_L128.json` (copied from a previously captured Sigma run; Sigma was not rerun here due to prior build/run deadlocks)
+- Sigma-vs-SUF harness summary: `bench/results/summary.csv`
+- Raw SUF logs: `bench/results/suf_*_gpu_L128_B1.json`
+- Raw Sigma logs: `bench/results/sigma_*_L128.json` (parsed from `external/sigma_ezpc/GPU-MPC/experiments/sigma/output/`)
 
 ## Settings
 
 - Sequence length: `128`
 - Batch size: `1`
-- SUF iterations: `2` (`--n-iters 2`) so `timing.keygen_time_s` is separable from steady-state online timing
+- Harness config: `bench/configs/sigma_vs_suf_quick_gpu.json`
+- SUF iterations: `3` (`--n-iters 3`) so `timing.keygen_time_s` is separable from steady-state online timing
 - SUF open packing enabled: `--open-pack 1` (see `SUF_OPEN_PACK_*` in `README.md`)
 - SUF per-element masks disabled: `--per-element-masks 0` (to preserve batching)
-- SUF causal prefill enabled: `SUF_CAUSAL_PREFILL=1` (full-matrix causal prefill)
 
 ## Results (online)
 
 | Model | Sigma online (s) | Sigma online (GB) | SUF online (s) | SUF online (GB) | Time ratio | Byte ratio |
 |---|---:|---:|---:|---:|---:|---:|
-| bert-tiny | 0.194 | 0.022 | 0.390 | 0.033 | 2.01x | 1.51x |
-| bert-base | 2.728 | 1.062 | 9.258 | 1.529 | 3.39x | 1.44x |
-| bert-large | 6.862 | 2.833 | 26.094 | 4.113 | 3.80x | 1.45x |
-| gpt2 | 2.389 | 0.885 | 6.994 | 1.395 | 2.93x | 1.58x |
-| gpt-neo-1.3b | 11.324 | 4.326 | 38.638 | 6.100 | 3.41x | 1.41x |
-
-Raw CSV/JSONL: `bench/results/current_compare/2025-12-20_prefillfix_gpu/summary.csv`, `bench/results/current_compare/2025-12-20_prefillfix_gpu/summary.jsonl`.
-
-Additional run (did not improve time in this environment): `bench/results/current_compare/2025-12-20_prefillfix_gpu_kernels` (enabling `SUF_MATMUL_BEAVER_GPU=1`, `SUF_MUL_GPU=1`).
+| bert-tiny | 0.173 | 0.022 | 0.405 | 0.033 | 2.34x | 1.51x |
+| bert-base | 2.867 | 1.062 | 9.432 | 1.529 | 3.29x | 1.44x |
+| bert-large | 7.127 | 2.833 | 25.752 | 4.077 | 3.61x | 1.44x |
+| gpt2 | 2.426 | 0.885 | 7.247 | 1.702 | 2.99x | 1.92x |
 
 ## Bottlenecks (SUF)
 
@@ -41,9 +37,14 @@ Enable `SUF_BENCH_PROFILE=1` to populate `online_profile.*` in the SUF JSON logs
 
 ## Implementation changes in this snapshot (performance + accounting)
 
-- `src/nn/attention_block.cpp`: fixed causal prefill softmax correctness by avoiding in-place use of `nn::RowMaxDiffTask` (the output buffer must not alias the input unless the task is explicitly alias-safe).
-- `include/nn/row_maxdiff_task.hpp`: made `nn::RowMaxDiffTask` robust to in-place use by snapshotting the original active inputs before writing outputs.
+- `include/gates/composite_fss.hpp`: reduced Beaver round overhead inside Composite-FSS evaluation:
+  - fused cutpoint selector network into 2 `mul_batch` calls per block,
+  - fused selector-weighted boolean blending to 1 `mul_batch` per piece (instead of 1 per boolean output),
+  - fused Horner’s rule multiplications across all arithmetic outputs (1 `mul_batch` per degree step).
+- `include/proto/beaver_mul64.hpp`: thread-local scratch for batched `mul_batch` (avoids allocation churn); OpenMP gating for very large batches.
+- `cuda/pfss_backend_gpu.cu`: packed GPU DCF keys store `alpha` as a u64 threshold (avoid per-bit comparisons in kernels).
 
 ## Notes / known gaps
 
 - With this snapshot, SUF still trails Sigma on both online time and online bytes across all measured models.
+- The dominant gap is in `communication.pfss_bytes` (Composite-FSS Beaver work) and overall `timing.online_time_s` for large models.

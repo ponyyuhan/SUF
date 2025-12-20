@@ -62,12 +62,20 @@ inline PiecewisePolySpec make_nexp_piecewise_spec(int frac_bits = 16, int segmen
     append_interval_signed(spec, start_fixed, end_fixed, pack);
   }
 
-  // t > hi -> clamp input to hi
+  // t >= hi -> clamp input to hi.
+  //
+  // NOTE: Many call sites ensure `t` is already clamped to [0, hi]. We still
+  // extend the final interval to cover the full unsigned domain [0, 2^64) so
+  // SUF→PFSS interval-LUT compilation yields a contiguous partition (and can
+  // avoid expensive step-DCF selector networks).
   double tail = nexp_fn(hi);
   CoeffPack above;
   above.offset = 0;
   above.coeffs = {static_cast<int64_t>(std::llround(tail * std::ldexp(1.0, frac_bits)))};
-  append_interval_signed(spec, scale_x(hi), std::numeric_limits<int64_t>::max(), above);
+  // The unsigned endpoint 2^64 is unrepresentable in u64; this codebase uses
+  // `~0ull` as a practical surrogate for the interval-LUT compiler.
+  spec.intervals.push_back(
+      {to_u64_twos(scale_x(hi)), ~0ull, above});
 
   return spec;
 }

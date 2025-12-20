@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <type_traits>
 #include <vector>
 #if __has_include(<span>)
@@ -106,6 +107,9 @@ class OpenCollector {
 
   // View opened values for a handle. Valid until next clear/flush.
   std::span<const int64_t> view(const OpenHandle& h) const;
+  // Optional device-resident opened view (u64 bit-patterns). Only available when
+  // the last flush kept opened values on device (see `SUF_OPEN_PACK_DEVICE_KEEP_OPENED`).
+  const uint64_t* view_device_u64(const OpenHandle& h) const;
 
   bool empty() const { return requests_.empty(); }
   bool has_pending() const { return !requests_.empty(); }
@@ -114,6 +118,10 @@ class OpenCollector {
   void clear();
 
   void set_limits(const Limits& lim) { limits_ = lim; }
+  // Optional CUDA stream used by device packing/unpacking when
+  // `SUF_OPEN_PACK_DEVICE=1`. Non-owning; caller must ensure the stream remains
+  // valid for the duration of `flush()`.
+  void set_cuda_stream(void* stream) { cuda_stream_ = stream; }
 
   const Stats& stats() const { return stats_; }
   void reset_stats() { stats_ = Stats{}; }
@@ -132,7 +140,12 @@ class OpenCollector {
   uint64_t generation_ = 0;
   uint64_t opened_generation_ = static_cast<uint64_t>(-1);
   bool opened_ready_ = false;
-  std::vector<int64_t> opened_flat_buf_;
+  mutable std::vector<int64_t> opened_flat_buf_;
+  void* opened_device_ptr_ = nullptr;
+  size_t opened_device_words_ = 0;
+  bool opened_device_ready_ = false;
+  mutable bool opened_host_materialized_ = true;
+  mutable std::mutex opened_mu_;
   // Scratch buffers to avoid per-flush allocations in hot paths.
   std::vector<uint64_t> send_flat_buf_;
   std::vector<uint64_t> recv_flat_buf_;
@@ -149,7 +162,14 @@ class OpenCollector {
     size_t out_cap = 0;
   };
   DevicePackScratch pack_scratch_;
+  struct PinnedHostScratch {
+    uint64_t* local = nullptr;
+    uint64_t* remote = nullptr;
+    size_t cap_words = 0;
+  };
+  PinnedHostScratch pinned_scratch_;
 #endif
+  void* cuda_stream_ = nullptr;
 };
 
 }  // namespace runtime

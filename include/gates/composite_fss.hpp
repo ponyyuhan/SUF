@@ -852,41 +852,71 @@ inline void selectors_from_cutbits_block(const uint64_t* cut_bits_xor,
     for (size_t off = 0; off < bsize; off++) out[off] = one;
     return;
   }
-  std::vector<uint64_t> a_share(bsize), b_share(bsize);
-  std::vector<uint64_t> prod_vec;
-  std::vector<uint64_t> cut_prev(bsize), cut_cur(bsize), not_prev(bsize);
+  // This selector network is a hotspot (cuts can be ~O(256) for LUT-based coeff
+  // selection). Fuse all Beaver multiplications into 2 batched rounds:
+  //  1) b2a for all cut bits, across all cuts in the block
+  //  2) chain multiplications (1 - cut_{k-1}) * cut_k for k=1..cuts-1
+  //
+  // Total communication stays identical; we drastically reduce channel calls.
+  thread_local std::vector<uint64_t> a_share_all;
+  thread_local std::vector<uint64_t> b_share_all;
+  thread_local std::vector<uint64_t> prod_all;
+  thread_local std::vector<uint64_t> cut_add_all;
+  thread_local std::vector<uint64_t> chain_x;
+  thread_local std::vector<uint64_t> chain_y;
+  thread_local std::vector<uint64_t> chain_prod;
 
-  auto b2a_cut = [&](size_t ci, std::vector<uint64_t>& dst) {
-    for (size_t off = 0; off < bsize; off++) {
-      uint64_t bx = cut_bits_xor[ci * N + (blk + off)] & 1ull;
-      a_share[off] = (party == 0) ? bx : 0ull;
-      b_share[off] = (party == 1) ? bx : 0ull;
+  const size_t total_b2a = cuts * bsize;
+  a_share_all.resize(total_b2a);
+  b_share_all.resize(total_b2a);
+  for (size_t ci = 0; ci < cuts; ++ci) {
+    const size_t base = ci * bsize;
+    const size_t row_off = ci * N + blk;
+    for (size_t off = 0; off < bsize; ++off) {
+      uint64_t bx = cut_bits_xor[row_off + off] & 1ull;
+      a_share_all[base + off] = (party == 0) ? bx : 0ull;
+      b_share_all[base + off] = (party == 1) ? bx : 0ull;
     }
-    mul.mul_batch(a_share, b_share, prod_vec);
-    for (size_t off = 0; off < bsize; off++) {
-      uint64_t two_prod = proto::add_mod(prod_vec[off], prod_vec[off]);
-      dst[off] = proto::sub_mod(proto::add_mod(a_share[off], b_share[off]), two_prod);
-    }
-  };
+  }
+  mul.mul_batch(a_share_all, b_share_all, prod_all);
+  cut_add_all.resize(total_b2a);
+  for (size_t i = 0; i < total_b2a; ++i) {
+    uint64_t two_prod = proto::add_mod(prod_all[i], prod_all[i]);
+    cut_add_all[i] = proto::sub_mod(proto::add_mod(a_share_all[i], b_share_all[i]), two_prod);
+  }
 
   // First selector: sel0 = cut0
-  b2a_cut(0, cut_prev);
-  for (size_t off = 0; off < bsize; off++) out[0 * out_stride + off] = cut_prev[off];
+  for (size_t off = 0; off < bsize; ++off) {
+    out[0 * out_stride + off] = cut_add_all[off];
+  }
 
   // Middle selectors: sel_k = (1 - cut_{k-1}) * cut_k
-  for (size_t k = 1; k < cuts; k++) {
-    b2a_cut(k, cut_cur);
-    for (size_t off = 0; off < bsize; off++) {
-      not_prev[off] = proto::sub_mod(one, cut_prev[off]);
+  if (cuts > 1) {
+    const size_t total_chain = (cuts - 1) * bsize;
+    chain_x.resize(total_chain);
+    chain_y.resize(total_chain);
+    for (size_t k = 1; k < cuts; ++k) {
+      const size_t src_prev = (k - 1) * bsize;
+      const size_t src_cur = k * bsize;
+      const size_t dst = (k - 1) * bsize;
+      for (size_t off = 0; off < bsize; ++off) {
+        chain_x[dst + off] = proto::sub_mod(one, cut_add_all[src_prev + off]);
+        chain_y[dst + off] = cut_add_all[src_cur + off];
+      }
     }
-    mul.mul_batch(not_prev, cut_cur, prod_vec);
-    for (size_t off = 0; off < bsize; off++) out[k * out_stride + off] = prod_vec[off];
-    cut_prev.swap(cut_cur);
+    mul.mul_batch(chain_x, chain_y, chain_prod);
+    for (size_t k = 1; k < cuts; ++k) {
+      const size_t src = (k - 1) * bsize;
+      for (size_t off = 0; off < bsize; ++off) {
+        out[k * out_stride + off] = chain_prod[src + off];
+      }
+    }
   }
 
   // Last selector: sel_last = 1 - cut_{cuts-1}
-  for (size_t off = 0; off < bsize; off++) {
-    out[cuts * out_stride + off] = proto::sub_mod(one, cut_prev[off]);
+  const size_t last_base = (cuts - 1) * bsize;
+  for (size_t off = 0; off < bsize; ++off) {
+    out[cuts * out_stride + off] = proto::sub_mod(one, cut_add_all[last_base + off]);
   }
 }
 
@@ -1676,11 +1706,21 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     throw std::runtime_error("composite_eval_batch_backend: missing Beaver 64-bit triples in key");
   }
   proto::BeaverMul64 mul_single{party, ch, k.triples, 0};
+  // Thread-local scratch to reduce allocation churn in hot batched paths.
+  thread_local std::vector<uint64_t> sel_mul_x;
+  thread_local std::vector<uint64_t> sel_mul_y;
+  thread_local std::vector<uint64_t> sel_mul_prod;
+  thread_local std::vector<uint64_t> horner_acc;
+  thread_local std::vector<uint64_t> horner_y;
+  thread_local std::vector<uint64_t> horner_prod;
   const proto::BeaverTripleBitShare* bit_ptr =
       k.bit_triples.empty() ? nullptr : k.bit_triples.data();
   if (dbg) std::cerr << "[party " << party << "] enter packed composite path\n";
   if (k.use_packed_pred && !pred_masks.empty() && k.packed_pred_words > 0) {
     auto read_block_sz = [&](size_t N) -> size_t {
+      // Larger blocks amortize Beaver rounds (mul_batch sends one message per block),
+      // but very large blocks can increase scratch allocations (pieces*block_sz)
+      // and hurt cache behavior. Default conservatively; allow env override.
       size_t v = 1024;
       if (const char* env = std::getenv("SUF_COMPOSITE_BLOCK")) {
         long long x = std::atoll(env);
@@ -1688,7 +1728,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       }
       // Keep allocations bounded: selectors are pieces*block_sz words.
       const size_t kMin = 64;
-      const size_t kMax = 8192;
+      const size_t kMax = 65536;
       v = std::max(v, kMin);
       v = std::min(v, kMax);
       v = std::min(v, std::max<size_t>(1, N));
@@ -1699,9 +1739,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     size_t stride = compiled.degree + 1;
     std::vector<uint64_t> selectors_block(pieces * block_sz, 0);
     std::vector<uint64_t> bool_block;
-    std::vector<uint64_t> prod_vec;
     std::vector<uint64_t> x_share_vec;
-    std::vector<uint64_t> acc_vec;
     for (size_t blk = 0; blk < N; blk += block_sz) {
       size_t bsize = std::min(block_sz, N - blk);
       if (compiled.ell > 0) {
@@ -1719,19 +1757,25 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
                                                 static_cast<size_t>(k.packed_pred_words),
                                                 bsize, k.wrap_share, party, mul_single,
                                                 bit_ptr, 0, bool_block);
-          std::vector<uint64_t> sel_vec(bsize);
-          for (size_t off = 0; off < bsize; off++) {
-            sel_vec[off] = selectors_block[p * block_sz + off];
-          }
-          std::vector<uint64_t> rhs_vec(bsize);
-          for (int j = 0; j < compiled.ell; j++) {
-            for (size_t off = 0; off < bsize; off++) {
-              rhs_vec[off] = bool_block[static_cast<size_t>(j) * bsize + off];
+          const size_t ell = static_cast<size_t>(compiled.ell);
+          const size_t mul_n = ell * bsize;
+          sel_mul_x.resize(mul_n);
+          sel_mul_y.resize(mul_n);
+          for (size_t j = 0; j < ell; ++j) {
+            const uint64_t* rhs = bool_block.data() + j * bsize;
+            uint64_t* xdst = sel_mul_x.data() + j * bsize;
+            uint64_t* ydst = sel_mul_y.data() + j * bsize;
+            for (size_t off = 0; off < bsize; ++off) {
+              xdst[off] = selectors_block[p * block_sz + off];
+              ydst[off] = rhs[off];
             }
-            mul_single.mul_batch(sel_vec, rhs_vec, prod_vec);
-            for (size_t off = 0; off < bsize; off++) {
-              size_t out_idx = (blk + off) * compiled.ell + static_cast<size_t>(j);
-              out.bool_share[out_idx] = proto::add_mod(out.bool_share[out_idx], prod_vec[off]);
+          }
+          mul_single.mul_batch(sel_mul_x, sel_mul_y, sel_mul_prod);
+          for (size_t j = 0; j < ell; ++j) {
+            const uint64_t* prod = sel_mul_prod.data() + j * bsize;
+            for (size_t off = 0; off < bsize; ++off) {
+              size_t out_idx = (blk + off) * static_cast<size_t>(compiled.ell) + j;
+              out.bool_share[out_idx] = proto::add_mod(out.bool_share[out_idx], prod[off]);
             }
           }
         }
@@ -1744,24 +1788,50 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
         x_share_vec[off] = (party == 0) ? proto::sub_mod(in.hatx[blk + off], rin)
                                         : proto::sub_mod(0ull, rin);
       }
-      acc_vec.resize(bsize);
-      for (int j = 0; j < compiled.r; j++) {
-        size_t base = static_cast<size_t>(j * stride);
-        for (size_t off = 0; off < bsize; off++) {
-          acc_vec[off] =
-              coeff_selected_soa[(base + static_cast<size_t>(compiled.degree)) * N + (blk + off)];
-        }
-        for (int d = compiled.degree - 1; d >= 0; d--) {
-          mul_single.mul_batch(acc_vec, x_share_vec, prod_vec);
-          for (size_t off = 0; off < bsize; off++) {
-            acc_vec[off] =
-                proto::add_mod(prod_vec[off],
-                               coeff_selected_soa[(base + static_cast<size_t>(d)) * N + (blk + off)]);
+      const size_t r_words = static_cast<size_t>(compiled.r);
+      if (compiled.degree <= 0) {
+        for (size_t j = 0; j < r_words; ++j) {
+          const size_t base = j * stride;
+          const uint64_t rout = (j < k.r_out_share.size()) ? k.r_out_share[j] : 0ull;
+          for (size_t off = 0; off < bsize; ++off) {
+            const uint64_t c0 = coeff_selected_soa[base * N + (blk + off)];
+            out.haty_share[(blk + off) * r_words + j] = proto::add_mod(c0, rout);
           }
         }
-        for (size_t off = 0; off < bsize; off++) {
-          out.haty_share[(blk + off) * compiled.r + static_cast<size_t>(j)] =
-              proto::add_mod(acc_vec[off], k.r_out_share[static_cast<size_t>(j)]);
+      } else {
+        const int degree = compiled.degree;
+        const size_t horner_n = r_words * bsize;
+        horner_acc.resize(horner_n);
+        horner_y.resize(horner_n);
+        for (size_t j = 0; j < r_words; ++j) {
+          const size_t base = j * stride;
+          for (size_t off = 0; off < bsize; ++off) {
+            horner_acc[j * bsize + off] =
+                coeff_selected_soa[(base + static_cast<size_t>(degree)) * N + (blk + off)];
+          }
+        }
+        for (size_t j = 0; j < r_words; ++j) {
+          uint64_t* ydst = horner_y.data() + j * bsize;
+          for (size_t off = 0; off < bsize; ++off) {
+            ydst[off] = x_share_vec[off];
+          }
+        }
+        for (int d = degree - 1; d >= 0; --d) {
+          mul_single.mul_batch(horner_acc, horner_y, horner_prod);
+          for (size_t j = 0; j < r_words; ++j) {
+            const size_t base = j * stride;
+            for (size_t off = 0; off < bsize; ++off) {
+              horner_acc[j * bsize + off] =
+                  proto::add_mod(horner_prod[j * bsize + off],
+                                 coeff_selected_soa[(base + static_cast<size_t>(d)) * N + (blk + off)]);
+            }
+          }
+        }
+        for (size_t j = 0; j < r_words; ++j) {
+          const uint64_t rout = (j < k.r_out_share.size()) ? k.r_out_share[j] : 0ull;
+          for (size_t off = 0; off < bsize; ++off) {
+            out.haty_share[(blk + off) * r_words + j] = proto::add_mod(horner_acc[j * bsize + off], rout);
+          }
         }
       }
     }
@@ -1773,13 +1843,16 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
   // Fallback scalar path (no packed predicates). We still batch selector-weighted
   // bool/coeff selection over blocks to amortize Beaver rounds.
   auto read_block_sz = [&](size_t N) -> size_t {
+    // Larger blocks amortize Beaver rounds (mul_batch sends one message per block),
+    // but very large blocks can increase scratch allocations (pieces*block_sz)
+    // and hurt cache behavior. Default conservatively; allow env override.
     size_t v = 1024;
     if (const char* env = std::getenv("SUF_COMPOSITE_BLOCK")) {
       long long x = std::atoll(env);
       if (x > 0) v = static_cast<size_t>(x);
     }
     const size_t kMin = 64;
-    const size_t kMax = 8192;
+    const size_t kMax = 65536;
     v = std::max(v, kMin);
     v = std::min(v, kMax);
     v = std::min(v, std::max<size_t>(1, N));
@@ -1837,21 +1910,27 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
 
     // Selector-weighted bool outputs (batched over block).
     if (compiled.ell > 0 && pieces > 0) {
-      sel_vec.resize(bsize);
-      rhs_vec.resize(bsize);
-      for (size_t p = 0; p < pieces && p < compiled.bool_per_piece.size(); p++) {
-        for (size_t off = 0; off < bsize; off++) {
-          sel_vec[off] = selectors_block[p * block_sz + off];
-        }
-        for (int j = 0; j < compiled.ell; j++) {
-          for (size_t off = 0; off < bsize; off++) {
-            rhs_vec[off] =
-                bool_piece_block[(p * static_cast<size_t>(compiled.ell) + static_cast<size_t>(j)) * bsize + off];
+      const size_t ell = static_cast<size_t>(compiled.ell);
+      const size_t mul_n = ell * bsize;
+      sel_mul_x.resize(mul_n);
+      sel_mul_y.resize(mul_n);
+      for (size_t p = 0; p < pieces && p < compiled.bool_per_piece.size(); ++p) {
+        for (size_t j = 0; j < ell; ++j) {
+          const uint64_t* rhs =
+              bool_piece_block.data() + (p * ell + j) * bsize;
+          uint64_t* xdst = sel_mul_x.data() + j * bsize;
+          uint64_t* ydst = sel_mul_y.data() + j * bsize;
+          for (size_t off = 0; off < bsize; ++off) {
+            xdst[off] = selectors_block[p * block_sz + off];
+            ydst[off] = rhs[off];
           }
-          mul_single.mul_batch(sel_vec, rhs_vec, prod_vec);
-          for (size_t off = 0; off < bsize; off++) {
-            size_t out_idx = (blk + off) * compiled.ell + static_cast<size_t>(j);
-            out.bool_share[out_idx] = proto::add_mod(out.bool_share[out_idx], prod_vec[off]);
+        }
+        mul_single.mul_batch(sel_mul_x, sel_mul_y, sel_mul_prod);
+        for (size_t j = 0; j < ell; ++j) {
+          const uint64_t* prod = sel_mul_prod.data() + j * bsize;
+          for (size_t off = 0; off < bsize; ++off) {
+            size_t out_idx = (blk + off) * ell + j;
+            out.bool_share[out_idx] = proto::add_mod(out.bool_share[out_idx], prod[off]);
           }
         }
       }
@@ -1865,25 +1944,51 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       x_share_vec[off] = (party == 0) ? proto::sub_mod(in.hatx[i], rin)
                                       : proto::sub_mod(0ull, rin);
     }
-    std::vector<uint64_t> acc_vec(bsize);
-    for (int j = 0; j < compiled.r; j++) {
-      size_t base = static_cast<size_t>(j * stride);
-      for (size_t off = 0; off < bsize; off++) {
-        acc_vec[off] =
-            coeff_selected_soa[(base + static_cast<size_t>(compiled.degree)) * N + (blk + off)];
-      }
-      for (int d = compiled.degree - 1; d >= 0; d--) {
-        mul_single.mul_batch(acc_vec, x_share_vec, prod_vec);
-        for (size_t off = 0; off < bsize; off++) {
-          acc_vec[off] =
-              proto::add_mod(prod_vec[off],
-                             coeff_selected_soa[(base + static_cast<size_t>(d)) * N + (blk + off)]);
+    const size_t r_words = static_cast<size_t>(compiled.r);
+    if (compiled.degree <= 0) {
+      for (size_t j = 0; j < r_words; ++j) {
+        const size_t base = j * stride;
+        const uint64_t rout = (j < k.r_out_share.size()) ? k.r_out_share[j] : 0ull;
+        for (size_t off = 0; off < bsize; ++off) {
+          size_t i = blk + off;
+          out.haty_share[i * r_words + j] = proto::add_mod(coeff_selected_soa[base * N + i], rout);
         }
       }
-      for (size_t off = 0; off < bsize; off++) {
-        size_t i = blk + off;
-        out.haty_share[i * compiled.r + static_cast<size_t>(j)] =
-            proto::add_mod(acc_vec[off], k.r_out_share[static_cast<size_t>(j)]);
+    } else {
+      const int degree = compiled.degree;
+      const size_t horner_n = r_words * bsize;
+      horner_acc.resize(horner_n);
+      horner_y.resize(horner_n);
+      for (size_t j = 0; j < r_words; ++j) {
+        const size_t base = j * stride;
+        for (size_t off = 0; off < bsize; ++off) {
+          horner_acc[j * bsize + off] =
+              coeff_selected_soa[(base + static_cast<size_t>(degree)) * N + (blk + off)];
+        }
+      }
+      for (size_t j = 0; j < r_words; ++j) {
+        uint64_t* ydst = horner_y.data() + j * bsize;
+        for (size_t off = 0; off < bsize; ++off) {
+          ydst[off] = x_share_vec[off];
+        }
+      }
+      for (int d = degree - 1; d >= 0; --d) {
+        mul_single.mul_batch(horner_acc, horner_y, horner_prod);
+        for (size_t j = 0; j < r_words; ++j) {
+          const size_t base = j * stride;
+          for (size_t off = 0; off < bsize; ++off) {
+            horner_acc[j * bsize + off] =
+                proto::add_mod(horner_prod[j * bsize + off],
+                               coeff_selected_soa[(base + static_cast<size_t>(d)) * N + (blk + off)]);
+          }
+        }
+      }
+      for (size_t j = 0; j < r_words; ++j) {
+        const uint64_t rout = (j < k.r_out_share.size()) ? k.r_out_share[j] : 0ull;
+        for (size_t off = 0; off < bsize; ++off) {
+          size_t i = blk + off;
+          out.haty_share[i * r_words + j] = proto::add_mod(horner_acc[j * bsize + off], rout);
+        }
       }
     }
   }

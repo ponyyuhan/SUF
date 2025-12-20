@@ -575,30 +575,34 @@ extern "C" __global__ void pack_eff_bits_wordwise_kernel(const uint64_t* in,
   if (w >= packed_words) return;
   if (eff_bits <= 0 || eff_bits > 64) return;
 
-  uint64_t mask = (eff_bits == 64) ? ~0ull : ((1ull << eff_bits) - 1ull);
-  const unsigned __int128 base_bit =
-      static_cast<unsigned __int128>(w) * static_cast<unsigned __int128>(64);
-  const unsigned __int128 idx0_ = base_bit / static_cast<unsigned __int128>(eff_bits);
-  const unsigned __int128 off0_ = base_bit - idx0_ * static_cast<unsigned __int128>(eff_bits);
-  size_t idx = static_cast<size_t>(idx0_);
-  int off = static_cast<int>(off0_);
+  if (eff_bits == 64) {
+    // No packing.
+    packed[w] = (w < N) ? in[w] : 0ull;
+    return;
+  }
+
+  uint64_t mask = (eff_bits == 64) ? ~0ull : ((uint64_t(1) << eff_bits) - 1ull);
+  const uint64_t bit_start = static_cast<uint64_t>(w) * 64ull;
+  size_t idx = static_cast<size_t>(bit_start / static_cast<uint64_t>(eff_bits));
+  int off = static_cast<int>(bit_start - static_cast<uint64_t>(idx) * static_cast<uint64_t>(eff_bits));
 
   uint64_t out = 0;
   int shift = 0;
   int rem = 64;
+  // For the widths we use most (>=33), each output word spans at most 2 inputs,
+  // but keep a small bounded loop for correctness at smaller widths.
 #pragma unroll
-  for (int it = 0; it < 3 && rem > 0; ++it) {
+  for (int it = 0; it < 5 && rem > 0; ++it) {
     uint64_t v = 0;
     if (idx < N) v = in[idx] & mask;
-    v = (off == 0) ? v : (v >> off);
+    if (off) v >>= off;
     int avail = eff_bits - off;
-    if (avail < 0) avail = 0;
-    int take = (avail < rem) ? avail : rem;
-    if (take > 0) {
-      uint64_t take_mask = (take == 64) ? ~0ull : ((uint64_t(1) << take) - 1ull);
+    if (avail > rem) avail = rem;
+    if (avail > 0) {
+      uint64_t take_mask = (avail == 64) ? ~0ull : ((uint64_t(1) << avail) - 1ull);
       out |= (v & take_mask) << shift;
-      shift += take;
-      rem -= take;
+      shift += avail;
+      rem -= avail;
     }
     idx += 1;
     off = 0;

@@ -56,6 +56,7 @@ namespace {
 struct __attribute__((packed)) DcfKeyHeader {
   uint16_t in_bits;
   uint16_t payload_len;
+  uint64_t alpha_u64;  // alpha threshold packed into low in_bits (MSB-first compare)
 };
 
 struct alignas(8) IntervalKeyHeader {
@@ -178,14 +179,21 @@ std::vector<uint8_t> build_dcf_key(int in_bits,
   if (static_cast<int>(alpha_bits.size()) != in_bits) {
     throw std::runtime_error("GpuPfssBackend: alpha_bits size mismatch");
   }
+  uint64_t alpha_u64 = 0;
+  for (int i = 0; i < in_bits; ++i) {
+    uint8_t b = alpha_bits[static_cast<size_t>(i)] & 1u;
+    int shift = (in_bits - 1 - i);
+    alpha_u64 |= (static_cast<uint64_t>(b) << shift);
+  }
+  if (in_bits < 64) alpha_u64 &= ((uint64_t(1) << in_bits) - 1ull);
   DcfKeyHeader hdr{};
   hdr.in_bits = static_cast<uint16_t>(in_bits);
   hdr.payload_len = static_cast<uint16_t>(payload.size());
-  std::vector<uint8_t> bytes(sizeof(DcfKeyHeader) + alpha_bits.size() + payload.size());
+  hdr.alpha_u64 = alpha_u64;
+  std::vector<uint8_t> bytes(sizeof(DcfKeyHeader) + payload.size());
   std::memcpy(bytes.data(), &hdr, sizeof(DcfKeyHeader));
-  std::memcpy(bytes.data() + sizeof(DcfKeyHeader), alpha_bits.data(), alpha_bits.size());
   if (!payload.empty()) {
-    std::memcpy(bytes.data() + sizeof(DcfKeyHeader) + alpha_bits.size(), payload.data(), payload.size());
+    std::memcpy(bytes.data() + sizeof(DcfKeyHeader), payload.data(), payload.size());
   }
   return bytes;
 }
@@ -263,15 +271,16 @@ inline bool eval_dcf_host(const FssKey& key, int in_bits, const std::vector<u8>&
   if (key.bytes.size() < sizeof(DcfKeyHeader)) throw std::runtime_error("eval_dcf_host: key too short");
   auto* hdr = reinterpret_cast<const DcfKeyHeader*>(key.bytes.data());
   if (hdr->in_bits != static_cast<uint16_t>(in_bits)) throw std::runtime_error("eval_dcf_host: in_bits mismatch");
-  const uint8_t* alpha = key.bytes.data() + sizeof(DcfKeyHeader);
-  const uint8_t* payload = alpha + in_bits;
-  bool lt = false;
-  for (int i = 0; i < in_bits; i++) {
-    uint8_t xb = static_cast<uint8_t>(x_bits[static_cast<size_t>(i)] ? 1 : 0);
-    uint8_t ab = alpha[static_cast<size_t>(i)] & 1u;
-    if (xb < ab) { lt = true; break; }
-    if (xb > ab) { lt = false; break; }
+  uint64_t x_u64 = 0;
+  for (int i = 0; i < in_bits; ++i) {
+    uint8_t b = x_bits[static_cast<size_t>(i)] & 1u;
+    int shift = (in_bits - 1 - i);
+    x_u64 |= (static_cast<uint64_t>(b) << shift);
   }
+  if (in_bits < 64) x_u64 &= ((uint64_t(1) << in_bits) - 1ull);
+  const uint8_t* payload = key.bytes.data() + sizeof(DcfKeyHeader);
+  const uint64_t mask = (in_bits >= 64) ? ~uint64_t(0) : ((uint64_t(1) << in_bits) - 1ull);
+  const bool lt = ((x_u64 & mask) < (hdr->alpha_u64 & mask));
   out_bytes.assign(hdr->payload_len, 0u);
   if (lt && hdr->payload_len > 0) {
     std::memcpy(out_bytes.data(), payload, hdr->payload_len);
@@ -363,16 +372,11 @@ __global__ void eval_dcf_many_kernel(const uint8_t* keys_flat,
   if (idx >= N) return;
   const uint8_t* kp = keys_flat + idx * key_bytes;
   auto* hdr = reinterpret_cast<const DcfKeyHeader*>(kp);
-  const uint8_t* alpha = kp + sizeof(DcfKeyHeader);
-  const uint8_t* payload = alpha + in_bits;
-  uint64_t x = xs[idx];
-  bool lt = false;
-  for (int i = 0; i < in_bits; i++) {
-    uint8_t xb = static_cast<uint8_t>((x >> (in_bits - 1 - i)) & 1ull);
-    uint8_t ab = alpha[static_cast<size_t>(i)] & 1u;
-    if (xb < ab) { lt = true; break; }
-    if (xb > ab) { lt = false; break; }
-  }
+  const uint8_t* payload = kp + sizeof(DcfKeyHeader);
+  const uint64_t mask = (in_bits >= 64) ? ~uint64_t(0) : ((uint64_t(1) << in_bits) - 1ull);
+  uint64_t x = xs[idx] & mask;
+  uint64_t alpha = hdr->alpha_u64 & mask;
+  bool lt = (x < alpha);
   uint8_t* out = outs + idx * static_cast<size_t>(out_bytes);
   if (lt) {
     for (int j = 0; j < out_bytes; j++) out[j] = payload[j];
@@ -393,16 +397,11 @@ __global__ void eval_dcf_many_kernel_broadcast(const uint8_t* key_blob,
   if (idx >= N) return;
   const uint8_t* kp = key_blob;
   auto* hdr = reinterpret_cast<const DcfKeyHeader*>(kp);
-  const uint8_t* alpha = kp + sizeof(DcfKeyHeader);
-  const uint8_t* payload = alpha + in_bits;
-  uint64_t x = xs[idx];
-  bool lt = false;
-  for (int i = 0; i < in_bits; i++) {
-    uint8_t xb = static_cast<uint8_t>((x >> (in_bits - 1 - i)) & 1ull);
-    uint8_t ab = alpha[static_cast<size_t>(i)] & 1u;
-    if (xb < ab) { lt = true; break; }
-    if (xb > ab) { lt = false; break; }
-  }
+  const uint8_t* payload = kp + sizeof(DcfKeyHeader);
+  const uint64_t mask = (in_bits >= 64) ? ~uint64_t(0) : ((uint64_t(1) << in_bits) - 1ull);
+  uint64_t x = xs[idx] & mask;
+  uint64_t alpha = hdr->alpha_u64 & mask;
+  bool lt = (x < alpha);
   uint8_t* out = outs + idx * static_cast<size_t>(out_bytes);
   if (lt) {
     for (int j = 0; j < out_bytes; j++) out[j] = payload[j];

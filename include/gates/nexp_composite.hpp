@@ -78,9 +78,10 @@ inline NexpCompositeKeys dealer_make_nexp_composite_keys(proto::PfssBackend& bac
   auto suf_gate = suf::build_silu_suf_from_piecewise(spec);
   // eff_bits hint: ignore the +inf sentinel interval end (max int64).
   uint64_t sentinel = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+  uint64_t sentinel_u64 = std::numeric_limits<uint64_t>::max();
   uint64_t max_end = 0;
   for (const auto& iv : spec.intervals) {
-    if (iv.end == sentinel) continue;
+    if (iv.end == sentinel || iv.end == sentinel_u64) continue;
     max_end = std::max(max_end, iv.end);
   }
   auto bits_mag = [](uint64_t v) {
@@ -111,9 +112,10 @@ inline NexpTaskMaterial dealer_make_nexp_task_material(proto::PfssBackendBatch& 
   auto spec = make_nexp_spec(params);
   auto suf_gate = suf::build_silu_suf_from_piecewise(spec);
   uint64_t sentinel = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+  uint64_t sentinel_u64 = std::numeric_limits<uint64_t>::max();
   uint64_t max_end = 0;
   for (const auto& iv : spec.intervals) {
-    if (iv.end == sentinel) continue;
+    if (iv.end == sentinel || iv.end == sentinel_u64) continue;
     max_end = std::max(max_end, iv.end);
   }
   auto bits_mag = [](uint64_t v) {

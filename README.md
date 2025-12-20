@@ -129,7 +129,7 @@ Correctness note: trunc/ARS helper bits (`carry/sign/wrap`) are maintained as **
   - `SUF_OPEN_PACK_DEVICE_MIN_WORDS` minimum words to use GPU packing (default `2^18`)
   - `SUF_OPEN_PACK_DEVICE_SCATTER=1` computes opened values on GPU during device-pack (off by default; can increase contention when both parties share one GPU)
 
-Latest end-to-end numbers (Sigma vs SUF, plus per-phase breakdowns) live in `benchmark_report.md` and the corresponding `bench/results/current_compare/*/summary.csv` snapshots.
+Latest end-to-end numbers (Sigma vs SUF, plus per-phase breakdowns) live in `benchmark_report.md` and the harness outputs under `bench/results/` (notably `bench/results/summary.csv`).
 
 ### CPU monitoring
 
@@ -144,6 +144,25 @@ Use these alongside `pfss.{num_jobs,num_flushes,open_flushes,opened_words}` to d
 To get a timing breakdown of online work, set:
 - `SUF_BENCH_PROFILE=1` (adds `online_profile.*` to the JSON logs)
 - `SUF_BENCH_CPU_SAMPLER=1` and `SUF_BENCH_CPU_SAMPLE_MS=200` (optional CPU sampling)
+
+### Performance optimization notes (online phase)
+
+This repo’s end-to-end online time is typically dominated by:
+- **Open batching + packing** (`online_profile.open_flush_ns`, `open_comm_ns`, `open_pack_ns`)
+- **Composite-FSS Beaver work** (`online_profile.pfss_flush_eval_eval_ns`), especially “selector network” code paths for gates that emit boolean outputs (`ell > 0`).
+
+Recent concrete optimizations (keeps `paper.md` semantics unchanged):
+- **Selector-network batching:** `include/gates/composite_fss.hpp` batches the cutpoint selector network into two `BeaverMul64::mul_batch` rounds per block (B2A all cut bits, then chain products). This reduces per-block channel-call overhead without changing total opened bytes/words.
+- **Selector-weighted blending fusion:** `include/gates/composite_fss.hpp` fuses selector-weighted boolean blending so each piece uses a single `mul_batch` over `ell * block_size` products, instead of one `mul_batch` per boolean output.
+- **Horner fusion across outputs:** `include/gates/composite_fss.hpp` fuses Horner’s rule multiplications across all arithmetic outputs, reducing Beaver rounds from `r * degree` to `degree` per block.
+- **Beaver scratch reuse:** `include/proto/beaver_mul64.hpp` uses thread-local scratch buffers inside `BeaverMul64::mul_batch` so short-lived `BeaverMul64` instances (common inside composite evaluation) don’t repeatedly allocate/resize large `(e,f)` buffers.
+- **GPU DCF compare fast-path:** `cuda/pfss_backend_gpu.cu` packs `alpha` into a u64 in the DCF key header so the GPU DCF kernels can do `x < alpha` directly instead of per-bit comparisons.
+
+Practical strategies to push SUF toward Sigma-like performance (without changing `paper.md` semantics):
+- **Reduce PFSS jobs (`pfss.num_jobs`):** fewer Composite-FSS invocations means fewer hatx opens and fewer Composite-FSS “flush” boundaries. Targets include rescale/truncation hoisting, folding public scaling into existing phases, and avoiding per-head fragmentation in attention.
+- **Reduce Beaver rounds per job:** reduce the number of `BeaverMul64::mul_batch` calls within Composite-FSS evaluation by fusing independent products (selectors, selector-weighted blends, multi-output Horner) and by preferring XOR-only predicate rewrites when possible.
+- **Reduce packing/scatter overhead:** prefer `SUF_OPEN_PACK_DEVICE=1` + `SUF_OPEN_PACK_DEVICE_KEEP_OPENED=1` (GPU runs) so large Beaver opens do not bottleneck on host bitpacking and redundant D2H/H2D for opened values.
+- **Use the profiler:** `SUF_BENCH_PROFILE=1` should make it obvious whether the next win is in `open_*` vs `pfss_*` counters; `resources.cpu_util_avg` helps distinguish CPU-bound orchestration vs GPU kernels.
 
 ### Notes on libdpf / grotto backend
 
@@ -190,6 +209,12 @@ Smoke (bert-tiny):
 
 ```bash
 python3 bench/run_sigma_vs_suf.py --config bench/configs/sigma_vs_suf_bert_tiny.json --timeout-sigma-s 1800
+```
+
+Quick GPU-only run (BERT/GPT2, seq=128, B=1):
+
+```bash
+python3 bench/run_sigma_vs_suf.py --config bench/configs/sigma_vs_suf_quick_gpu.json --timeout-sigma-s 3600
 ```
 
 ### Benchmark Defaults (BERT-Tiny)

@@ -55,21 +55,33 @@ struct BeaverMul64 {
     out.resize(n);
 
     // Exchange (e,f) in one contiguous message to reduce channel overhead.
-    ef_share_buf.resize(2 * n);
-    ef_other_buf.resize(2 * n);
-    for (size_t i = 0; i < n; i++) {
+    // Use thread-local scratch so repeated short-lived BeaverMul64 instances
+    // (common in batched composite evaluation) don't churn allocations.
+    thread_local std::vector<u64> ef_share_tls;
+    thread_local std::vector<u64> ef_other_tls;
+    ef_share_tls.resize(2 * n);
+    ef_other_tls.resize(2 * n);
+#ifdef _OPENMP
+#pragma omp parallel for if (n >= (1ull << 16)) schedule(static)
+#endif
+    for (long long ii = 0; ii < static_cast<long long>(n); ++ii) {
+      const size_t i = static_cast<size_t>(ii);
       const auto& t = triples[idx + i];
-      ef_share_buf[i] = sub_mod(x[i], t.a);
-      ef_share_buf[n + i] = sub_mod(y[i], t.b);
+      ef_share_tls[i] = sub_mod(x[i], t.a);
+      ef_share_tls[n + i] = sub_mod(y[i], t.b);
     }
 
-    ch.send_bytes(ef_share_buf.data(), ef_share_buf.size() * sizeof(u64));
-    ch.recv_bytes(ef_other_buf.data(), ef_other_buf.size() * sizeof(u64));
+    ch.send_bytes(ef_share_tls.data(), ef_share_tls.size() * sizeof(u64));
+    ch.recv_bytes(ef_other_tls.data(), ef_other_tls.size() * sizeof(u64));
 
-    for (size_t i = 0; i < n; i++) {
+#ifdef _OPENMP
+#pragma omp parallel for if (n >= (1ull << 16)) schedule(static)
+#endif
+    for (long long ii = 0; ii < static_cast<long long>(n); ++ii) {
+      const size_t i = static_cast<size_t>(ii);
       const auto& t = triples[idx + i];
-      u64 e = add_mod(ef_share_buf[i], ef_other_buf[i]);
-      u64 f = add_mod(ef_share_buf[n + i], ef_other_buf[n + i]);
+      u64 e = add_mod(ef_share_tls[i], ef_other_tls[i]);
+      u64 f = add_mod(ef_share_tls[n + i], ef_other_tls[n + i]);
 
       u64 z = t.c;
       z = add_mod(z, mul_mod(e, t.b));

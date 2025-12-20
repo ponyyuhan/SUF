@@ -507,14 +507,15 @@ class Matmul2DTask final : public runtime::detail::PhaseTask {
       }
       case St::WaitOpen: {
         if (!R.opens->ready(h_open_)) return runtime::detail::Need::Open;
-        auto opened = R.opens->view(h_open_);
         const size_t A_words = static_cast<size_t>(M_) * static_cast<size_t>(K_);
         const size_t B_words = B_.size();
-        if (opened.size() != A_words + B_words) {
-          throw std::runtime_error("Matmul2DTask: opened size mismatch");
-        }
 #ifdef SUF_HAVE_CUDA
-        const bool want_gpu = (std::getenv("SUF_MATMUL_BEAVER_GPU") != nullptr);
+        bool want_gpu = false;
+        if (R.pfss_backend && dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr) {
+          const char* env = std::getenv("SUF_MATMUL_BEAVER_GPU");
+          // Default-on for GPU backends; set SUF_MATMUL_BEAVER_GPU=0 to force CPU matmul.
+          want_gpu = (env == nullptr) || (std::string(env) != "0");
+        }
         if (want_gpu && R.pfss_backend) {
           if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend)) {
             cudaStream_t stream = reinterpret_cast<cudaStream_t>(staged->device_stream());
@@ -534,10 +535,24 @@ class Matmul2DTask final : public runtime::detail::PhaseTask {
                 !sc.ensure_alloc(bytes_out, &sc.dOut, sc.dOut_cap)) {
               throw std::runtime_error("Matmul2DTask: beaver GPU alloc failed");
             }
-            // Opened values are stored as int64_t; bit-pattern is the ring element.
-            const uint8_t* opened_bytes = reinterpret_cast<const uint8_t*>(opened.data());
-            cudaMemcpyAsync(sc.dD, opened_bytes, bytes_D, cudaMemcpyHostToDevice, stream);
-            cudaMemcpyAsync(sc.dE, opened_bytes + bytes_D, bytes_E, cudaMemcpyHostToDevice, stream);
+            const uint64_t* d_opened = R.opens->view_device_u64(h_open_);
+            const uint64_t* dD_open = nullptr;
+            const uint64_t* dE_open = nullptr;
+            if (d_opened) {
+              dD_open = d_opened;
+              dE_open = d_opened + A_words;
+            } else {
+              // Opened values are stored as int64_t on host; bit-pattern is the ring element.
+              auto opened = R.opens->view(h_open_);
+              if (opened.size() != A_words + B_words) {
+                throw std::runtime_error("Matmul2DTask: opened size mismatch");
+              }
+              const uint8_t* opened_bytes = reinterpret_cast<const uint8_t*>(opened.data());
+              cudaMemcpyAsync(sc.dD, opened_bytes, bytes_D, cudaMemcpyHostToDevice, stream);
+              cudaMemcpyAsync(sc.dE, opened_bytes + bytes_D, bytes_E, cudaMemcpyHostToDevice, stream);
+              dD_open = reinterpret_cast<const uint64_t*>(sc.dD);
+              dE_open = reinterpret_cast<const uint64_t*>(sc.dE);
+            }
 
             const void* dA = sc.cached_upload(a_tri_.data(), bytes_D, stream);
             const void* dB = sc.cached_upload(b_tri_.data(), bytes_E, stream);
@@ -549,8 +564,8 @@ class Matmul2DTask final : public runtime::detail::PhaseTask {
             const int64_t mul_c = mul_const_.value_or(0);
             const int mul_s = mul_shift_;
             launch_beaver_matmul2d_kernel(R.party,
-                                          sc.dD,
-                                          sc.dE,
+                                          dD_open,
+                                          dE_open,
                                           reinterpret_cast<const uint64_t*>(dA),
                                           reinterpret_cast<const uint64_t*>(dB),
                                           reinterpret_cast<const uint64_t*>(dC),
@@ -572,6 +587,10 @@ class Matmul2DTask final : public runtime::detail::PhaseTask {
           }
         }
 #endif
+        auto opened = R.opens->view(h_open_);
+        if (opened.size() != A_words + B_words) {
+          throw std::runtime_error("Matmul2DTask: opened size mismatch");
+        }
         #pragma omp parallel for collapse(2) schedule(static)
         for (int m = 0; m < M_; ++m) {
           for (int n = 0; n < N_; ++n) {
@@ -701,13 +720,13 @@ class BatchedMatmul2DTask final : public runtime::detail::PhaseTask {
       }
       case St::WaitOpen: {
         if (!R.opens->ready(h_open_)) return runtime::detail::Need::Open;
-        auto opened = R.opens->view(h_open_);
-        if (opened.size() != static_cast<size_t>(batches_) * per) {
-          throw std::runtime_error("BatchedMatmul2DTask: opened size mismatch");
-        }
 
 #ifdef SUF_HAVE_CUDA
-        const bool want_gpu = (std::getenv("SUF_MATMUL_BEAVER_GPU") != nullptr);
+        bool want_gpu = false;
+        if (R.pfss_backend && dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr) {
+          const char* env = std::getenv("SUF_MATMUL_BEAVER_GPU");
+          want_gpu = (env == nullptr) || (std::string(env) != "0");
+        }
         if (want_gpu && R.pfss_backend &&
             dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr) {
           if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend)) {
@@ -730,21 +749,45 @@ class BatchedMatmul2DTask final : public runtime::detail::PhaseTask {
               throw std::runtime_error("BatchedMatmul2DTask: beaver GPU alloc failed");
             }
 
-            const uint8_t* opened_bytes = reinterpret_cast<const uint8_t*>(opened.data());
-            for (int b = 0; b < batches_; ++b) {
-              const size_t src_off = static_cast<size_t>(b) * per * sizeof(uint64_t);
-              const size_t dst_d_off = static_cast<size_t>(b) * A_words * sizeof(uint64_t);
-              const size_t dst_e_off = static_cast<size_t>(b) * B_words * sizeof(uint64_t);
-              cudaMemcpyAsync(reinterpret_cast<uint8_t*>(sc.dD) + dst_d_off,
-                              opened_bytes + src_off,
-                              A_words * sizeof(uint64_t),
-                              cudaMemcpyHostToDevice,
-                              stream);
-              cudaMemcpyAsync(reinterpret_cast<uint8_t*>(sc.dE) + dst_e_off,
-                              opened_bytes + src_off + A_words * sizeof(uint64_t),
-                              B_words * sizeof(uint64_t),
-                              cudaMemcpyHostToDevice,
-                              stream);
+            const uint64_t* d_opened = R.opens->view_device_u64(h_open_);
+            if (d_opened) {
+              const uint8_t* opened_bytes = reinterpret_cast<const uint8_t*>(d_opened);
+              for (int b = 0; b < batches_; ++b) {
+                const size_t src_off = static_cast<size_t>(b) * per * sizeof(uint64_t);
+                const size_t dst_d_off = static_cast<size_t>(b) * A_words * sizeof(uint64_t);
+                const size_t dst_e_off = static_cast<size_t>(b) * B_words * sizeof(uint64_t);
+                cudaMemcpyAsync(reinterpret_cast<uint8_t*>(sc.dD) + dst_d_off,
+                                opened_bytes + src_off,
+                                A_words * sizeof(uint64_t),
+                                cudaMemcpyDeviceToDevice,
+                                stream);
+                cudaMemcpyAsync(reinterpret_cast<uint8_t*>(sc.dE) + dst_e_off,
+                                opened_bytes + src_off + A_words * sizeof(uint64_t),
+                                B_words * sizeof(uint64_t),
+                                cudaMemcpyDeviceToDevice,
+                                stream);
+              }
+            } else {
+              auto opened = R.opens->view(h_open_);
+              if (opened.size() != static_cast<size_t>(batches_) * per) {
+                throw std::runtime_error("BatchedMatmul2DTask: opened size mismatch");
+              }
+              const uint8_t* opened_bytes = reinterpret_cast<const uint8_t*>(opened.data());
+              for (int b = 0; b < batches_; ++b) {
+                const size_t src_off = static_cast<size_t>(b) * per * sizeof(uint64_t);
+                const size_t dst_d_off = static_cast<size_t>(b) * A_words * sizeof(uint64_t);
+                const size_t dst_e_off = static_cast<size_t>(b) * B_words * sizeof(uint64_t);
+                cudaMemcpyAsync(reinterpret_cast<uint8_t*>(sc.dD) + dst_d_off,
+                                opened_bytes + src_off,
+                                A_words * sizeof(uint64_t),
+                                cudaMemcpyHostToDevice,
+                                stream);
+                cudaMemcpyAsync(reinterpret_cast<uint8_t*>(sc.dE) + dst_e_off,
+                                opened_bytes + src_off + A_words * sizeof(uint64_t),
+                                B_words * sizeof(uint64_t),
+                                cudaMemcpyHostToDevice,
+                                stream);
+              }
             }
 
             const void* dA = sc.cached_upload(a_tri_.data(), A_words * sizeof(uint64_t), stream);
@@ -782,6 +825,10 @@ class BatchedMatmul2DTask final : public runtime::detail::PhaseTask {
         }
 #endif
 
+        auto opened = R.opens->view(h_open_);
+        if (opened.size() != static_cast<size_t>(batches_) * per) {
+          throw std::runtime_error("BatchedMatmul2DTask: opened size mismatch");
+        }
         #pragma omp parallel for collapse(3) schedule(static)
         for (int b = 0; b < batches_; ++b) {
           for (int m = 0; m < M_; ++m) {
@@ -1507,9 +1554,15 @@ void attention_forward(const AttentionConfig& cfg,
     pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
     enter_phase();
     const int score_batches = static_cast<int>(B * H);
+    bool want_beaver_gpu = false;
+#ifdef SUF_HAVE_CUDA
+    if (ctx && ctx->uses_gpu_backend()) {
+      const char* env = std::getenv("SUF_MATMUL_BEAVER_GPU");
+      want_beaver_gpu = (env == nullptr) || (std::string(env) != "0");
+    }
+#endif
     const bool beaver_batched =
-        (score_batches > 1) &&
-        (std::getenv("SUF_MATMUL_BEAVER_GPU") != nullptr) &&
+        (score_batches > 1) && want_beaver_gpu &&
         (std::getenv("SUF_MATMUL_BEAVER_BATCHED") == nullptr ||
          std::string(std::getenv("SUF_MATMUL_BEAVER_BATCHED")) != "0");
     if (beaver_batched) {
@@ -1697,8 +1750,7 @@ void attention_forward(const AttentionConfig& cfg,
     enter_phase();
     const int ctxt_batches = static_cast<int>(B * H);
     const bool ctxt_batched =
-        (ctxt_batches > 1) &&
-        (std::getenv("SUF_MATMUL_BEAVER_GPU") != nullptr) &&
+        (ctxt_batches > 1) && want_beaver_gpu &&
         (std::getenv("SUF_MATMUL_BEAVER_BATCHED") == nullptr ||
          std::string(std::getenv("SUF_MATMUL_BEAVER_BATCHED")) != "0");
     if (ctxt_batched) {

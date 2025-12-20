@@ -1,0 +1,15 @@
+{
+  "models": ["bert-tiny", "bert-base", "bert-large", "gpt2"],
+  "seq_lens": [128],
+  "batch_sizes": [1],
+  "backends": ["gpu"],
+  "n_iters": 3,
+  "sigma_root": "external/sigma_ezpc/GPU-MPC/experiments/sigma",
+  "sigma_binary": "sigma",
+  "sigma_cpu_threads": 16,
+  "results_dir": "bench/results",
+  "suf_binary": "build_ninja/bench_suf_transformer",
+  "suf_extra_args": ["--open-pack", "1"],
+  "notes": "Quick GPU-only Sigma vs SUF comparison (seq=128,B=1,n_iters=3)."
+}
+

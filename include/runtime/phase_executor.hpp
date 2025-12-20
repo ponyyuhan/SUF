@@ -5,6 +5,7 @@
 #include "runtime/pfss_superbatch.hpp"
 #include "runtime/open_collector.hpp"
 #include "runtime/pfss_phase_planner.hpp"
+#include "proto/backend_gpu.hpp"
 
 namespace runtime {
 
@@ -183,6 +184,13 @@ class PhaseExecutor {
         if (flush_guard + 1 > max_flushes_) {
           throw std::runtime_error("PhaseExecutor: open flush budget exceeded");
         }
+#ifdef SUF_HAVE_CUDA
+        if (R.pfss_backend) {
+          if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend)) {
+            R.opens->set_cuda_stream(staged->device_stream());
+          }
+        }
+#endif
         R.opens->flush(R.party, *R.net_chan);
         flush_guard++;
         return true;
@@ -334,6 +342,13 @@ class PhaseExecutor {
         if (flush_guard + 1 > max_flushes_) {
           throw std::runtime_error("PhaseExecutor: open flush budget exceeded");
         }
+#ifdef SUF_HAVE_CUDA
+        if (R.pfss_backend) {
+          if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend)) {
+            R.opens->set_cuda_stream(staged->device_stream());
+          }
+        }
+#endif
         R.opens->flush(R.party, *R.net_chan);
         flush_guard++;
         return true;
