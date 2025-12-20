@@ -1,0 +1,23 @@
+{
+  "models": ["bert-tiny", "bert-base", "bert-large", "gpt2", "gpt-neo-1.3b"],
+  "seq_lens": [128],
+  "batch_sizes": [1],
+  "backends": ["gpu", "cpu"],
+  "n_iters": 2,
+  "sigma_root": "external/sigma_ezpc/GPU-MPC/experiments/sigma",
+  "sigma_binary": "sigma",
+  "sigma_cpu_threads": 16,
+  "results_dir": "bench/results/current_compare/2025-12-19_openreserve_beaverpack",
+  "suf_binary": "build_ninja/bench_suf_transformer",
+  "suf_extra_args": ["--open-pack", "1", "--per-element-masks", "0"],
+  "suf_env": {
+    "SUF_FORCE_PFSS": "1",
+    "SUF_BENCH_PROFILE": "1",
+    "SUF_BENCH_CPU_SAMPLER": "1",
+    "SUF_OPEN_PACK_MIN_SAVINGS_PCT": "10",
+    "SUF_BENCH_NET_RING_POW2": "25",
+    "SUF_BENCH_PFSS_RING_POW2": "27"
+  },
+  "notes": "OpenCollector reserve (no gather copy) + BeaverMul64 combined (e,f) exchange to reduce PFSS-channel overhead."
+}
+

@@ -68,7 +68,8 @@ class MatmulTask final : public detail::PhaseTask {
         }
         h_open_ = R.opens->enqueue(buf_de_, OpenKind::kBeaver);
         st_ = St::WaitOpen;
-        return detail::Need::Open;
+        // Enqueue is progress; allow other tasks to enqueue before flushing.
+        return detail::Need::None;
       }
       case St::WaitOpen: {
         if (!R.opens->ready(h_open_)) return detail::Need::Open;

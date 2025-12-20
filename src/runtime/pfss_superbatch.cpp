@@ -20,6 +20,8 @@ namespace runtime {
 
 namespace {
 
+static const std::vector<proto::BeaverTriple64Share> k_empty_triples;
+
 inline uint64_t mask_bits_host(int bits) {
   if (bits <= 0) return 0;
   if (bits >= 64) return ~uint64_t(0);
@@ -1085,52 +1087,50 @@ void PfssSuperBatch::finalize_all(int party, proto::IChannel& ch) {
     const uint64_t* bool_base =
         (ell > 0 && !gr.bools.empty()) ? (gr.bools.data() + sl.start * ell) : nullptr;
 
-    std::vector<uint64_t> arith_slice(arith_base, arith_base + arith_words);
-    std::vector<uint64_t> bool_slice;
-    if (bool_base && bool_words > 0) {
-      bool_slice.assign(bool_base, bool_base + bool_words);
-    }
-
+    const uint64_t* arith_in = arith_base;
+    std::vector<uint64_t> arith_hooked;
     if (job.hook) {
-      // Always use a deterministic synthetic triple pool sized generously; avoids triple exhaustion
-      // in hooks regardless of key provisioning.
-      size_t generous_need = std::max<size_t>(512, job.hatx_public.size() * 256);
-      std::vector<proto::BeaverTriple64Share> synth_triples;
-      synth_triples.reserve(generous_need);
-      std::mt19937_64 rng(job.key->compiled.r_in ^ 0x70667373u);
-      for (size_t i = 0; i < generous_need; ++i) {
-        uint64_t a = rng();
-        uint64_t b = rng();
-        uint64_t c = proto::mul_mod(a, b);
-        uint64_t a0 = rng();
-        uint64_t a1 = a - a0;
-        uint64_t b0 = rng();
-        uint64_t b1 = b - b0;
-        uint64_t c0 = rng();
-        uint64_t c1 = c - c0;
-        synth_triples.push_back((party == 0) ? proto::BeaverTriple64Share{a0, b0, c0}
-                                             : proto::BeaverTriple64Share{a1, b1, c1});
-      }
-      proto::BeaverMul64 mul{party, ch, synth_triples, 0};
       job.hook->configure(job.key->compiled.layout);
-      std::vector<uint64_t> hooked(arith_words, 0);
-      job.hook->run_batch(party, ch, mul,
+      arith_hooked.assign(arith_words, 0);
+
+      const bool hook_needs_mul =
+          !(dynamic_cast<const gates::FaithfulTruncPostProc*>(job.hook) ||
+            dynamic_cast<const gates::FaithfulArsPostProc*>(job.hook) ||
+            dynamic_cast<const gates::GapArsPostProc*>(job.hook));
+      const size_t need_triples = hook_needs_mul ? std::max(arith_words, bool_words) : 0;
+
+      const std::vector<proto::BeaverTriple64Share>* triples =
+          (job.key != nullptr) ? &job.key->triples : nullptr;
+      if (need_triples > 0) {
+        if (!triples || triples->empty()) {
+          throw std::runtime_error("PfssSuperBatch::finalize_all: missing Beaver triples for hook");
+        }
+        if (triples->size() < need_triples) {
+          throw std::runtime_error("PfssSuperBatch::finalize_all: insufficient Beaver triples for hook");
+        }
+      }
+      proto::BeaverMul64 mul{party, ch, hook_needs_mul ? *triples : k_empty_triples, 0};
+      job.hook->run_batch(party,
+                          ch,
+                          mul,
                           job.hatx_public.data(),
-                          arith_slice.data(), r,
-                          bool_slice.data(), ell,
+                          arith_base,
+                          r,
+                          bool_base,
+                          ell,
                           sl.len,
-                          hooked.data());
-      arith_slice.swap(hooked);
+                          arith_hooked.data());
+      arith_in = arith_hooked.data();
     }
 
     CompletedJob& cj = completed_[job.token];
     cj.r = r;
     cj.ell = ell;
-    cj.arith.resize(arith_slice.size());
+    cj.arith.resize(arith_words);
     for (size_t i = 0; i < sl.len; ++i) {
       for (size_t rr = 0; rr < r; ++rr) {
         size_t out_idx = i * r + rr;
-        uint64_t val = arith_slice[out_idx];
+        uint64_t val = arith_in[out_idx];
         uint64_t rout = (rr < job.key->r_out_share.size()) ? job.key->r_out_share[rr] : 0ull;
         val = proto::sub_mod(val, rout);
         cj.arith[out_idx] = val;
@@ -1139,7 +1139,11 @@ void PfssSuperBatch::finalize_all(int party, proto::IChannel& ch) {
         }
       }
     }
-    cj.bools = std::move(bool_slice);
+    if (bool_base && bool_words > 0) {
+      cj.bools.assign(bool_base, bool_base + bool_words);
+    } else {
+      cj.bools.clear();
+    }
     if (job.token < slots_.size() && slots_[job.token]) {
       auto& slot = slots_[job.token];
       slot->r = r;
@@ -1186,50 +1190,50 @@ void PfssSuperBatch::materialize_host(int party, proto::IChannel& ch) {
     const uint64_t* bool_base =
         (ell > 0 && !gr.bools.empty()) ? (gr.bools.data() + sl.start * ell) : nullptr;
 
-    std::vector<uint64_t> arith_slice(arith_base, arith_base + arith_words);
-    std::vector<uint64_t> bool_slice;
-    if (bool_base && bool_words > 0) {
-      bool_slice.assign(bool_base, bool_base + bool_words);
-    }
-
+    const uint64_t* arith_in = arith_base;
+    std::vector<uint64_t> arith_hooked;
     if (job.hook) {
-      size_t generous_need = std::max<size_t>(512, job.hatx_public.size() * 256);
-      std::vector<proto::BeaverTriple64Share> synth_triples;
-      synth_triples.reserve(generous_need);
-      std::mt19937_64 rng(job.key->compiled.r_in ^ 0x70667373u);
-      for (size_t i = 0; i < generous_need; ++i) {
-        uint64_t a = rng();
-        uint64_t b = rng();
-        uint64_t c = proto::mul_mod(a, b);
-        uint64_t a0 = rng();
-        uint64_t a1 = a - a0;
-        uint64_t b0 = rng();
-        uint64_t b1 = b - b0;
-        uint64_t c0 = rng();
-        uint64_t c1 = c - c0;
-        synth_triples.push_back((party == 0) ? proto::BeaverTriple64Share{a0, b0, c0}
-                                             : proto::BeaverTriple64Share{a1, b1, c1});
-      }
-      proto::BeaverMul64 mul{party, ch, synth_triples, 0};
       job.hook->configure(job.key->compiled.layout);
-      std::vector<uint64_t> hooked(arith_words, 0);
-      job.hook->run_batch(party, ch, mul,
+      arith_hooked.assign(arith_words, 0);
+
+      const bool hook_needs_mul =
+          !(dynamic_cast<const gates::FaithfulTruncPostProc*>(job.hook) ||
+            dynamic_cast<const gates::FaithfulArsPostProc*>(job.hook) ||
+            dynamic_cast<const gates::GapArsPostProc*>(job.hook));
+      const size_t need_triples = hook_needs_mul ? std::max(arith_words, bool_words) : 0;
+
+      const std::vector<proto::BeaverTriple64Share>* triples =
+          (job.key != nullptr) ? &job.key->triples : nullptr;
+      if (need_triples > 0) {
+        if (!triples || triples->empty()) {
+          throw std::runtime_error("PfssSuperBatch::materialize_host: missing Beaver triples for hook");
+        }
+        if (triples->size() < need_triples) {
+          throw std::runtime_error("PfssSuperBatch::materialize_host: insufficient Beaver triples for hook");
+        }
+      }
+      proto::BeaverMul64 mul{party, ch, hook_needs_mul ? *triples : k_empty_triples, 0};
+      job.hook->run_batch(party,
+                          ch,
+                          mul,
                           job.hatx_public.data(),
-                          arith_slice.data(), r,
-                          bool_slice.data(), ell,
+                          arith_base,
+                          r,
+                          bool_base,
+                          ell,
                           sl.len,
-                          hooked.data());
-      arith_slice.swap(hooked);
+                          arith_hooked.data());
+      arith_in = arith_hooked.data();
     }
 
     CompletedJob& cj = completed_[job.token];
     cj.r = r;
     cj.ell = ell;
-    cj.arith.resize(arith_slice.size());
+    cj.arith.resize(arith_words);
     for (size_t i = 0; i < sl.len; ++i) {
       for (size_t rr = 0; rr < r; ++rr) {
         size_t out_idx = i * r + rr;
-        uint64_t val = arith_slice[out_idx];
+        uint64_t val = arith_in[out_idx];
         uint64_t rout = (rr < job.key->r_out_share.size()) ? job.key->r_out_share[rr] : 0ull;
         val = proto::sub_mod(val, rout);
         cj.arith[out_idx] = val;
@@ -1238,7 +1242,11 @@ void PfssSuperBatch::materialize_host(int party, proto::IChannel& ch) {
         }
       }
     }
-    cj.bools = std::move(bool_slice);
+    if (bool_base && bool_words > 0) {
+      cj.bools.assign(bool_base, bool_base + bool_words);
+    } else {
+      cj.bools.clear();
+    }
     if (job.token < slots_.size() && slots_[job.token]) {
       auto& slot = slots_[job.token];
       slot->r = r;

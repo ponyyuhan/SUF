@@ -460,12 +460,13 @@ class Matmul2DTask final : public runtime::detail::PhaseTask {
         if (!R.opens) throw std::runtime_error("Matmul2DTask: OpenCollector missing");
         const size_t A_words = static_cast<size_t>(M_) * static_cast<size_t>(K_);
         const size_t B_words = B_.size();
-        diff_.resize(A_words + B_words);
-        for (size_t i = 0; i < A_words; ++i) diff_[i] = proto::sub_mod(A_[i], a_tri_[i]);
-        for (size_t i = 0; i < B_words; ++i) diff_[A_words + i] = proto::sub_mod(B_[i], b_tri_[i]);
-        h_open_ = R.opens->enqueue(diff_, runtime::OpenKind::kBeaver);
+        auto res = R.opens->reserve(A_words + B_words, runtime::OpenKind::kBeaver);
+        for (size_t i = 0; i < A_words; ++i) res.diff[i] = proto::sub_mod(A_[i], a_tri_[i]);
+        for (size_t i = 0; i < B_words; ++i) res.diff[A_words + i] = proto::sub_mod(B_[i], b_tri_[i]);
+        h_open_ = res.handle;
         st_ = St::WaitOpen;
-        return runtime::detail::Need::Open;
+        // Enqueue is progress; let PhaseExecutor batch multiple Beaver opens before flushing.
+        return runtime::detail::Need::None;
       }
       case St::WaitOpen: {
         if (!R.opens->ready(h_open_)) return runtime::detail::Need::Open;
@@ -643,15 +644,20 @@ class BatchedMatmul2DTask final : public runtime::detail::PhaseTask {
     switch (st_) {
       case St::Init: {
         if (!R.opens) throw std::runtime_error("BatchedMatmul2DTask: OpenCollector missing");
-        diff_.resize(static_cast<size_t>(batches_) * per);
+        const size_t total_words = static_cast<size_t>(batches_) * per;
+        auto res = R.opens->reserve(total_words, runtime::OpenKind::kBeaver);
         for (int b = 0; b < batches_; ++b) {
           const size_t a_off = static_cast<size_t>(b) * A_words;
           const size_t b_off = static_cast<size_t>(b) * B_words;
           const size_t d_off = static_cast<size_t>(b) * per;
-          for (size_t i = 0; i < A_words; ++i) diff_[d_off + i] = proto::sub_mod(A_all_[a_off + i], a_tri_[i]);
-          for (size_t i = 0; i < B_words; ++i) diff_[d_off + A_words + i] = proto::sub_mod(B_all_[b_off + i], b_tri_[i]);
+          for (size_t i = 0; i < A_words; ++i) {
+            res.diff[d_off + i] = proto::sub_mod(A_all_[a_off + i], a_tri_[i]);
+          }
+          for (size_t i = 0; i < B_words; ++i) {
+            res.diff[d_off + A_words + i] = proto::sub_mod(B_all_[b_off + i], b_tri_[i]);
+          }
         }
-        h_open_ = R.opens->enqueue(diff_, runtime::OpenKind::kBeaver);
+        h_open_ = res.handle;
         st_ = St::WaitOpen;
         // Enqueue is progress; let PhaseExecutor batch multiple opens before flushing.
         return runtime::detail::Need::None;
@@ -659,7 +665,9 @@ class BatchedMatmul2DTask final : public runtime::detail::PhaseTask {
       case St::WaitOpen: {
         if (!R.opens->ready(h_open_)) return runtime::detail::Need::Open;
         auto opened = R.opens->view(h_open_);
-        if (opened.size() != diff_.size()) throw std::runtime_error("BatchedMatmul2DTask: opened size mismatch");
+        if (opened.size() != static_cast<size_t>(batches_) * per) {
+          throw std::runtime_error("BatchedMatmul2DTask: opened size mismatch");
+        }
 
 #ifdef SUF_HAVE_CUDA
         const bool want_gpu = (std::getenv("SUF_MATMUL_BEAVER_GPU") != nullptr);

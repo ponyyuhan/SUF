@@ -563,6 +563,49 @@ extern "C" __global__ void pack_eff_bits_kernel(const uint64_t* in,
   }
 }
 
+// Faster packing for moderate/large widths: each output word is computed by a single
+// thread (no atomics). This avoids contention in the atomicOr-based kernel.
+// Works for any 1..64, but is tuned for typical SUF widths (37..56).
+extern "C" __global__ void pack_eff_bits_wordwise_kernel(const uint64_t* in,
+                                                         int eff_bits,
+                                                         uint64_t* packed,
+                                                         size_t N,
+                                                         size_t packed_words) {
+  size_t w = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (w >= packed_words) return;
+  if (eff_bits <= 0 || eff_bits > 64) return;
+
+  uint64_t mask = (eff_bits == 64) ? ~0ull : ((1ull << eff_bits) - 1ull);
+  const unsigned __int128 base_bit =
+      static_cast<unsigned __int128>(w) * static_cast<unsigned __int128>(64);
+  const unsigned __int128 idx0_ = base_bit / static_cast<unsigned __int128>(eff_bits);
+  const unsigned __int128 off0_ = base_bit - idx0_ * static_cast<unsigned __int128>(eff_bits);
+  size_t idx = static_cast<size_t>(idx0_);
+  int off = static_cast<int>(off0_);
+
+  uint64_t out = 0;
+  int shift = 0;
+  int rem = 64;
+#pragma unroll
+  for (int it = 0; it < 3 && rem > 0; ++it) {
+    uint64_t v = 0;
+    if (idx < N) v = in[idx] & mask;
+    v = (off == 0) ? v : (v >> off);
+    int avail = eff_bits - off;
+    if (avail < 0) avail = 0;
+    int take = (avail < rem) ? avail : rem;
+    if (take > 0) {
+      uint64_t take_mask = (take == 64) ? ~0ull : ((uint64_t(1) << take) - 1ull);
+      out |= (v & take_mask) << shift;
+      shift += take;
+      rem -= take;
+    }
+    idx += 1;
+    off = 0;
+  }
+  packed[w] = out;
+}
+
 namespace cuda_pfss {
 
 DeviceKey upload_key(const uint8_t* /*key_bytes*/, size_t /*key_len*/) {

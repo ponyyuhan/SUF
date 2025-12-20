@@ -237,30 +237,35 @@ OpenCollector::~OpenCollector() {
 }
 
 OpenHandle OpenCollector::enqueue(const std::vector<uint64_t>& diff, OpenKind kind) {
-  size_t new_pending = pending_words_ + diff.size();
+  auto res = reserve(diff.size(), kind);
+  if (!diff.empty()) {
+    std::memcpy(res.diff.data(), diff.data(), diff.size() * sizeof(uint64_t));
+  }
+  return res.handle;
+}
+
+OpenCollector::Reserve OpenCollector::reserve(size_t len, OpenKind kind) {
+  const size_t new_pending = pending_words_ + len;
   if (limits_.max_pending_words > 0 && new_pending > limits_.max_pending_words) {
     throw std::runtime_error("OpenCollector: pending open budget exceeded");
   }
-  auto slot = std::make_shared<OpenSlot>();
-  slot->n = diff.size();
-  slot->opened.resize(diff.size(), 0);
   OpenHandle h;
-  h.slot = slot;
-  h.offset = 0;
-  h.len = diff.size();
+  h.gen = generation_;
+  h.offset = pending_words_;
+  h.len = len;
   Request r;
-  r.diff = diff;
-  r.slot = slot;
   r.offset = h.offset;
   r.len = h.len;
   r.kind = (static_cast<size_t>(kind) < static_cast<size_t>(OpenKind::kCount)) ? kind
                                                                                : OpenKind::kOther;
-  requests_.push_back(std::move(r));
+  requests_.push_back(r);
   pending_words_ = new_pending;
   if (pending_words_ > stats_.max_pending_words) {
     stats_.max_pending_words = pending_words_;
   }
-  return h;
+  pending_flat_buf_.resize(pending_words_);
+  std::span<uint64_t> view(pending_flat_buf_.data() + h.offset, h.len);
+  return Reserve{h, view};
 }
 
 void OpenCollector::flush(int party, net::Chan& ch) {
@@ -293,6 +298,7 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     return v;
   }();
   const bool device_pack = env_flag_enabled("SUF_OPEN_PACK_DEVICE");
+  const bool device_scatter = env_flag_enabled_default("SUF_OPEN_PACK_DEVICE_SCATTER", false);
   const size_t device_min_words = []() -> size_t {
     const char* env = std::getenv("SUF_OPEN_PACK_DEVICE_MIN_WORDS");
     if (!env) return 1ull << 18;
@@ -300,82 +306,51 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     if (v <= 0) return 1ull << 18;
     return static_cast<size_t>(v);
   }();
-  size_t total_words = 0;
-  std::vector<size_t> req_offsets;
-  req_offsets.reserve(requests_.size());
+  size_t total_words = pending_words_;
   std::array<size_t, static_cast<size_t>(OpenKind::kCount)> words_by_kind{};
   for (const auto& req : requests_) {
-    if (!req.slot) {
-      throw std::runtime_error("OpenCollector: missing result slot");
-    }
-    if (req.offset + req.len > req.slot->opened.size()) {
+    if (req.offset + req.len > total_words) {
       throw std::runtime_error("OpenCollector: request out of range");
     }
-    req_offsets.push_back(total_words);
-    total_words += req.len;
     const size_t k = static_cast<size_t>(req.kind);
     if (k < words_by_kind.size()) words_by_kind[k] += req.len;
+  }
+  if (pending_flat_buf_.size() != total_words) {
+    throw std::runtime_error("OpenCollector: pending buffer size mismatch");
   }
   const bool dynamic_pack = env_flag_enabled_default("SUF_OPEN_PACK_DYNAMIC", false);
   const int ring_bits = proto::ring_bits();
   const int n_bits = ring_bits;
   const bool calc_max_bits = dynamic_pack && want_pack && ring_bits > 0 && ring_bits <= 64;
   int max_bits = 1;
-  // Pack input (and optionally compute effective bits) once per flush.
+  // Materialize input (and optionally compute effective bits) once per flush.
   const auto t_pack0 = std::chrono::steady_clock::now();
   auto& send_flat = send_flat_buf_;
-  send_flat.resize(total_words);
-  const size_t nreq = requests_.size();
+  // Swap so we can use the contiguous pending buffer as the send buffer without copying.
+  send_flat.swap(pending_flat_buf_);
+  pending_flat_buf_.clear();
   if (calc_max_bits) {
     int max_bits_local = 1;
     if (signed_pack) {
 #ifdef _OPENMP
-#pragma omp parallel for if (nreq >= 8) reduction(max : max_bits_local) schedule(static)
+#pragma omp parallel for if (total_words >= (1ull << 16)) reduction(max : max_bits_local) schedule(static)
 #endif
-      for (size_t idx = 0; idx < nreq; ++idx) {
-        const auto& req = requests_[idx];
-        const size_t len = req.len;
-        const size_t off = req_offsets[idx];
-        if (len) {
-          std::memcpy(send_flat.data() + off, req.diff.data(), len * sizeof(uint64_t));
-        }
-        for (size_t i = 0; i < len; ++i) {
-          uint64_t v = req.diff[i];
-          int bits = bits_needed_twos_complement_fast(v, ring_bits);
-          if (bits > max_bits_local) max_bits_local = bits;
-        }
+      for (size_t i = 0; i < total_words; ++i) {
+        uint64_t v = send_flat[i];
+        int bits = bits_needed_twos_complement_fast(v, ring_bits);
+        if (bits > max_bits_local) max_bits_local = bits;
       }
     } else {
 #ifdef _OPENMP
-#pragma omp parallel for if (nreq >= 8) reduction(max : max_bits_local) schedule(static)
+#pragma omp parallel for if (total_words >= (1ull << 16)) reduction(max : max_bits_local) schedule(static)
 #endif
-      for (size_t idx = 0; idx < nreq; ++idx) {
-        const auto& req = requests_[idx];
-        const size_t len = req.len;
-        const size_t off = req_offsets[idx];
-        if (len) {
-          std::memcpy(send_flat.data() + off, req.diff.data(), len * sizeof(uint64_t));
-        }
-        for (size_t i = 0; i < len; ++i) {
-          uint64_t v = req.diff[i];
-          int bits = bits_needed_u64_fast(v);
-          if (bits > max_bits_local) max_bits_local = bits;
-        }
+      for (size_t i = 0; i < total_words; ++i) {
+        uint64_t v = send_flat[i];
+        int bits = bits_needed_u64_fast(v);
+        if (bits > max_bits_local) max_bits_local = bits;
       }
     }
     max_bits = max_bits_local;
-  } else {
-#ifdef _OPENMP
-#pragma omp parallel for if (nreq >= 8) schedule(static)
-#endif
-    for (size_t idx = 0; idx < nreq; ++idx) {
-      const auto& req = requests_[idx];
-      const size_t len = req.len;
-      const size_t off = req_offsets[idx];
-      if (len) {
-        std::memcpy(send_flat.data() + off, req.diff.data(), len * sizeof(uint64_t));
-      }
-    }
   }
   const auto t_pack1 = std::chrono::steady_clock::now();
 
@@ -405,7 +380,7 @@ void OpenCollector::flush(int party, net::Chan& ch) {
   }();
   const auto t_comm1 = std::chrono::steady_clock::now();
   if (!pack) {
-    // Fast-path: one bulk exchange per flush, then scatter results.
+    // Fast-path: one bulk exchange per flush (no packing).
     auto& recv_flat = recv_flat_buf_;
     recv_flat.resize(total_words);
     const auto t_comm2 = std::chrono::steady_clock::now();
@@ -419,20 +394,13 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     const auto t_comm3 = std::chrono::steady_clock::now();
     const auto t_scatter0 = std::chrono::steady_clock::now();
     const uint64_t* recv_ptr = recv_flat.data();
+    opened_flat_buf_.resize(total_words);
 #ifdef _OPENMP
-#pragma omp parallel for if (nreq >= 8) schedule(static)
+#pragma omp parallel for if (total_words >= (1ull << 16)) schedule(static)
 #endif
-    for (size_t idx = 0; idx < nreq; ++idx) {
-      const auto& req = requests_[idx];
-      size_t off = req_offsets[idx];
-#ifdef _OPENMP
-#pragma omp simd
-#endif
-      for (size_t i = 0; i < req.len; ++i) {
-        uint64_t opened = proto::add_mod(req.diff[i], recv_ptr[off + i]);
-        req.slot->opened[req.offset + i] = proto::to_signed(opened);
-      }
-      req.slot->ready.store(true);
+    for (size_t i = 0; i < total_words; ++i) {
+      uint64_t opened = proto::add_mod(send_flat[i], recv_ptr[i]);
+      opened_flat_buf_[i] = proto::to_signed(opened);
     }
     const auto t_scatter1 = std::chrono::steady_clock::now();
     requests_.clear();
@@ -442,6 +410,11 @@ void OpenCollector::flush(int party, net::Chan& ch) {
       stats_.opened_words_by_kind[k] += words_by_kind[k];
     }
     pending_words_ = 0;
+    // Keep send buffer capacity for next flush but reset it so it doesn't retain old values.
+    send_flat.clear();
+    opened_ready_ = true;
+    opened_generation_ = generation_;
+    generation_ += 1;
     auto t1 = std::chrono::steady_clock::now();
     stats_.flush_ns += static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
@@ -477,6 +450,7 @@ void OpenCollector::flush(int party, net::Chan& ch) {
   auto& other_flat = other_flat_buf_;
   other_flat.resize(total_words);
   uint64_t pack2_ns = 0;
+  bool opened_from_device = false;
   if (eff > 0 && eff < 64) {
     auto& packed_local = packed_local_buf_;
     auto& packed_remote = packed_remote_buf_;
@@ -544,12 +518,32 @@ void OpenCollector::flush(int party, net::Chan& ch) {
                    "cudaMemcpy H2D open_unpack");
         launch_unpack_eff_bits_kernel(pack_scratch_.d_packed, eff, pack_scratch_.d_out,
                                       total_words, nullptr);
-        check_cuda(cudaMemcpy(other_flat.data(), pack_scratch_.d_out,
-                              total_words * sizeof(uint64_t),
-                              cudaMemcpyDeviceToHost),
-                   "cudaMemcpy D2H open_unpack");
-        if (signed_pack && n_bits > 0 && n_bits <= 64) {
-          for (auto& w : other_flat) w = sign_extend_to_nbits(w, eff, n_bits);
+        if (device_scatter) {
+          // Optional: compute opened values on device (including sign-extension to
+          // the current ring) to avoid the host-side scatter loop. This is usually
+          // only a win when each party has its own GPU; on single-GPU benchmarks,
+          // it can increase contention and inflate comm time.
+          launch_open_add_to_signed_kernel(pack_scratch_.d_in,
+                                           pack_scratch_.d_out,
+                                           pack_scratch_.d_out,
+                                           total_words,
+                                           n_bits,
+                                           proto::ring_mask(),
+                                           nullptr);
+          opened_flat_buf_.resize(total_words);
+          check_cuda(cudaMemcpy(opened_flat_buf_.data(), pack_scratch_.d_out,
+                                total_words * sizeof(uint64_t),
+                                cudaMemcpyDeviceToHost),
+                     "cudaMemcpy D2H open_opened");
+          opened_from_device = true;
+        } else {
+          check_cuda(cudaMemcpy(other_flat.data(), pack_scratch_.d_out,
+                                total_words * sizeof(uint64_t),
+                                cudaMemcpyDeviceToHost),
+                     "cudaMemcpy D2H open_unpack");
+          if (signed_pack && n_bits > 0 && n_bits <= 64) {
+            for (auto& w : other_flat) w = sign_extend_to_nbits(w, eff, n_bits);
+          }
         }
         const auto t_pack2_3 = std::chrono::steady_clock::now();
         pack2_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -602,21 +596,16 @@ void OpenCollector::flush(int party, net::Chan& ch) {
   }
 
   const auto t_scatter0 = std::chrono::steady_clock::now();
-  const uint64_t* other_ptr = other_flat.data();
+  if (!opened_from_device) {
+    const uint64_t* other_ptr = other_flat.data();
+    opened_flat_buf_.resize(total_words);
 #ifdef _OPENMP
-#pragma omp parallel for if (nreq >= 8) schedule(static)
+#pragma omp parallel for if (total_words >= (1ull << 16)) schedule(static)
 #endif
-  for (size_t idx = 0; idx < nreq; ++idx) {
-    const auto& req = requests_[idx];
-    size_t off = req_offsets[idx];
-#ifdef _OPENMP
-#pragma omp simd
-#endif
-    for (size_t i = 0; i < req.len; ++i) {
-      uint64_t opened = proto::add_mod(req.diff[i], other_ptr[off + i]);
-      req.slot->opened[req.offset + i] = proto::to_signed(opened);
+    for (size_t i = 0; i < total_words; ++i) {
+      uint64_t opened = proto::add_mod(send_flat[i], other_ptr[i]);
+      opened_flat_buf_[i] = proto::to_signed(opened);
     }
-    req.slot->ready.store(true);
   }
   const auto t_scatter1 = std::chrono::steady_clock::now();
   requests_.clear();
@@ -626,6 +615,10 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     stats_.opened_words_by_kind[k] += words_by_kind[k];
   }
   pending_words_ = 0;
+  send_flat.clear();
+  opened_ready_ = true;
+  opened_generation_ = generation_;
+  generation_ += 1;
   auto t1 = std::chrono::steady_clock::now();
   stats_.flush_ns += static_cast<uint64_t>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count());
@@ -638,22 +631,34 @@ void OpenCollector::flush(int party, net::Chan& ch) {
 }
 
 std::span<const int64_t> OpenCollector::view(const OpenHandle& h) const {
-  if (!h.slot || !h.slot->ready.load()) {
+  if (!opened_ready_ || h.gen != opened_generation_) {
     throw std::runtime_error("OpenCollector: view out of range");
   }
-  if (h.offset + h.len > h.slot->opened.size()) {
+  if (h.offset + h.len > opened_flat_buf_.size()) {
     throw std::runtime_error("OpenCollector: view out of range");
   }
-  return std::span<const int64_t>(h.slot->opened.data() + h.offset, h.len);
+  return std::span<const int64_t>(opened_flat_buf_.data() + h.offset, h.len);
 }
 
 bool OpenCollector::ready(const OpenHandle& h) const {
-  return h.slot && h.slot->ready.load() && h.offset + h.len <= h.slot->opened.size();
+  return opened_ready_ &&
+         h.gen == opened_generation_ &&
+         h.offset + h.len <= opened_flat_buf_.size();
 }
 
 void OpenCollector::clear() {
   requests_.clear();
   pending_words_ = 0;
+  pending_flat_buf_.clear();
+  send_flat_buf_.clear();
+  recv_flat_buf_.clear();
+  other_flat_buf_.clear();
+  packed_local_buf_.clear();
+  packed_remote_buf_.clear();
+  opened_flat_buf_.clear();
+  opened_ready_ = false;
+  opened_generation_ = static_cast<uint64_t>(-1);
+  generation_ += 1;
 }
 
 }  // namespace runtime

@@ -96,17 +96,23 @@ class MulTask final : public detail::PhaseTask {
     switch (st_) {
       case St::Init: {
         if (!R.net_chan) throw std::runtime_error("MulTask: net channel missing");
-        diff_.resize(2 * x_.size());
-        for (size_t i = 0; i < x_.size(); ++i) {
-          diff_[i] = proto::sub_mod(x_[i], triples_[i].a);
-          diff_[x_.size() + i] = proto::sub_mod(y_[i], triples_[i].b);
-        }
         if (R.opens) {
-          h_ = R.opens->enqueue(diff_, OpenKind::kBeaver);
+          const size_t n = x_.size();
+          auto res = R.opens->reserve(2 * n, OpenKind::kBeaver);
+          for (size_t i = 0; i < n; ++i) {
+            res.diff[i] = proto::sub_mod(x_[i], triples_[i].a);
+            res.diff[n + i] = proto::sub_mod(y_[i], triples_[i].b);
+          }
+          h_ = res.handle;
           st_ = St::WaitOpen;
           // Treat enqueue as progress so PhaseExecutor can batch multiple opens
           // before forcing a flush.
           return detail::Need::None;
+        }
+        diff_.resize(2 * x_.size());
+        for (size_t i = 0; i < x_.size(); ++i) {
+          diff_[i] = proto::sub_mod(x_[i], triples_[i].a);
+          diff_[x_.size() + i] = proto::sub_mod(y_[i], triples_[i].b);
         }
         opened_.assign(diff_.size(), 0);
         // Fallback direct open.
@@ -127,7 +133,7 @@ class MulTask final : public detail::PhaseTask {
           if (!R.opens) throw std::runtime_error("MulTask: no OpenCollector");
           if (!R.opens->ready(h_)) return detail::Need::Open;
           auto v = R.opens->view(h_);
-          if (v.size() != diff_.size()) {
+          if (v.size() != 2 * x_.size()) {
             throw std::runtime_error("MulTask: opened size mismatch");
           }
           opened_.assign(v.begin(), v.end());
@@ -373,6 +379,25 @@ class TruncTask final : public detail::PhaseTask {
 
     switch (st_) {
       case St::OpenXhat: {
+        if (R.opens) {
+          auto res = R.opens->reserve(in_.size(), OpenKind::kMask);
+          if (per_element_) {
+            for (size_t i = 0; i < in_.size(); ++i) {
+              if (!per_keys_[i]) throw std::runtime_error("TruncTask: missing per-element key");
+              uint64_t rin = per_keys_[i]->r_in_share;
+              res.diff[i] = proto::add_mod(in_[i], rin);
+            }
+          } else {
+            for (size_t i = 0; i < in_.size(); ++i) {
+              uint64_t rin = (key_->r_in_share_vec.size() > i) ? key_->r_in_share_vec[i] : key_->r_in_share;
+              res.diff[i] = proto::add_mod(in_[i], rin);
+            }
+          }
+          h_open_ = res.handle;
+          st_ = St::WaitOpen;
+          // Allow other tasks to enqueue opens before forcing a flush.
+          return detail::Need::None;
+        }
         masked_.resize(in_.size());
         if (per_element_) {
           for (size_t i = 0; i < in_.size(); ++i) {
@@ -385,12 +410,6 @@ class TruncTask final : public detail::PhaseTask {
             uint64_t rin = (key_->r_in_share_vec.size() > i) ? key_->r_in_share_vec[i] : key_->r_in_share;
             masked_[i] = proto::add_mod(in_[i], rin);
           }
-        }
-        if (R.opens) {
-          h_open_ = R.opens->enqueue(masked_, OpenKind::kMask);
-          st_ = St::WaitOpen;
-          // Allow other tasks to enqueue opens before forcing a flush.
-          return detail::Need::None;
         }
         opened_.assign(masked_.size(), 0);
         for (size_t i = 0; i < masked_.size(); ++i) {
@@ -999,13 +1018,13 @@ class RsqrtTask final : public detail::PhaseTask {
     switch (st_) {
       case St::OpenXhat: {
         // Mask and open x (public) for init PFSS.
-        masked_.resize(x_.size());
+        if (!R.opens) throw std::runtime_error("RsqrtTask: no OpenCollector");
+        auto res = R.opens->reserve(x_.size(), OpenKind::kMask);
         for (size_t i = 0; i < x_.size(); ++i) {
           uint64_t rin = (key_->r_in_share_vec.size() > i) ? key_->r_in_share_vec[i] : key_->r_in_share;
-          masked_[i] = proto::add_mod(x_[i], rin);
+          res.diff[i] = proto::add_mod(x_[i], rin);
         }
-        if (!R.opens) throw std::runtime_error("RsqrtTask: no OpenCollector");
-        h_open_ = R.opens->enqueue(masked_, OpenKind::kMask);
+        h_open_ = res.handle;
         st_ = St::WaitOpen;
         // Allow batching of opens across tasks.
         return detail::Need::None;
@@ -1336,26 +1355,27 @@ class MulRowBroadcastTask final : public detail::PhaseTask {
             triple_.C.size() < mat_.size()) {
           throw std::runtime_error("MulRowBroadcastTask: triple too small");
         }
-        buf_de_.resize(mat_.size() + rows_);
+        if (!R.opens) throw std::runtime_error("MulRowBroadcastTask: no OpenCollector");
+        const size_t total_words = mat_.size() + static_cast<size_t>(rows_);
+        auto res = R.opens->reserve(total_words, OpenKind::kBeaver);
         // D matrix
         for (int r = 0; r < rows_; ++r) {
           int L = (valid_lens_.size() == 0) ? cols_ : valid_lens_[r];
           for (int c = 0; c < cols_; ++c) {
             size_t idx = static_cast<size_t>(r * cols_ + c);
             if (c < L) {
-              buf_de_[idx] = proto::sub_mod(mat_[idx], triple_.A[idx]);
+              res.diff[idx] = proto::sub_mod(mat_[idx], triple_.A[idx]);
             } else {
-              buf_de_[idx] = 0;
+              res.diff[idx] = 0;
             }
           }
         }
         // e vector
         size_t off_e = mat_.size();
         for (int r = 0; r < rows_; ++r) {
-          buf_de_[off_e + r] = proto::sub_mod(vec_[r], triple_.B[r]);
+          res.diff[off_e + static_cast<size_t>(r)] = proto::sub_mod(vec_[r], triple_.B[r]);
         }
-        if (!R.opens) throw std::runtime_error("MulRowBroadcastTask: no OpenCollector");
-        h_open_ = R.opens->enqueue(buf_de_, OpenKind::kBeaver);
+        h_open_ = res.handle;
         st_ = St::WaitOpen;
         // Allow batching of Beaver opens across tasks.
         return detail::Need::None;
@@ -1363,7 +1383,9 @@ class MulRowBroadcastTask final : public detail::PhaseTask {
       case St::WaitOpen: {
         if (!R.opens->ready(h_open_)) return detail::Need::Open;
         auto opened = R.opens->view(h_open_);
-        if (opened.size() != buf_de_.size()) throw std::runtime_error("MulRowBroadcastTask: opened mismatch");
+        if (opened.size() != mat_.size() + static_cast<size_t>(rows_)) {
+          throw std::runtime_error("MulRowBroadcastTask: opened mismatch");
+        }
         size_t off_e = mat_.size();
         bool gpu_mul = false;
 #ifdef SUF_HAVE_CUDA
@@ -2035,16 +2057,21 @@ class CubicPolyTask final : public detail::PhaseTask {
     switch (st_) {
       case St::OpenXhat: {
         if (!R.net_chan) throw std::runtime_error("CubicPolyTask: net channel missing");
+        if (R.opens) {
+          auto res = R.opens->reserve(x_.size(), OpenKind::kMask);
+          for (size_t i = 0; i < x_.size(); ++i) {
+            uint64_t rin = (key_->r_in_share_vec.size() > i) ? key_->r_in_share_vec[i] : key_->r_in_share;
+            res.diff[i] = proto::add_mod(x_[i], rin);
+          }
+          h_open_ = res.handle;
+          st_ = St::WaitXhatOpen;
+          // Allow batching of opens across tasks.
+          return detail::Need::None;
+        }
         masked_.resize(x_.size());
         for (size_t i = 0; i < x_.size(); ++i) {
           uint64_t rin = (key_->r_in_share_vec.size() > i) ? key_->r_in_share_vec[i] : key_->r_in_share;
           masked_[i] = proto::add_mod(x_[i], rin);
-        }
-        if (R.opens) {
-          h_open_ = R.opens->enqueue(masked_, OpenKind::kMask);
-          st_ = St::WaitXhatOpen;
-          // Allow batching of opens across tasks.
-          return detail::Need::None;
         }
         opened_.assign(masked_.size(), 0);
         for (size_t i = 0; i < masked_.size(); ++i) {

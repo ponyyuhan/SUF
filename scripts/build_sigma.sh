@@ -118,7 +118,13 @@ fi
 echo "[sigma] building Sytorch (CUDA + g++ host)"
 SYTORCH_BUILD="${SIGMA_ROOT}/ext/sytorch/build"
 mkdir -p "${SYTORCH_BUILD}"
-"${CMAKE_BIN}" ${GEN} -S "${SIGMA_ROOT}/ext/sytorch" -B "${SYTORCH_BUILD}" \
+# If the build directory already has a CMakeCache.txt, reuse its generator.
+# (Passing a different -G causes a hard error and looks like a "deadlock".)
+SYTORCH_GEN="${GEN}"
+if [[ -f "${SYTORCH_BUILD}/CMakeCache.txt" ]]; then
+  SYTORCH_GEN=""
+fi
+"${CMAKE_BIN}" ${SYTORCH_GEN} -S "${SIGMA_ROOT}/ext/sytorch" -B "${SYTORCH_BUILD}" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CUDA_COMPILER="${CUDA_BIN}" \
   -DCMAKE_CUDA_HOST_COMPILER="${HOST_CXX}" \
@@ -128,16 +134,24 @@ mkdir -p "${SYTORCH_BUILD}"
 echo "[sigma] building CUTLASS (arch=${GPU_ARCH})"
 CUTLASS_BUILD="${SIGMA_ROOT}/ext/cutlass/build"
 CUTLASS_LIB="${CUTLASS_BUILD}/tools/library/libcutlass.so"
-if [[ -f "${CUTLASS_LIB}" ]]; then
-  echo "[sigma] CUTLASS already built: ${CUTLASS_LIB}"
+if [[ "${SIGMA_BUILD_CUTLASS_LIB:-0}" == "1" ]]; then
+  if [[ -f "${CUTLASS_LIB}" ]]; then
+    echo "[sigma] CUTLASS already built: ${CUTLASS_LIB}"
+  else
+    mkdir -p "${CUTLASS_BUILD}"
+    CUTLASS_GEN="${GEN}"
+    if [[ -f "${CUTLASS_BUILD}/CMakeCache.txt" ]]; then
+      CUTLASS_GEN=""
+    fi
+    "${CMAKE_BIN}" ${CUTLASS_GEN} -S "${SIGMA_ROOT}/ext/cutlass" -B "${CUTLASS_BUILD}" \
+      -DCUTLASS_NVCC_ARCHS="${GPU_ARCH}" \
+      -DCMAKE_CUDA_COMPILER_WORKS=1 \
+      -DCMAKE_CUDA_COMPILER="${CUDA_BIN}"
+    # Build the CUTLASS library artifacts (expensive; not required for SIGMA's binary).
+    "${CMAKE_BIN}" --build "${CUTLASS_BUILD}" --target cutlass_lib -j"${JOBS}"
+  fi
 else
-  mkdir -p "${CUTLASS_BUILD}"
-  "${CMAKE_BIN}" ${GEN} -S "${SIGMA_ROOT}/ext/cutlass" -B "${CUTLASS_BUILD}" \
-    -DCUTLASS_NVCC_ARCHS="${GPU_ARCH}" \
-    -DCMAKE_CUDA_COMPILER_WORKS=1 \
-    -DCMAKE_CUDA_COMPILER="${CUDA_BIN}"
-  # Build the CUTLASS library artifacts SIGMA links against (not built by default).
-  "${CMAKE_BIN}" --build "${CUTLASS_BUILD}" --target cutlass_lib -j"${JOBS}"
+  echo "[sigma] skipping CUTLASS library build (set SIGMA_BUILD_CUTLASS_LIB=1 to enable)"
 fi
 
 echo "[sigma] building SIGMA binary"

@@ -1,91 +1,50 @@
-# Sigma vs SUF benchmarks (updated)
+# Sigma vs SUF benchmark report
 
 Generated: `2025-12-19`
 
-## Implementation updates since last benchmark run
+This report follows the benchmarking/protocol accounting design in `paper.md`.
 
-- Integrated libdpf/grotto PFSS backend (predicate eval) while keeping paper.md semantics; interval/LUT paths still use sigmafast for parity.
-- Batched coeff + trunc PFSS jobs per phase and disabled per-element masks by default to reduce flushes.
-- Added GPU-side open packing/unpacking (`SUF_OPEN_PACK_DEVICE=1`) with a large-flush threshold.
-- Tests rerun: `ctest --test-dir build_ninja --output-on-failure`.
-- Benchmarks below were **not** rerun after these changes.
+## Data sources
 
-## Commands run
+- SUF (this repo) logs: `bench/results/current_compare/2025-12-19_current_gpu`
+- Sigma logs: `bench/results/current_compare/2025-12-19_current_gpu/sigma_*_L128.json` (copied from a previously captured Sigma run; Sigma was not rerun here due to prior build/run deadlocks)
 
-- Tests: `ctest --test-dir build_ninja --output-on-failure`
-- SUF GPU benches (seq=128, batch=1):
-  - `build_ninja/bench_suf_transformer --model bert-tiny --backend gpu --seq-len 128 --batch-size 1 --n-iters 1 --log-json bench/results/opt_runs/bert-tiny_gpu_buf.json`
-  - `build_ninja/bench_suf_transformer --model bert-base --backend gpu --seq-len 128 --batch-size 1 --n-iters 1 --log-json bench/results/opt_runs/bert-base_gpu_buf.json`
-  - `build_ninja/bench_suf_transformer --model bert-large --backend gpu --seq-len 128 --batch-size 1 --n-iters 1 --log-json bench/results/opt_runs/bert-large_gpu_buf.json`
-  - `build_ninja/bench_suf_transformer --model gpt2 --backend gpu --seq-len 128 --batch-size 1 --n-iters 1 --log-json bench/results/opt_runs/gpt2_gpu_buf.json`
-  - `build_ninja/bench_suf_transformer --model gpt-neo-1.3b --backend gpu --seq-len 128 --batch-size 1 --n-iters 1 --log-json bench/results/opt_runs/gpt-neo-1.3b_gpu_buf.json`
-- SUF CPU benches (seq=128, batch=1):
-  - `build_ninja/bench_suf_transformer --model bert-tiny --backend cpu --seq-len 128 --batch-size 1 --n-iters 1 --log-json bench/results/opt_runs/bert-tiny_cpu_buf.json`
-  - `build_ninja/bench_suf_transformer --model bert-base --backend cpu --seq-len 128 --batch-size 1 --n-iters 1 --log-json bench/results/opt_runs/bert-base_cpu_buf.json`
-  - `build_ninja/bench_suf_transformer --model bert-large --backend cpu --seq-len 128 --batch-size 1 --n-iters 1 --log-json bench/results/opt_runs/bert-large_cpu_buf.json`
-  - `build_ninja/bench_suf_transformer --model gpt2 --backend cpu --seq-len 128 --batch-size 1 --n-iters 1 --log-json bench/results/opt_runs/gpt2_cpu_buf.json`
-- Profiling highlight:
-  - `SUF_BENCH_PROFILE=1 build_ninja/bench_suf_transformer --model gpt-neo-1.3b --backend gpu --seq-len 128 --batch-size 1 --n-iters 1 --log-json bench/results/opt_runs/gpt-neo-1.3b_gpu_profile_buf.json`
-- Note: SIGMA benchmarks were not rerun due to prior build deadlocks; see “Sigma baseline” below.
+## Settings
 
-## Stats consistency notes (paper.md)
+- Sequence length: `128`
+- Batch size: `1`
+- SUF iterations: `2` (`--n-iters 2`) so `timing.keygen_time_s` is separable from steady-state online timing
+- SUF open packing enabled: `--open-pack 1` (see `SUF_OPEN_PACK_*` in `README.md`)
+- SUF per-element masks disabled: `--per-element-masks 0` (to preserve batching)
 
-- **Offline key bytes (`preprocessing.key_bytes`)**: SUF now treats this as **dealer-total bytes across both parties** and tags the object as `preprocessing.key_bytes_scope = "dealer_total"`.
-- **Online bytes (`communication.*`)**:
-  - SUF reports `communication.net_bytes` (wire bytes on the net-channel) and `communication.pfss_bytes` (wire bytes on the PFSS-channel), with `communication.online_bytes = net_bytes + pfss_bytes`.
-  - PFSS evaluation is **non-interactive** at the protocol level (paper.md §3), but the benchmark harness can still show nonzero `communication.pfss_bytes` (e.g., backend bookkeeping / simulated PFSS channel usage). Online comm is still dominated by openings (`communication.open_*`), i.e., **net bytes**.
-- **SIGMA schema normalization**: `bench/run_sigma_vs_suf.py` now maps SIGMA’s `Total Comm` to `communication.net_bytes` so Sigma/SUF comparisons use consistent byte objects.
-- **More open breakdown**: SUF logs now include `pfss.opened_words_{beaver,mask,other}` (and corresponding `communication.open_bytes_*`) to align the “what are we counting?” question with Sigma’s single `Total Comm` bucket.
+## Results (online)
 
-## Results (latest SUF-only)
+| Model | Sigma online (s) | Sigma online (GB) | SUF online (s) | SUF online (GB) | Time ratio | Byte ratio |
+|---|---:|---:|---:|---:|---:|---:|
+| bert-tiny | 0.194 | 0.022 | 0.158 | 0.017 | 0.82x | 0.77x |
+| bert-base | 2.728 | 1.062 | 5.642 | 0.946 | 2.07x | 0.89x |
+| bert-large | 6.862 | 2.833 | 14.213 | 2.558 | 2.07x | 0.90x |
+| gpt2 | 2.389 | 0.885 | 4.539 | 1.100 | 1.90x | 1.24x |
+| gpt-neo-1.3b | 11.324 | 4.326 | 33.350 | 5.312 | 2.95x | 1.23x |
 
-### GPU (seq=128, batch=1)
+Raw CSV/JSONL: `bench/results/current_compare/2025-12-19_current_gpu/summary.csv`, `bench/results/current_compare/2025-12-19_current_gpu/summary.jsonl`.
 
-Source: `bench/results/opt_runs/*_gpu_buf.json`
+## Bottlenecks (SUF)
 
-| model | preprocessing.key_bytes | timing.online_time_s | communication.net_bytes |
-| --- | ---: | ---: | ---: |
-| bert-tiny | 26,054,620 | 0.508969 | 16,623,616 |
-| bert-base | 1,785,520,576 | 5.93575 | 1,608,214,464 |
-| bert-large | 5,441,517,076 | 16.2673 | 4,288,139,136 |
-| gpt2 | 1,728,894,396 | 5.17519 | 1,402,218,432 |
-| gpt-neo-1.3b | 8,100,843,680 | 44.1131 | 6,607,720,320 |
+Enable `SUF_BENCH_PROFILE=1` to populate `online_profile.*` in the SUF JSON logs, then inspect:
+- `open_flush_ns` vs `pfss_flush_eval_ns` vs `pfss_finalize_ns` to decide whether time is dominated by openings vs PFSS evaluation/finalize.
+- `open_pack_ns` vs `open_comm_ns` vs `open_scatter_ns` to separate host packing/scatter overhead from “wire time”.
+- `pfss.open_flushes`, `pfss.num_jobs` (from the SUF JSON) to see whether the runtime is round/flush-limited.
 
-### CPU (seq=128, batch=1)
+## Implementation changes in this snapshot (performance + accounting)
 
-Source: `bench/results/opt_runs/*_cpu_buf.json`
+- `include/runtime/open_collector.hpp` and `src/runtime/open_collector.cpp`: added `OpenCollector::reserve()` and a contiguous pending buffer to remove flush-time gather copies.
+- `include/proto/beaver_mul64.hpp`: combined `(e,f)` exchange into one message in `mul()`/`mul_batch()` to reduce PFSS-channel call overhead.
+- `src/nn/attention_block.cpp` and `include/runtime/phase_tasks.hpp`: migrated hot open producers to `OpenCollector::reserve()` to avoid per-task temporary allocations/copies.
+- `cuda/cuda_primitives.cu` + `include/runtime/cuda_primitives.hpp`: added an optional CUDA kernel to compute opened values on-device during device-packing; guarded by `SUF_OPEN_PACK_DEVICE_SCATTER=1` (off by default because it can increase contention when both parties share one GPU).
 
-| model | preprocessing.key_bytes | timing.online_time_s | communication.net_bytes |
-| --- | ---: | ---: | ---: |
-| bert-tiny | 33,511,972 | 0.245207 | 12,075,328 |
-| bert-base | 1,059,609,376 | 45.113 | 434,702,208 |
-| bert-large | 3,390,247,064 | 263.356 | 1,159,204,608 |
-| gpt2 | 1,002,096,824 | 49.1632 | 378,521,472 |
+## Notes / known gaps
 
-### Online profile highlight (gpt-neo-1.3b, GPU)
+- SUF still trails Sigma on online time for larger models, even when SUF online bytes are smaller (BERT base/large). This indicates a nontrivial efficiency gap beyond just wire volume (e.g., per-round overheads, PFSS evaluation cost, and/or GPU/host staging).
+- CPU end-to-end runs for the larger models (notably `gpt-neo-1.3b`) are currently too slow to include in the “current” snapshot; only GPU results are summarized here.
 
-Source: `bench/results/opt_runs/gpt-neo-1.3b_gpu_profile_buf.json`
-
-| metric | value (ns) |
-| --- | ---: |
-| open_flush_ns | 13,943,162,902 |
-| open_pack_ns | 678,436,741 |
-| open_comm_ns | 9,419,577,990 |
-| open_scatter_ns | 3,576,591,938 |
-
-Note: with scratch-buffer reuse, `open_pack_ns` dropped below 1s for gpt-neo-1.3b; `open_comm_ns` and PFSS flush eval remain dominant.
-Packing at 50–51 bits still increased total time in local tests because CPU pack/unpack adds multiple seconds per run; net-byte savings did not offset the cost.
-
-## Sigma baseline (from 2025-12-18 run)
-
-| model | preprocessing.key_bytes | timing.online_time_s | communication.net_bytes |
-| --- | ---: | ---: | ---: |
-| bert-tiny | 350,064,640 | 0.186802 | 21,675,034 |
-| bert-base | 18,075,947,008 | 3.386349 | 1,062,390,674 |
-| bert-large | 48,799,535,104 | 8.253441 | 2,832,800,546 |
-| gpt2 | 15,346,094,080 | 2.947291 | 885,146,258 |
-| gpt-neo-1.3b | 81,805,541,376 | 13.723769 | 4,325,592,866 |
-
-## LLaMA2-7B status (not rerun)
-
-- The attempted SIGMA run for LLaMA2-7B (`bench/configs/sigma_vs_suf_llama2_7b.json`) did not produce `dealer.txt/evaluator.txt` and one party exited with `-9` (likely OOM/kill). No SUF run was summarized for that config.

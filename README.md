@@ -60,7 +60,7 @@ ctest --test-dir build_cuda --output-on-failure
 Notes:
 - `SUF_USE_MYL7_FSS` / `SUF_FETCH_MYL7_FSS` control the optional myl7/fss adapter (default ON/ON).
 - `CMAKE_CUDA_ARCHITECTURES` defaults to `80;86` if not specified.
-- `SUF_USE_LIBDPF` / `SUF_FETCH_LIBDPF` control the libdpf/grotto PFSS backend (default ON/ON). The build enables AES intrinsics on x86 (`-maes`) for libdpf’s PRG.
+- `SUF_USE_LIBDPF` / `SUF_FETCH_LIBDPF` control the libdpf/grotto PFSS backend (default OFF/OFF in this repo snapshot; see “Notes on libdpf / grotto backend” below).
 
 ## Tests
 
@@ -126,22 +126,9 @@ Correctness note: trunc/ARS helper bits (`carry/sign/wrap`) are maintained as **
   - `SUF_OPEN_PACK_DYNAMIC=1` uses per-flush max bitwidth to shrink packing width (off by default)
   - `SUF_OPEN_PACK_DEVICE=1` enables GPU pack/unpack when CUDA is available
   - `SUF_OPEN_PACK_DEVICE_MIN_WORDS` minimum words to use GPU packing (default `2^18`)
-| model | timing.online_time_s | communication.net_bytes | preprocessing.key_bytes |
-| --- | ---: | ---: | ---: |
-| bert-tiny | 0.508969 | 16,623,616 | 26,054,620 |
-| bert-base | 5.93575 | 1,608,214,464 | 1,785,520,576 |
-| bert-large | 16.2673 | 4,288,139,136 | 5,441,517,076 |
-| gpt2 | 5.17519 | 1,402,218,432 | 1,728,894,396 |
-| gpt-neo-1.3b | 44.1131 | 6,607,720,320 | 8,100,843,680 |
+  - `SUF_OPEN_PACK_DEVICE_SCATTER=1` computes opened values on GPU during device-pack (off by default; can increase contention when both parties share one GPU)
 
-CPU:
-
-| model | timing.online_time_s | communication.net_bytes | preprocessing.key_bytes |
-| --- | ---: | ---: | ---: |
-| bert-tiny | 0.245207 | 12,075,328 | 33,511,972 |
-| bert-base | 45.113 | 434,702,208 | 1,059,609,376 |
-| bert-large | 263.356 | 1,159,204,608 | 3,390,247,064 |
-| gpt2 | 49.1632 | 378,521,472 | 1,002,096,824 |
+Latest end-to-end numbers (Sigma vs SUF, plus per-phase breakdowns) live in `benchmark_report.md` and the corresponding `bench/results/current_compare/*/summary.csv` snapshots.
 
 ### CPU monitoring
 
@@ -159,12 +146,11 @@ To get a timing breakdown of online work, set:
 
 ### Notes on libdpf / grotto backend
 
-This prototype includes `sigmafast` and a `libdpf`/grotto-backed predicate backend:
+This prototype includes a fast, self-contained CPU predicate backend (`sigmafast`) and an optional libdpf/grotto-backed backend.
 
-- `SUF_PFSS_BACKEND=grotto` uses libdpf’s DPF/DCF for predicate evaluation; interval/LUT generation currently delegates to the sigmafast path for parity with the paper’s semantics.
-- Integration constraints (kept intact):
-  - Keep the **same public masked input** model (`hatx`) and predicate semantics used in `paper.md`.
-  - Preserve accounting objects (`communication.*`, `preprocessing.key_bytes_scope`) so comparisons remain consistent.
+- Default: `sigmafast` is used when `SUF_HAVE_LIBDPF` is not enabled.
+- To experiment with grotto, enable it at build time (`-DSUF_USE_LIBDPF=ON -DSUF_FETCH_LIBDPF=ON`) and run with `SUF_PFSS_BACKEND=grotto`. If libdpf is unavailable, the build falls back to `sigmafast`.
+- Semantics constraints (paper.md): all backends must use the same public masked input model (`hatx`) and must preserve the predicate/coeff semantics of the compiled Composite‑FSS gates.
 
 ## Accuracy Bench (Table 4 style)
 

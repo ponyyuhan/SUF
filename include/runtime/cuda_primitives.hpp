@@ -181,6 +181,17 @@ void launch_pack_eff_bits_kernel(const uint64_t* d_in,
                                  size_t n,
                                  void* stream /* cudaStream_t */);
 
+// Combine additive shares on device and return a sign-extended (int64-compatible)
+// representation matching proto::to_signed for the current ring bitwidth.
+// This is intended to avoid host-side opened-value scatter when device packing is used.
+void launch_open_add_to_signed_kernel(const uint64_t* d_local_share,
+                                      const uint64_t* d_remote_share,
+                                      uint64_t* d_out_signed,  // sign-extended bit-patterns
+                                      size_t n,
+                                      int ring_bits,
+                                      uint64_t ring_mask,
+                                      void* stream /* cudaStream_t */);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

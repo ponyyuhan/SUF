@@ -34,16 +34,18 @@ class PhaseExecutor {
  public:
   PhaseExecutor() {
     PfssSuperBatch::Limits pfss_lim;
-    pfss_lim.max_pending_jobs = 1ull << 12;
-    pfss_lim.max_pending_hatx_words = 1ull << 20;
+    // Default to large batches: end-to-end transformer runs are dominated by
+    // per-flush latency if we fragment opens/PFSS work too aggressively.
+    pfss_lim.max_pending_jobs = 1ull << 18;
+    pfss_lim.max_pending_hatx_words = 1ull << 24;
     pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
-    pfss_lim.max_flushes = 1ull << 9;
+    pfss_lim.max_flushes = 1ull << 16;
     pfss_coeff_.set_limits(pfss_lim);
     pfss_trunc_.set_limits(pfss_lim);
     OpenCollector::Limits open_lim;
-    open_lim.max_pending_words = 1ull << 19;
+    open_lim.max_pending_words = 1ull << 24;
     opens_.set_limits(open_lim);
-    max_flushes_ = 1ull << 11;
+    max_flushes_ = 1ull << 16;
   }
 
   enum class Phase : int {

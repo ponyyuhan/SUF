@@ -10,6 +10,11 @@ extern "C" __global__ void pack_eff_bits_kernel(const uint64_t* in,
                                                 int eff_bits,
                                                 uint64_t* packed,
                                                 size_t N);
+extern "C" __global__ void pack_eff_bits_wordwise_kernel(const uint64_t* in,
+                                                         int eff_bits,
+                                                         uint64_t* packed,
+                                                         size_t N,
+                                                         size_t packed_words);
 
 namespace {
 
@@ -17,6 +22,25 @@ __device__ inline uint64_t add_mod(uint64_t a, uint64_t b) { return a + b; }
 __device__ inline uint64_t mul_mod(uint64_t a, uint64_t b) {
   unsigned __int128 p = static_cast<unsigned __int128>(a) * static_cast<unsigned __int128>(b);
   return static_cast<uint64_t>(p);
+}
+
+__global__ void open_add_to_signed_kernel(const uint64_t* __restrict__ local_share,
+                                          const uint64_t* __restrict__ remote_share,
+                                          uint64_t* __restrict__ out_signed,
+                                          size_t n,
+                                          int ring_bits,
+                                          uint64_t ring_mask) {
+  size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= n) return;
+  uint64_t v = local_share[idx] + remote_share[idx];
+  if (ring_bits >= 64) {
+    out_signed[idx] = v;
+    return;
+  }
+  v &= ring_mask;
+  const uint64_t sign_bit = uint64_t(1) << (ring_bits - 1);
+  if (v & sign_bit) v |= ~ring_mask;
+  out_signed[idx] = v;
 }
 
 __global__ void beaver_mul_kernel(int party,
@@ -758,9 +782,37 @@ extern "C" void launch_pack_eff_bits_kernel(const uint64_t* d_in,
                                  static_cast<unsigned __int128>(eff_bits);
   size_t packed_words = static_cast<size_t>((total_bits + 63) / 64);
   cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
-  cudaMemsetAsync(d_packed, 0, packed_words * sizeof(uint64_t), s);
+  // Prefer a wordwise pack kernel (no atomics) for typical widths; fall back to
+  // atomic packing for tiny widths.
+  constexpr int kBlock = 256;
+  if (eff_bits >= 17) {
+    int grid = static_cast<int>((packed_words + kBlock - 1) / kBlock);
+    pack_eff_bits_wordwise_kernel<<<grid, kBlock, 0, s>>>(d_in, eff_bits, d_packed, n, packed_words);
+  } else {
+    cudaMemsetAsync(d_packed, 0, packed_words * sizeof(uint64_t), s);
+    int grid = static_cast<int>((n + kBlock - 1) / kBlock);
+    pack_eff_bits_kernel<<<grid, kBlock, 0, s>>>(d_in, eff_bits, d_packed, n);
+  }
+#endif
+}
+
+extern "C" void launch_open_add_to_signed_kernel(const uint64_t* d_local_share,
+                                                 const uint64_t* d_remote_share,
+                                                 uint64_t* d_out_signed,
+                                                 size_t n,
+                                                 int ring_bits,
+                                                 uint64_t ring_mask,
+                                                 void* stream) {
+#ifndef SUF_HAVE_CUDA
+  (void)d_local_share; (void)d_remote_share; (void)d_out_signed; (void)n;
+  (void)ring_bits; (void)ring_mask; (void)stream;
+#else
+  if (n == 0) return;
+  if (ring_bits <= 0) ring_bits = 1;
+  if (ring_bits > 64) ring_bits = 64;
   constexpr int kBlock = 256;
   int grid = static_cast<int>((n + kBlock - 1) / kBlock);
-  pack_eff_bits_kernel<<<grid, kBlock, 0, s>>>(d_in, eff_bits, d_packed, n);
+  open_add_to_signed_kernel<<<grid, kBlock, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+      d_local_share, d_remote_share, d_out_signed, n, ring_bits, ring_mask);
 #endif
 }

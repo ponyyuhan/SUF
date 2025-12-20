@@ -3,6 +3,7 @@
 #include "proto/common.hpp"
 #include "proto/channel.hpp"
 #include "proto/beaver.hpp"
+#include <array>
 #include <vector>
 #include <stdexcept>
 namespace proto {
@@ -12,6 +13,9 @@ struct BeaverMul64 {
   IChannel& ch;
   const std::vector<BeaverTriple64Share>& triples;
   size_t idx = 0;
+  // Scratch buffers to avoid per-call allocations in hot batched paths.
+  std::vector<u64> ef_share_buf{};
+  std::vector<u64> ef_other_buf{};
 
   // One multiplication (1 round: open e,f)
   u64 mul(u64 x, u64 y) {
@@ -23,14 +27,13 @@ struct BeaverMul64 {
     u64 e_share = sub_mod(x, t.a);
     u64 f_share = sub_mod(y, t.b);
 
-    u64 other_e = 0, other_f = 0;
-    ch.send_bytes(&e_share, sizeof(u64));
-    ch.send_bytes(&f_share, sizeof(u64));
-    ch.recv_bytes(&other_e, sizeof(u64));
-    ch.recv_bytes(&other_f, sizeof(u64));
+    std::array<u64, 2> local{e_share, f_share};
+    std::array<u64, 2> other{0, 0};
+    ch.send_bytes(local.data(), local.size() * sizeof(u64));
+    ch.recv_bytes(other.data(), other.size() * sizeof(u64));
 
-    u64 e = add_mod(e_share, other_e);
-    u64 f = add_mod(f_share, other_f);
+    u64 e = add_mod(e_share, other[0]);
+    u64 f = add_mod(f_share, other[1]);
 
     u64 z = t.c;
     z = add_mod(z, mul_mod(e, t.b));
@@ -51,20 +54,22 @@ struct BeaverMul64 {
     }
     out.resize(n);
 
-    std::vector<u64> e_share(n), f_share(n), other_e(n), other_f(n);
+    // Exchange (e,f) in one contiguous message to reduce channel overhead.
+    ef_share_buf.resize(2 * n);
+    ef_other_buf.resize(2 * n);
     for (size_t i = 0; i < n; i++) {
       const auto& t = triples[idx + i];
-      e_share[i] = sub_mod(x[i], t.a);
-      f_share[i] = sub_mod(y[i], t.b);
+      ef_share_buf[i] = sub_mod(x[i], t.a);
+      ef_share_buf[n + i] = sub_mod(y[i], t.b);
     }
 
-    exchange_u64_vec(ch, e_share, other_e);
-    exchange_u64_vec(ch, f_share, other_f);
+    ch.send_bytes(ef_share_buf.data(), ef_share_buf.size() * sizeof(u64));
+    ch.recv_bytes(ef_other_buf.data(), ef_other_buf.size() * sizeof(u64));
 
     for (size_t i = 0; i < n; i++) {
       const auto& t = triples[idx + i];
-      u64 e = add_mod(e_share[i], other_e[i]);
-      u64 f = add_mod(f_share[i], other_f[i]);
+      u64 e = add_mod(ef_share_buf[i], ef_other_buf[i]);
+      u64 f = add_mod(ef_share_buf[n + i], ef_other_buf[n + i]);
 
       u64 z = t.c;
       z = add_mod(z, mul_mod(e, t.b));
@@ -86,20 +91,22 @@ public:
     if (x.size() != y.size()) throw std::runtime_error("BeaverMul64Batch size mismatch");
     if (idx + x.size() > triples.size()) throw std::runtime_error("BeaverMul64Batch out of triples");
 
-    std::vector<u64> e_share(x.size()), f_share(x.size()), other_e(x.size()), other_f(x.size());
+    const size_t n = x.size();
+    ef_share_buf_.resize(2 * n);
+    ef_other_buf_.resize(2 * n);
     for (size_t i = 0; i < x.size(); i++) {
       const auto& t = triples[idx + i];
-      e_share[i] = sub_mod(x[i], t.a);
-      f_share[i] = sub_mod(y[i], t.b);
+      ef_share_buf_[i] = sub_mod(x[i], t.a);
+      ef_share_buf_[n + i] = sub_mod(y[i], t.b);
     }
-    exchange_u64_vec(ch, e_share, other_e);
-    exchange_u64_vec(ch, f_share, other_f);
+    ch.send_bytes(ef_share_buf_.data(), ef_share_buf_.size() * sizeof(u64));
+    ch.recv_bytes(ef_other_buf_.data(), ef_other_buf_.size() * sizeof(u64));
 
     out.resize(x.size());
     for (size_t i = 0; i < x.size(); i++) {
       const auto& t = triples[idx + i];
-      u64 e = add_mod(e_share[i], other_e[i]);
-      u64 f = add_mod(f_share[i], other_f[i]);
+      u64 e = add_mod(ef_share_buf_[i], ef_other_buf_[i]);
+      u64 f = add_mod(ef_share_buf_[n + i], ef_other_buf_[n + i]);
       u64 z = t.c;
       z = add_mod(z, mul_mod(e, t.b));
       z = add_mod(z, mul_mod(f, t.a));
@@ -116,6 +123,8 @@ private:
   IChannel& ch;
   const std::vector<BeaverTriple64Share>& triples;
   size_t idx;
+  std::vector<u64> ef_share_buf_{};
+  std::vector<u64> ef_other_buf_{};
 };
 
 }  // namespace proto

@@ -1407,7 +1407,13 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
   std::vector<uint64_t> pred_masks;
   std::vector<uint64_t> cut_masks;
   auto* packed = dynamic_cast<proto::PackedLtBackend*>(&backend);
-  std::vector<uint64_t> xs_vec(in.hatx, in.hatx + N);
+  std::vector<uint64_t> xs_vec;
+  auto ensure_xs_vec = [&]() -> const std::vector<uint64_t>& {
+    if (!xs_vec.empty()) return xs_vec;
+    if (!in.hatx) throw std::runtime_error("composite_eval_batch_backend: missing host hatx");
+    xs_vec.assign(in.hatx, in.hatx + N);
+    return xs_vec;
+  };
   if (dbg) std::cerr << "[party " << party << "] pred eval start packed=" << (packed && k.use_packed_pred) << " N=" << N << "\n";
   if (packed && k.use_packed_pred && !k.packed_pred_groups.empty()) {
     pred_masks.assign(N * static_cast<size_t>(k.packed_pred_words), 0);
@@ -1421,11 +1427,12 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
                                            reinterpret_cast<const uint64_t*>(in.hatx_device),
                                            N, grp.in_bits, grp.out_words, masks.data());
       } else {
+        const auto& xs = ensure_xs_vec();
         std::vector<uint8_t> keys_flat(N * key_bytes);
         for (size_t i = 0; i < N; i++) {
           std::memcpy(keys_flat.data() + i * key_bytes, grp.key.bytes.data(), key_bytes);
         }
-        packed->eval_packed_lt_many(key_bytes, keys_flat.data(), xs_vec,
+        packed->eval_packed_lt_many(key_bytes, keys_flat.data(), xs,
                                     grp.in_bits, grp.out_words, masks.data());
       }
       if (prof) {
@@ -1468,12 +1475,13 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
                                          reinterpret_cast<const uint64_t*>(in.hatx_device),
                                          N, k.pred_meta.out_bytes, outs_flat.data());
       } else {
+        const auto& xs = ensure_xs_vec();
         // pack keys_flat [N][key_bytes]
         std::vector<uint8_t> keys_flat(N * key_bytes);
         for (size_t i = 0; i < N; i++) {
           std::memcpy(keys_flat.data() + i * key_bytes, k.pred_keys[qi].bytes.data(), key_bytes);
         }
-        backend.eval_dcf_many_u64(bits_in, key_bytes, keys_flat.data(), xs_vec, k.pred_meta.out_bytes, outs_flat.data());
+        backend.eval_dcf_many_u64(bits_in, key_bytes, keys_flat.data(), xs, k.pred_meta.out_bytes, outs_flat.data());
       }
       if (prof) {
         const auto t_eval1 = std::chrono::steady_clock::now();
@@ -1509,11 +1517,12 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
                                            reinterpret_cast<const uint64_t*>(in.hatx_device),
                                            N, grp.in_bits, grp.out_words, masks.data());
       } else {
+        const auto& xs = ensure_xs_vec();
         std::vector<uint8_t> keys_flat(N * key_bytes);
         for (size_t i = 0; i < N; i++) {
           std::memcpy(keys_flat.data() + i * key_bytes, grp.key.bytes.data(), key_bytes);
         }
-        packed->eval_packed_lt_many(key_bytes, keys_flat.data(), xs_vec,
+        packed->eval_packed_lt_many(key_bytes, keys_flat.data(), xs,
                                     grp.in_bits, grp.out_words, masks.data());
       }
       if (prof) {
@@ -1560,11 +1569,12 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
                                          reinterpret_cast<const uint64_t*>(in.hatx_device),
                                          N, k.cut_pred_meta.out_bytes, outs_flat.data());
       } else {
+        const auto& xs = ensure_xs_vec();
         std::vector<uint8_t> keys_flat(N * key_bytes);
         for (size_t i = 0; i < N; i++) {
           std::memcpy(keys_flat.data() + i * key_bytes, k.cut_pred_keys[ci].bytes.data(), key_bytes);
         }
-        backend.eval_dcf_many_u64(cut_bits_in, key_bytes, keys_flat.data(), xs_vec,
+        backend.eval_dcf_many_u64(cut_bits_in, key_bytes, keys_flat.data(), xs,
                                   k.cut_pred_meta.out_bytes, outs_flat.data());
       }
       if (prof) {
@@ -1636,11 +1646,12 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
             out_bytes,
             reinterpret_cast<uint8_t*>(dcf_out_aos.data()));
       } else {
+        const auto& xs = ensure_xs_vec();
         std::vector<uint8_t> keys_flat(N * key_bytes);
         for (size_t i = 0; i < N; ++i) {
           std::memcpy(keys_flat.data() + i * key_bytes, k.coeff_keys[ci].bytes.data(), key_bytes);
         }
-        backend.eval_dcf_many_u64(coeff_bits_in, key_bytes, keys_flat.data(), xs_vec,
+        backend.eval_dcf_many_u64(coeff_bits_in, key_bytes, keys_flat.data(), xs,
                                   out_bytes, reinterpret_cast<uint8_t*>(dcf_out_aos.data()));
       }
       if (prof) {

@@ -239,10 +239,15 @@ struct CountingChan : proto::IChannel {
       size_t off = 0;
       uint64_t h = head.load(std::memory_order_relaxed);
       while (off < n) {
-        size_t chunk = std::min(n - off, static_cast<size_t>(cap));
+        size_t chunk = 0;
         for (;;) {
           uint64_t t = tail.load(std::memory_order_acquire);
-          if (h + static_cast<uint64_t>(chunk) - t <= cap) break;
+          uint64_t used = h - t;
+          uint64_t free = (used < cap) ? (cap - used) : 0;
+          if (free) {
+            chunk = std::min(n - off, static_cast<size_t>(free));
+            break;
+          }
           spin_pause();
         }
         size_t idx = static_cast<size_t>(h) & mask;
@@ -263,10 +268,14 @@ struct CountingChan : proto::IChannel {
       size_t off = 0;
       uint64_t t = tail.load(std::memory_order_relaxed);
       while (off < n) {
-        size_t chunk = std::min(n - off, static_cast<size_t>(cap));
+        size_t chunk = 0;
         for (;;) {
           uint64_t h = head.load(std::memory_order_acquire);
-          if (static_cast<uint64_t>(chunk) <= (h - t)) break;
+          uint64_t avail = h - t;
+          if (avail) {
+            chunk = std::min(n - off, static_cast<size_t>(avail));
+            break;
+          }
           spin_pause();
         }
         size_t idx = static_cast<size_t>(t) & mask;
@@ -364,10 +373,15 @@ struct CountingNetChan : net::Chan {
       size_t off = 0;
       uint64_t h = head.load(std::memory_order_relaxed);
       while (off < n) {
-        size_t chunk = std::min(n - off, static_cast<size_t>(cap));
+        size_t chunk = 0;
         for (;;) {
           uint64_t t = tail.load(std::memory_order_acquire);
-          if (h + static_cast<uint64_t>(chunk) - t <= cap) break;
+          uint64_t used = h - t;
+          uint64_t free = (used < cap) ? (cap - used) : 0;
+          if (free) {
+            chunk = std::min(n - off, static_cast<size_t>(free));
+            break;
+          }
           spin_pause();
         }
         size_t idx = static_cast<size_t>(h) & mask;
@@ -400,10 +414,14 @@ struct CountingNetChan : net::Chan {
       size_t off = 0;
       uint64_t t = tail.load(std::memory_order_relaxed);
       while (off < n) {
-        size_t chunk = std::min(n - off, static_cast<size_t>(cap));
+        size_t chunk = 0;
         for (;;) {
           uint64_t h = head.load(std::memory_order_acquire);
-          if (static_cast<uint64_t>(chunk) <= (h - t)) break;
+          uint64_t avail = h - t;
+          if (avail) {
+            chunk = std::min(n - off, static_cast<size_t>(avail));
+            break;
+          }
           spin_pause();
         }
         size_t idx = static_cast<size_t>(t) & mask;
@@ -739,6 +757,12 @@ int main(int argc, char** argv) {
         // This keeps the benchmark faithful to paper.md's offline/online split while
         // avoiding CPU-side O(MNK) hot loops that dominate large-model runs.
         ::setenv("SUF_MATMUL_BEAVER_GPU", "1", /*overwrite=*/0);
+        // Global performance default: do bit-packing on GPU to avoid saturating the
+        // CPU on large opens (especially 50–51-bit rings).
+        ::setenv("SUF_OPEN_PACK_DEVICE", "1", /*overwrite=*/0);
+        // Enable device packing even for smaller flushes; the per-flush overhead
+        // is amortized by avoiding host-side bitpacking loops.
+        ::setenv("SUF_OPEN_PACK_DEVICE_MIN_WORDS", "1", /*overwrite=*/0);
         // Larger net ring reduces backpressure for big models (bench harness only).
         ::setenv("SUF_BENCH_NET_RING_POW2", "24", /*overwrite=*/0);
 	    }
@@ -793,8 +817,17 @@ int main(int argc, char** argv) {
 	    }
 #endif
 	    if (!be0 || !be1) {
-	      be0 = std::make_unique<proto::ReferenceBackend>();
-	      be1 = std::make_unique<proto::ReferenceBackend>();
+	      // CPU benchmark mode:
+	      // - default: deterministic reference path for fast functional testing
+	      // - when `SUF_FORCE_PFSS=1`: run the full PFSS pipeline using a fast CPU backend
+	      //   so numbers remain meaningful (and comparable across implementations).
+	      if (std::getenv("SUF_FORCE_PFSS")) {
+	        be0 = std::make_unique<proto::SigmaFastBackend>();
+	        be1 = std::make_unique<proto::SigmaFastBackend>();
+	      } else {
+	        be0 = std::make_unique<proto::ReferenceBackend>();
+	        be1 = std::make_unique<proto::ReferenceBackend>();
+	      }
 	    }
 
     compiler::TruncationPassContext trunc_ctx0(*be0, 0x77726c3064756c6cull);

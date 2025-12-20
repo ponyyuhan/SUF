@@ -57,14 +57,8 @@ enum class OpenKind : uint8_t {
   kCount = 3,
 };
 
-struct OpenSlot {
-  std::vector<int64_t> opened;
-  size_t n = 0;
-  std::atomic<bool> ready{false};
-};
-
 struct OpenHandle {
-  std::shared_ptr<OpenSlot> slot;
+  uint64_t gen = 0;   // generation at enqueue time (invalidated on next flush/clear)
   size_t offset = 0;
   size_t len = 0;
 };
@@ -91,8 +85,17 @@ class OpenCollector {
 
   ~OpenCollector();
 
+  struct Reserve {
+    OpenHandle handle;
+    std::span<uint64_t> diff;  // writable view into internal pending buffer
+  };
+
   // Enqueue a buffer of local shares to be opened; returns a handle to view later.
   OpenHandle enqueue(const std::vector<uint64_t>& diff, OpenKind kind = OpenKind::kOther);
+
+  // Reserve space for an open and return a writable view. Callers can fill the
+  // returned span to avoid an extra copy/allocation at enqueue time.
+  Reserve reserve(size_t len, OpenKind kind = OpenKind::kOther);
 
   // Flush all enqueued opens over the channel; results become available via view().
   void flush(int party, net::Chan& ch);
@@ -117,8 +120,6 @@ class OpenCollector {
 
  private:
   struct Request {
-    std::vector<uint64_t> diff;
-    std::shared_ptr<OpenSlot> slot;
     size_t offset = 0;
     size_t len = 0;
     OpenKind kind = OpenKind::kOther;
@@ -127,6 +128,11 @@ class OpenCollector {
   Stats stats_;
   Limits limits_;
   size_t pending_words_ = 0;
+  std::vector<uint64_t> pending_flat_buf_;
+  uint64_t generation_ = 0;
+  uint64_t opened_generation_ = static_cast<uint64_t>(-1);
+  bool opened_ready_ = false;
+  std::vector<int64_t> opened_flat_buf_;
   // Scratch buffers to avoid per-flush allocations in hot paths.
   std::vector<uint64_t> send_flat_buf_;
   std::vector<uint64_t> recv_flat_buf_;
