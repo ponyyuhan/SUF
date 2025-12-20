@@ -555,21 +555,31 @@ void write_json(const Args& a,
   const uint64_t opened_words_beaver = stats0.opened_words_beaver + stats1.opened_words_beaver;
   const uint64_t opened_words_mask = stats0.opened_words_mask + stats1.opened_words_mask;
   const uint64_t opened_words_other = stats0.opened_words_other + stats1.opened_words_other;
+  const uint64_t open_wire_bytes = stats0.open_wire_bytes_sent + stats1.open_wire_bytes_sent;
   const uint64_t open_bytes = opened_words * sizeof(uint64_t);
-  auto packed_open_bytes = [&](uint64_t words) -> uint64_t {
+  auto theoretical_packed_open_bytes = [&](uint64_t words) -> uint64_t {
     const uint64_t n_bits = static_cast<uint64_t>(spec.n_bits);
     if (n_bits == 0 || n_bits > 64) return words * sizeof(uint64_t);
     __uint128_t bits = static_cast<__uint128_t>(words) * static_cast<__uint128_t>(n_bits);
     bits += 7;
     return static_cast<uint64_t>(bits / 8);
   };
-  const uint64_t open_packed_bytes = packed_open_bytes(opened_words);
+  const uint64_t open_packed_bytes_theoretical = theoretical_packed_open_bytes(opened_words);
+  const uint64_t open_packed_bytes = (open_wire_bytes > 0) ? open_wire_bytes : open_packed_bytes_theoretical;
   const uint64_t open_bytes_beaver = opened_words_beaver * sizeof(uint64_t);
   const uint64_t open_bytes_mask = opened_words_mask * sizeof(uint64_t);
   const uint64_t open_bytes_other = opened_words_other * sizeof(uint64_t);
-  const uint64_t open_packed_bytes_beaver = packed_open_bytes(opened_words_beaver);
-  const uint64_t open_packed_bytes_mask = packed_open_bytes(opened_words_mask);
-  const uint64_t open_packed_bytes_other = packed_open_bytes(opened_words_other);
+  auto split_open_wire = [&](uint64_t kind_words) -> uint64_t {
+    if (opened_words == 0 || open_packed_bytes == 0) return 0;
+    __uint128_t num = static_cast<__uint128_t>(open_packed_bytes) * static_cast<__uint128_t>(kind_words);
+    return static_cast<uint64_t>(num / static_cast<__uint128_t>(opened_words));
+  };
+  const uint64_t open_packed_bytes_beaver =
+      (open_wire_bytes > 0) ? split_open_wire(opened_words_beaver) : theoretical_packed_open_bytes(opened_words_beaver);
+  const uint64_t open_packed_bytes_mask =
+      (open_wire_bytes > 0) ? split_open_wire(opened_words_mask) : theoretical_packed_open_bytes(opened_words_mask);
+  const uint64_t open_packed_bytes_other =
+      (open_wire_bytes > 0) ? split_open_wire(opened_words_other) : theoretical_packed_open_bytes(opened_words_other);
   const uint64_t pfss_related_bytes = pfss_bytes_mean + open_bytes_mask;
   const uint64_t pfss_related_packed_bytes = pfss_bytes_mean + open_packed_bytes_mask;
   const uint64_t beaver_related_bytes = open_bytes_beaver;
@@ -638,6 +648,7 @@ void write_json(const Args& a,
     << ", \"open_bytes_mask\": " << open_bytes_mask
     << ", \"open_bytes_other\": " << open_bytes_other
     << ", \"open_packed_bytes\": " << open_packed_bytes
+    << ", \"open_packed_bytes_theoretical\": " << open_packed_bytes_theoretical
     << ", \"open_packed_bytes_beaver\": " << open_packed_bytes_beaver
     << ", \"open_packed_bytes_mask\": " << open_packed_bytes_mask
     << ", \"open_packed_bytes_other\": " << open_packed_bytes_other
@@ -646,9 +657,7 @@ void write_json(const Args& a,
     << ", \"beaver_related_bytes\": " << beaver_related_bytes
     << ", \"beaver_related_packed_bytes\": " << beaver_related_packed_bytes
     << ", \"online_bytes\": " << (pfss_bytes_mean + net_bytes_mean)
-    << ", \"online_packed_bytes\": " << (pfss_bytes_mean +
-                                         ((net_bytes_mean > open_bytes) ? (net_bytes_mean - open_bytes) : 0ull) +
-                                         open_packed_bytes)
+    << ", \"online_packed_bytes\": " << (pfss_bytes_mean + net_bytes_mean)
     << " },\n";
   f << "  \"pfss\": {\n";
   f << "    \"num_jobs\": " << (coeff_jobs + trunc_jobs) << ",\n";
@@ -756,13 +765,18 @@ int main(int argc, char** argv) {
         ::setenv("SUF_OPEN_PACK_EFFBITS", "0", /*overwrite=*/0);
       }
     }
-    // Auto-packing: skip bit-packing when savings are small to reduce CPU overhead.
-    ::setenv("SUF_OPEN_PACK_AUTO", "1", /*overwrite=*/0);
-    if (args.gelu_const == 0) {
-      ::unsetenv("SUF_GELU_CONST");
-    } else if (args.gelu_const == 1) {
-      ::setenv("SUF_GELU_CONST", "1", /*overwrite=*/1);
-    }
+	    // Auto-packing: skip bit-packing when savings are small to reduce CPU overhead.
+	    ::setenv("SUF_OPEN_PACK_AUTO", "1", /*overwrite=*/0);
+	    // Benchmark-only: when packing decision is deterministic (no dynamic eff-bits),
+	    // skip per-flush packing negotiation to reduce protocol overhead.
+	    if (args.backend == "gpu") {
+	      ::setenv("SUF_OPEN_PACK_NO_NEGOTIATE", "1", /*overwrite=*/0);
+	    }
+	    if (args.gelu_const == 0) {
+	      ::unsetenv("SUF_GELU_CONST");
+	    } else if (args.gelu_const == 1) {
+	      ::setenv("SUF_GELU_CONST", "1", /*overwrite=*/1);
+	    }
     if (args.gelu_const_segments > 0) {
       const std::string seg = std::to_string(args.gelu_const_segments);
       ::setenv("SUF_GELU_CONST_SEGMENTS", seg.c_str(), /*overwrite=*/1);

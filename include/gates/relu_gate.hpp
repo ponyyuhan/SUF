@@ -33,4 +33,14 @@ inline suf::SUF<uint64_t> make_relu_suf_u64() {
   return F;
 }
 
+// ReLU(x) with only the arithmetic output (no helper bit). This is useful for
+// internal max/reduction code paths that never consume the predicate output and
+// would otherwise pay unnecessary Composite-FSS boolean blending overhead.
+inline suf::SUF<uint64_t> make_relu_value_suf_u64() {
+  auto F = make_relu_suf_u64();
+  F.l_out = 0;
+  for (auto& p : F.pieces) p.bool_outs.clear();
+  return F;
+}
+
 }  // namespace gates

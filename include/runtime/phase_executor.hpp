@@ -74,6 +74,7 @@ class PhaseExecutor {
     size_t opened_words_beaver = 0;
     size_t opened_words_mask = 0;
     size_t opened_words_other = 0;
+    uint64_t open_wire_bytes_sent = 0;
     size_t pfss_coeff_jobs = 0;
     size_t pfss_coeff_arith_words = 0;
     size_t pfss_coeff_pred_bits = 0;
@@ -245,27 +246,21 @@ class PhaseExecutor {
 
       // Deadlock handling: nothing progressed; force flushes on demand.
       if (want_open && do_flush_open()) continue;
-      if (want_pfss_coeff && do_flush_pfss(&pfss_coeff_)) continue;
-      if (want_pfss_trunc && do_flush_pfss(&pfss_trunc_)) continue;
-      if (R.pfss_planner && (want_pfss_coeff || want_pfss_trunc)) {
+      if (R.pfss_planner && (want_pfss_coeff || want_pfss_trunc) && !planner_flushed) {
         if (!R.pfss_backend || !R.pfss_chan) {
           throw std::runtime_error("PhaseExecutor: PFSS planner missing backend/channel");
         }
-        if (planner_flushed) {
-          // Some eager/task-driven phases may legitimately request additional PFSS flushes
-          // after a single-planner finalize. Fall back to direct flushes instead of aborting.
-          if (do_flush_pfss(&pfss_coeff_)) continue;
-          if (do_flush_pfss(&pfss_trunc_)) continue;
-        } else {
-          if (flush_guard + 1 > max_flushes_) {
-            throw std::runtime_error("PhaseExecutor: planner flush budget exceeded");
-          }
-          R.pfss_planner->finalize_phase(R.party, *R.pfss_backend, *R.pfss_chan);
-          flush_guard++;
-          planner_flushed = true;
-          continue;
+        if (flush_guard + 1 > max_flushes_) {
+          throw std::runtime_error("PhaseExecutor: planner flush budget exceeded");
         }
+        // Prefer the planner when provided: it drains coeff+trunc in one grouped flush/finalize.
+        R.pfss_planner->finalize_phase(R.party, *R.pfss_backend, *R.pfss_chan);
+        flush_guard++;
+        planner_flushed = true;
+        continue;
       }
+      if (want_pfss_coeff && do_flush_pfss(&pfss_coeff_)) continue;
+      if (want_pfss_trunc && do_flush_pfss(&pfss_trunc_)) continue;
       // Last chance: try flushing any pending batches even if tasks did not request it.
       if (do_flush_open()) continue;
       if (do_flush_pfss(&pfss_coeff_)) continue;
@@ -293,6 +288,7 @@ class PhaseExecutor {
         os.opened_words_by_kind[static_cast<size_t>(OpenKind::kMask)];
     stats_.opened_words_other =
         os.opened_words_by_kind[static_cast<size_t>(OpenKind::kOther)];
+    stats_.open_wire_bytes_sent = os.wire_bytes_sent;
     const auto& pcs = pfss_coeff_.total_stats();
     const auto& pts = pfss_trunc_.total_stats();
     stats_.pfss_coeff_flushes = pcs.flushes;
@@ -440,6 +436,7 @@ class PhaseExecutor {
         os.opened_words_by_kind[static_cast<size_t>(OpenKind::kMask)];
     stats_.opened_words_other =
         os.opened_words_by_kind[static_cast<size_t>(OpenKind::kOther)];
+    stats_.open_wire_bytes_sent = os.wire_bytes_sent;
     const auto& pcs = pfss_coeff_.total_stats();
     const auto& pts = pfss_trunc_.total_stats();
     stats_.pfss_coeff_flushes = pcs.flushes;

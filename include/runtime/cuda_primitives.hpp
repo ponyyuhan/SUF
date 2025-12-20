@@ -192,6 +192,18 @@ void launch_open_add_to_signed_kernel(const uint64_t* d_local_share,
                                       uint64_t ring_mask,
                                       void* stream /* cudaStream_t */);
 
+// Unpack `eff_bits`-packed remote shares, add to local shares, and sign-extend the sum to the
+// current ring bitwidth. This fuses unpack + open_add_to_signed into one kernel to reduce
+// global memory traffic and kernel launch overhead in the OpenCollector hot path.
+void launch_unpack_add_to_signed_kernel(const uint64_t* d_local_share,
+                                        const uint64_t* d_packed_remote,
+                                        int eff_bits,
+                                        uint64_t* d_out_signed,  // sign-extended bit-patterns
+                                        size_t n,
+                                        int ring_bits,
+                                        uint64_t ring_mask,
+                                        void* stream /* cudaStream_t */);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

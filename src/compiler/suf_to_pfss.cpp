@@ -165,6 +165,92 @@ static std::vector<uint64_t> flatten_coeffs(const suf::SufPiece<uint64_t>& piece
   return flat;
 }
 
+static inline uint64_t mask_for_nbits(int n_bits) {
+  if (n_bits <= 0) return 1ull;
+  if (n_bits >= 64) return ~uint64_t(0);
+  return (uint64_t(1) << n_bits) - 1ull;
+}
+
+static inline uint64_t add_mod_n(uint64_t a, uint64_t b, uint64_t mask) {
+  return (a + b) & mask;
+}
+
+static inline uint64_t sub_mod_n(uint64_t a, uint64_t b, uint64_t mask) {
+  return (a - b) & mask;
+}
+
+static inline uint64_t mul_mod_n(uint64_t a, uint64_t b, uint64_t mask) {
+  using u128 = unsigned __int128;
+  return static_cast<uint64_t>(static_cast<u128>(a) * static_cast<u128>(b)) & mask;
+}
+
+// Convert polynomial coefficients in the secret x-domain to coefficients in the public hatx-domain:
+//   x = hatx - r_in  (mod 2^n)
+// so that gates can evaluate polynomials as a public-input Horner (no Beaver muls).
+//
+// Input/Output layout: for each output i, coeffs are [c0,c1,...,cd] (increasing degree),
+// concatenated: out[i*(d+1) + k].
+static std::vector<uint64_t> shift_coeffs_to_public_hatx(const std::vector<uint64_t>& flat_x,
+                                                         int n_bits,
+                                                         int degree,
+                                                         int r_out,
+                                                         uint64_t r_in) {
+  if (degree <= 0 || r_out <= 0) return flat_x;
+  const uint64_t mask = mask_for_nbits(n_bits);
+  const uint64_t rin = r_in & mask;
+  const uint64_t neg_r = sub_mod_n(0ull, rin, mask);  // -r_in mod 2^n
+
+  // pow_neg_r[j] = (-r)^j
+  std::vector<uint64_t> pow_neg_r(static_cast<size_t>(degree) + 1, 0);
+  pow_neg_r[0] = 1ull & mask;
+  for (int j = 1; j <= degree; ++j) {
+    pow_neg_r[static_cast<size_t>(j)] =
+        mul_mod_n(pow_neg_r[static_cast<size_t>(j - 1)], neg_r, mask);
+  }
+
+  // Binomial coefficients in Z_{2^n}: choose[k][t] = C(k,t) mod 2^n.
+  std::vector<std::vector<uint64_t>> choose(static_cast<size_t>(degree) + 1);
+  for (int k = 0; k <= degree; ++k) {
+    choose[static_cast<size_t>(k)].assign(static_cast<size_t>(k) + 1, 0);
+    choose[static_cast<size_t>(k)][0] = 1ull & mask;
+    choose[static_cast<size_t>(k)][static_cast<size_t>(k)] = 1ull & mask;
+    for (int t = 1; t < k; ++t) {
+      uint64_t a = choose[static_cast<size_t>(k - 1)][static_cast<size_t>(t - 1)];
+      uint64_t b = choose[static_cast<size_t>(k - 1)][static_cast<size_t>(t)];
+      choose[static_cast<size_t>(k)][static_cast<size_t>(t)] = add_mod_n(a, b, mask);
+    }
+  }
+
+  std::vector<uint64_t> out(flat_x.size(), 0);
+  const int stride = degree + 1;
+  for (int i = 0; i < r_out; ++i) {
+    // q[t] = Σ_{k=t..d} c[k] * C(k,t) * (-r)^(k-t)
+    std::vector<uint64_t> q(static_cast<size_t>(stride), 0);
+    for (int k = 0; k <= degree; ++k) {
+      uint64_t ck = flat_x[static_cast<size_t>(i * stride + k)] & mask;
+      if (ck == 0) continue;
+      for (int t = 0; t <= k; ++t) {
+        uint64_t term = mul_mod_n(ck, choose[static_cast<size_t>(k)][static_cast<size_t>(t)], mask);
+        term = mul_mod_n(term, pow_neg_r[static_cast<size_t>(k - t)], mask);
+        q[static_cast<size_t>(t)] = add_mod_n(q[static_cast<size_t>(t)], term, mask);
+      }
+    }
+    for (int t = 0; t <= degree; ++t) {
+      out[static_cast<size_t>(i * stride + t)] = q[static_cast<size_t>(t)] & mask;
+    }
+  }
+  return out;
+}
+
+static std::vector<uint64_t> flatten_coeffs_public_hatx(const suf::SufPiece<uint64_t>& piece,
+                                                        int n_bits,
+                                                        int degree,
+                                                        int r_out,
+                                                        uint64_t r_in) {
+  auto flat = flatten_coeffs(piece, degree, r_out);
+  return shift_coeffs_to_public_hatx(flat, n_bits, degree, r_out, r_in);
+}
+
 static void build_coeff_step(const suf::SUF<uint64_t>& F, uint64_t r_in, CoeffProgramDesc& out) {
   // Rotate intervals, split wrap, sort by start.
   struct Seg { uint64_t start; std::vector<uint64_t> payload; };
@@ -179,7 +265,7 @@ static void build_coeff_step(const suf::SUF<uint64_t>& F, uint64_t r_in, CoeffPr
   for (size_t i = 0; i + 1 < F.alpha.size(); i++) {
     uint64_t a = F.alpha[i];
     uint64_t b = F.alpha[i + 1];
-    auto payload = flatten_coeffs(F.pieces[i], F.degree, F.r_out);
+    auto payload = flatten_coeffs_public_hatx(F.pieces[i], F.n_bits, F.degree, F.r_out, r_in);
     uint64_t s = a + r_in;
     uint64_t e = rot_end(b);
     if (s < e) {
@@ -424,7 +510,7 @@ CompiledSUFGate compile_suf_to_pfss_two_programs(
     for (size_t i = 0; i + 1 < Fn.alpha.size(); i++) {
       uint64_t a = Fn.alpha[i];
       uint64_t b = Fn.alpha[i + 1];
-      auto payload = flatten_coeffs(Fn.pieces[i], Fn.degree, Fn.r_out);
+      auto payload = flatten_coeffs_public_hatx(Fn.pieces[i], Fn.n_bits, Fn.degree, Fn.r_out, r_in);
       uint64_t s = a + r_in;
       uint64_t e = (b == std::numeric_limits<uint64_t>::max()) ? r_in : (b + r_in);
       if (s < e) {

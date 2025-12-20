@@ -286,6 +286,11 @@ class TruncTask final : public detail::PhaseTask {
 
   ~TruncTask() override {
 #ifdef SUF_HAVE_CUDA
+    if (d_hatx_public_) {
+      cudaFree(d_hatx_public_);
+      d_hatx_public_ = nullptr;
+      d_hatx_words_ = 0;
+    }
     if (d_out_device_) {
       cudaFree(d_out_device_);
       d_out_device_ = nullptr;
@@ -428,8 +433,55 @@ class TruncTask final : public detail::PhaseTask {
         if (st_ == St::WaitOpen) {
           if (!R.opens) throw std::runtime_error("TruncTask: no OpenCollector");
           if (!R.opens->ready(h_open_)) return detail::Need::Open;
+          const size_t elems = in_.size();
+#ifdef SUF_HAVE_CUDA
+          // Device-only hatx is only safe/beneficial in device-pipeline mode, where
+          // downstream consumers can keep data on GPU and avoid host staging.
+          const bool want_device_hatx = [&]() -> bool {
+            if (!R.device_pipeline) return false;
+            if (!R.pfss_backend) return false;
+            if (dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) == nullptr) return false;
+            const char* env = std::getenv("SUF_TRUNC_DEVICE_HATX");
+            return env && std::string(env) != "0";
+          }();
+          if (want_device_hatx) {
+            const uint64_t* d_hatx_src = R.opens->view_device_u64(h_open_);
+            if (d_hatx_src) {
+              // Ensure we own a stable device buffer across subsequent OpenCollector flushes.
+              if (!d_hatx_public_ || d_hatx_words_ < elems) {
+                if (d_hatx_public_) cudaFree(d_hatx_public_);
+                d_hatx_public_ = nullptr;
+                d_hatx_words_ = 0;
+                cudaError_t st = cudaMalloc(reinterpret_cast<void**>(&d_hatx_public_), elems * sizeof(uint64_t));
+                if (st != cudaSuccess) {
+                  throw std::runtime_error(std::string("TruncTask cudaMalloc(d_hatx_public_) failed: ") +
+                                           cudaGetErrorString(st));
+                }
+                d_hatx_words_ = elems;
+              }
+              cudaStream_t stream = nullptr;
+              if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend)) {
+                stream = reinterpret_cast<cudaStream_t>(staged->device_stream());
+              }
+              cudaError_t st = cudaMemcpyAsync(d_hatx_public_, d_hatx_src,
+                                               elems * sizeof(uint64_t),
+                                               cudaMemcpyDeviceToDevice,
+                                               stream);
+              if (st != cudaSuccess) {
+                throw std::runtime_error(std::string("TruncTask cudaMemcpyAsync hatx D2D failed: ") +
+                                         cudaGetErrorString(st));
+              }
+              // Skip host materialization; EnqueuePfss will use device-only hatx.
+              opened_.clear();
+              device_hatx_only_ = true;
+              st_ = St::EnqueuePfss;
+              break;
+            }
+          }
+#endif
           auto v = R.opens->view(h_open_);
           opened_.assign(v.begin(), v.end());
+          device_hatx_only_ = false;
           if (R.pfss_backend &&
               dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) != nullptr &&
               !std::getenv("SUF_FORCE_PFSS")) {
@@ -495,13 +547,26 @@ class TruncTask final : public detail::PhaseTask {
           job.suf = &bundle_->suf;
           job.key = key_;
           job.hook = nullptr;  // Run postproc locally after PFSS finalize.
-          job.hatx_public.resize(opened_.size());
-          for (size_t i = 0; i < opened_.size(); ++i) {
-            job.hatx_public[i] = static_cast<uint64_t>(opened_[i]);
-          }
-          if (R.device_pipeline && d_in_device_) {
-            job.hatx_device = d_in_device_;
-            job.hatx_device_words = std::min(d_in_elems_, opened_.size());
+          const size_t elems = in_.size();
+#ifdef SUF_HAVE_CUDA
+          if (R.device_pipeline &&
+              R.pfss_backend && dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr &&
+              d_hatx_public_ && d_hatx_words_ >= elems) {
+            job.hatx_public.clear();  // device-only hatx (GPU backend will use hatx_device)
+            job.hatx_device = d_hatx_public_;
+            job.hatx_device_words = elems;
+            job.shape.total_elems = static_cast<uint32_t>(elems);
+          } else
+#endif
+          {
+            job.hatx_public.resize(opened_.size());
+            if (!opened_.empty()) {
+              std::memcpy(job.hatx_public.data(), opened_.data(), opened_.size() * sizeof(uint64_t));
+            }
+            if (R.device_pipeline && d_in_device_) {
+              job.hatx_device = d_in_device_;
+              job.hatx_device_words = std::min(d_in_elems_, opened_.size());
+            }
           }
           if (row_offsets_hint_ && row_lengths_hint_ &&
               row_offsets_hint_->size() == row_lengths_hint_->size() + 1 &&
@@ -592,7 +657,7 @@ class TruncTask final : public detail::PhaseTask {
         uint64_t* d_tmp_out = nullptr;
         cudaStream_t trunc_stream = nullptr;
 #ifdef SUF_HAVE_CUDA
-        if (R.pfss_backend && std::getenv("SUF_TRUNC_GPU") && v.arith_device) {
+        if (R.device_pipeline && R.pfss_backend && std::getenv("SUF_TRUNC_GPU") && v.arith_device) {
             if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend)) {
               trunc_stream = reinterpret_cast<cudaStream_t>(staged->device_stream());
               gpu_direct = true;
@@ -631,12 +696,18 @@ class TruncTask final : public detail::PhaseTask {
                                            cudaGetErrorString(st));
                 }
               };
-              // Stage hatx_public to device.
-              const uint64_t* hatx_host = job_hatx();
-              uint64_t* d_hatx = nullptr;
-              do_malloc(&d_hatx, elems * sizeof(uint64_t));
-              cudaMemcpyAsync(d_hatx, hatx_host, elems * sizeof(uint64_t),
-                              cudaMemcpyHostToDevice, trunc_stream);
+              // Prefer the stable device hatx buffer when available (avoids host materialization).
+              const uint64_t* d_hatx = nullptr;
+              uint64_t* d_hatx_tmp = nullptr;
+              if (d_hatx_public_ && d_hatx_words_ >= elems) {
+                d_hatx = d_hatx_public_;
+              } else {
+                const uint64_t* hatx_host = job_hatx();
+                do_malloc(&d_hatx_tmp, elems * sizeof(uint64_t));
+                cudaMemcpyAsync(d_hatx_tmp, hatx_host, elems * sizeof(uint64_t),
+                                cudaMemcpyHostToDevice, trunc_stream);
+                d_hatx = d_hatx_tmp;
+              }
               // Stage bools to device if needed.
               uint64_t* d_bools = nullptr;
               if (v.bools_device) {
@@ -775,7 +846,7 @@ class TruncTask final : public detail::PhaseTask {
                   }
                 }
               }
-              if (d_hatx) do_free(d_hatx);
+              if (d_hatx_tmp) do_free(d_hatx_tmp);
               if (d_bools && d_bools != v.bools_device) do_free(d_bools);
             }
         }
@@ -911,6 +982,11 @@ class TruncTask final : public detail::PhaseTask {
   size_t d_out_elems_ = 0;
   const uint64_t* d_in_device_ = nullptr;  // optional device hatx input (non-owning)
   size_t d_in_elems_ = 0;
+  bool device_hatx_only_ = false;
+#ifdef SUF_HAVE_CUDA
+  uint64_t* d_hatx_public_ = nullptr;  // stable device hatx (owned)
+  size_t d_hatx_words_ = 0;
+#endif
 
   const uint64_t* job_hatx() {
     if (hatx_public_.empty()) {
@@ -1047,8 +1123,8 @@ class ReluTask final : public detail::PhaseTask {
         job.key = key_;
         job.hook = nullptr;
         job.hatx_public.resize(opened_.size());
-        for (size_t i = 0; i < opened_.size(); ++i) {
-          job.hatx_public[i] = static_cast<uint64_t>(opened_[i]);
+        if (!opened_.empty()) {
+          std::memcpy(job.hatx_public.data(), opened_.data(), opened_.size() * sizeof(uint64_t));
         }
         job.out = nn::TensorView<uint64_t>(out_.data(), {out_.size()});
         h_pfss_ = batch->enqueue_composite(std::move(job));
@@ -1149,8 +1225,8 @@ class RsqrtTask final : public detail::PhaseTask {
         job.key = key_;
         job.hook = nullptr;
         job.hatx_public.resize(opened_.size());
-        for (size_t i = 0; i < opened_.size(); ++i) {
-          job.hatx_public[i] = static_cast<uint64_t>(opened_[i]);
+        if (!opened_.empty()) {
+          std::memcpy(job.hatx_public.data(), opened_.data(), opened_.size() * sizeof(uint64_t));
         }
         if (!R.pfss_coeff) throw std::runtime_error("RsqrtTask: missing coeff PFSS batch");
         coeff_handle_ = R.pfss_coeff->enqueue_composite(std::move(job));
@@ -2209,8 +2285,8 @@ class CubicPolyTask final : public detail::PhaseTask {
         job.key = key_;
         job.hook = nullptr;
         job.hatx_public.resize(opened_.size());
-        for (size_t i = 0; i < opened_.size(); ++i) {
-          job.hatx_public[i] = static_cast<uint64_t>(opened_[i]);
+        if (!opened_.empty()) {
+          std::memcpy(job.hatx_public.data(), opened_.data(), opened_.size() * sizeof(uint64_t));
         }
         if (row_offsets_hint_ && row_lengths_hint_ &&
             row_offsets_hint_->size() == row_lengths_hint_->size() + 1 &&
@@ -2611,7 +2687,9 @@ class RecipTask final : public detail::PhaseTask {
         job.key = key_;
         job.hook = nullptr;
         job.hatx_public.resize(opened_.size());
-        for (size_t i = 0; i < opened_.size(); ++i) job.hatx_public[i] = static_cast<uint64_t>(opened_[i]);
+        if (!opened_.empty()) {
+          std::memcpy(job.hatx_public.data(), opened_.data(), opened_.size() * sizeof(uint64_t));
+        }
         if (!R.pfss_coeff) throw std::runtime_error("RecipTask: missing coeff PFSS batch");
         coeff_handle_ = R.pfss_coeff->enqueue_composite(std::move(job));
         st_ = St::WaitCoeff;

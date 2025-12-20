@@ -22,6 +22,13 @@ namespace {
 
 static const std::vector<proto::BeaverTriple64Share> k_empty_triples;
 
+inline size_t hatx_words_for_job(const PreparedCompositeJob& job) {
+  if (!job.hatx_public.empty()) return job.hatx_public.size();
+  if (job.hatx_device && job.hatx_device_words) return job.hatx_device_words;
+  if (job.shape.total_elems) return static_cast<size_t>(job.shape.total_elems);
+  return 0;
+}
+
 inline uint64_t mask_bits_host(int bits) {
   if (bits <= 0) return 0;
   if (bits >= 64) return ~uint64_t(0);
@@ -64,26 +71,19 @@ inline size_t beaver_u64_mul_per_elem(const ::gates::CompositePartyKey& k) {
       comp.ell == 0) {
     return 0;
   }
+  // Current Composite-FSS evaluation is Beaver-free for arithmetic outputs: the
+  // compiler shifts piecewise polynomials into the public `hatx` domain, and
+  // Horner is done locally. Remaining Beaver usage (u64 triples) comes from:
+  //  - selector network (XOR->add for cut bits, plus chain multiplications),
+  //  - boolean output blending (XOR->add for per-piece bools, plus selector-weighted muls).
+  if (comp.ell <= 0) return 0;
   const size_t cut_count = comp.coeff.cutpoints_ge.size();
   const size_t piece_count = cut_count + 1;
   const size_t selector_chain_mul = (cut_count > 0) ? (cut_count - 1) : 0;
-  const size_t horner_mul = static_cast<size_t>(comp.r) * static_cast<size_t>(comp.degree);
-  const size_t coeff_words = static_cast<size_t>(std::max(0, comp.coeff.out_words));
-  const size_t coeff_select_mul = piece_count * coeff_words;
-
-  const size_t ell = static_cast<size_t>(std::max(0, comp.ell));
+  const size_t ell = static_cast<size_t>(comp.ell);
+  const size_t bool_b2a_mul = piece_count * ell;
   const size_t bool_select_mul = piece_count * ell;
-
-  if (comp.gate_kind == ::compiler::GateKind::FaithfulTR ||
-      comp.gate_kind == ::compiler::GateKind::FaithfulARS ||
-      comp.gate_kind == ::compiler::GateKind::GapARS) {
-    const size_t cut_b2a_mul = cut_count;
-    const size_t bool_b2a_mul = piece_count * ell;
-    return cut_b2a_mul + selector_chain_mul + coeff_select_mul + bool_b2a_mul + bool_select_mul + horner_mul;
-  }
-
-  const size_t conv_bits = comp.pred.queries.size() + cut_count;
-  return conv_bits + selector_chain_mul + coeff_select_mul + bool_select_mul + horner_mul;
+  return cut_count + selector_chain_mul + bool_b2a_mul + bool_select_mul;
 }
 
 inline size_t beaver_u64_capacity_elems(const ::gates::CompositePartyKey& k) {
@@ -136,7 +136,7 @@ PfssHandle PfssSuperBatch::enqueue_composite(PreparedCompositeJob job) {
     job.shape.eff_bits = eff_bits;
   }
   if (job.shape.total_elems == 0) {
-    job.shape.total_elems = static_cast<uint32_t>(job.hatx_public.size());
+    job.shape.total_elems = static_cast<uint32_t>(hatx_words_for_job(job));
   }
   if (slots_.size() <= job.token) {
     slots_.resize(job.token + 1);
@@ -146,7 +146,7 @@ PfssHandle PfssSuperBatch::enqueue_composite(PreparedCompositeJob job) {
     slots_[job.token]->arith_storage = std::make_shared<std::vector<uint64_t>>();
     slots_[job.token]->bool_storage = std::make_shared<std::vector<uint64_t>>();
   }
-  size_t hatx_words = job.hatx_public.size();
+  size_t hatx_words = hatx_words_for_job(job);
   size_t hatx_bytes = hatx_words * sizeof(uint64_t);
   bool ragged = !job.row_offsets.empty() && !job.row_lengths.empty();
   if (ragged) {
@@ -281,7 +281,7 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
     const auto& comp = job.key->compiled;
     const size_t r = static_cast<size_t>(comp.r);
     const size_t ell = static_cast<size_t>(comp.ell);
-    const size_t N = job.hatx_public.size();
+    const size_t N = hatx_words_for_job(job);
     size_t total_hatx_words = N;
 
     stats_.max_bucket_hatx = std::max(stats_.max_bucket_hatx, N);
@@ -312,7 +312,7 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
       }
 
       gates::CompositeBatchInput in{
-          job.hatx_public.data(),
+          job.hatx_public.empty() ? nullptr : job.hatx_public.data(),
           N,
           job.hatx_device
               ? job.hatx_device
@@ -426,6 +426,12 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
   }
 
   size_t total_hatx_words = 0;
+  for (const auto& job : jobs_) {
+    if (job.hatx_public.empty() && job.hatx_device && hatx_words_for_job(job) > 0) {
+      throw std::runtime_error(
+          "PfssSuperBatch: device-only hatx requires single-job flush (batch grouping needs host hatx)");
+    }
+  }
   struct GroupKey {
     int r = 0;
     int ell = 0;

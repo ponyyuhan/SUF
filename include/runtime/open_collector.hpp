@@ -77,6 +77,9 @@ class OpenCollector {
     size_t flushes = 0;
     size_t opened_words = 0;
     std::array<size_t, static_cast<size_t>(OpenKind::kCount)> opened_words_by_kind{};
+    // Total bytes sent on the underlying net channel for openings in this collector,
+    // including any per-flush negotiation/control words.
+    uint64_t wire_bytes_sent = 0;
     size_t max_pending_words = 0;
     uint64_t flush_ns = 0;
   };
@@ -162,10 +165,13 @@ class OpenCollector {
     size_t out_cap = 0;
   };
   DevicePackScratch pack_scratch_;
+  void* cuda_pack_stream_ = nullptr;  // cudaStream_t, lazily created for open pack/unpack
   struct PinnedHostScratch {
+    uint64_t* in = nullptr;     // optional: pinned staging for local shares (H2D source)
     uint64_t* local = nullptr;
     uint64_t* remote = nullptr;
-    size_t cap_words = 0;
+    size_t in_cap_words = 0;
+    size_t cap_words = 0;       // capacity for packed_local/packed_remote (in u64 words)
   };
   PinnedHostScratch pinned_scratch_;
 #endif

@@ -85,6 +85,15 @@ size_t packed_words_host(size_t elems, int eff_bits) {
   return static_cast<size_t>(total_bits / 64);
 }
 
+size_t packed_words_bytes_host(size_t elems, int bytes_each) {
+  if (bytes_each <= 0) return elems;
+  if (bytes_each >= 8) return elems;
+  unsigned __int128 total_bytes = static_cast<unsigned __int128>(elems) *
+                                  static_cast<unsigned __int128>(bytes_each);
+  total_bytes += 7;
+  return static_cast<size_t>(total_bytes / 8);
+}
+
 uint64_t mask_bits_host(int eff_bits) {
   if (eff_bits <= 0) return 0ull;
   if (eff_bits >= 64) return ~uint64_t(0);
@@ -225,14 +234,88 @@ void unpack_eff_bits_host_into(const std::vector<uint64_t>& packed,
   }
 }
 
+int bytes_per_val_host(int eff_bits) {
+  if (eff_bits <= 0) return 8;
+  if (eff_bits >= 64) return 8;
+  return (eff_bits + 7) / 8;
+}
+
+void pack_eff_bytes_host_into(const std::vector<uint64_t>& xs,
+                              int eff_bits,
+                              std::vector<uint64_t>& out) {
+  if (eff_bits <= 0 || eff_bits > 64) {
+    throw std::runtime_error("OpenCollector: eff_bits out of range for pack-bytes");
+  }
+  if (eff_bits == 64) {
+    out.assign(xs.begin(), xs.end());
+    return;
+  }
+  const int bytes_each = bytes_per_val_host(eff_bits);
+  if (bytes_each >= 8) {
+    out.assign(xs.begin(), xs.end());
+    return;
+  }
+  const size_t total_bytes = xs.size() * static_cast<size_t>(bytes_each);
+  const size_t words = static_cast<size_t>((total_bytes + 7) / 8);
+  out.assign(words, 0ull);
+  if (xs.empty()) return;
+  const uint64_t mask = mask_bits_host(eff_bits);
+  uint8_t* dst = reinterpret_cast<uint8_t*>(out.data());
+#ifdef _OPENMP
+#pragma omp parallel for if (xs.size() >= (1ull << 16)) schedule(static)
+#endif
+  for (long long ii = 0; ii < static_cast<long long>(xs.size()); ++ii) {
+    const size_t i = static_cast<size_t>(ii);
+    uint64_t v = xs[i] & mask;
+    std::memcpy(dst + i * static_cast<size_t>(bytes_each), &v, static_cast<size_t>(bytes_each));
+  }
+}
+
+void unpack_eff_bytes_host_into(const std::vector<uint64_t>& packed,
+                                int eff_bits,
+                                size_t elems,
+                                std::vector<uint64_t>& out) {
+  if (eff_bits <= 0 || eff_bits > 64) {
+    throw std::runtime_error("OpenCollector: eff_bits out of range for unpack-bytes");
+  }
+  if (eff_bits == 64) {
+    out.assign(packed.begin(), packed.end());
+    return;
+  }
+  const int bytes_each = bytes_per_val_host(eff_bits);
+  if (bytes_each >= 8) {
+    out.assign(packed.begin(), packed.begin() + std::min(packed.size(), elems));
+    if (out.size() < elems) out.resize(elems, 0ull);
+    return;
+  }
+  out.assign(elems, 0ull);
+  if (elems == 0) return;
+  const uint64_t mask = mask_bits_host(eff_bits);
+  const uint8_t* src = reinterpret_cast<const uint8_t*>(packed.data());
+#ifdef _OPENMP
+#pragma omp parallel for if (elems >= (1ull << 16)) schedule(static)
+#endif
+  for (long long ii = 0; ii < static_cast<long long>(elems); ++ii) {
+    const size_t i = static_cast<size_t>(ii);
+    uint64_t v = 0;
+    std::memcpy(&v, src + i * static_cast<size_t>(bytes_each), static_cast<size_t>(bytes_each));
+    out[i] = v & mask;
+  }
+}
+
 }  // namespace
 
 OpenCollector::~OpenCollector() {
 #ifdef SUF_HAVE_CUDA
+  if (cuda_pack_stream_) {
+    cudaStreamDestroy(reinterpret_cast<cudaStream_t>(cuda_pack_stream_));
+    cuda_pack_stream_ = nullptr;
+  }
   if (pack_scratch_.d_in) cudaFree(pack_scratch_.d_in);
   if (pack_scratch_.d_packed) cudaFree(pack_scratch_.d_packed);
   if (pack_scratch_.d_out) cudaFree(pack_scratch_.d_out);
   pack_scratch_ = DevicePackScratch{};
+  if (pinned_scratch_.in) cudaFreeHost(pinned_scratch_.in);
   if (pinned_scratch_.local) cudaFreeHost(pinned_scratch_.local);
   if (pinned_scratch_.remote) cudaFreeHost(pinned_scratch_.remote);
   pinned_scratch_ = PinnedHostScratch{};
@@ -284,6 +367,17 @@ void OpenCollector::flush(int party, net::Chan& ch) {
   const bool want_pack = env_flag_enabled("SUF_OPEN_PACK_EFFBITS");
   const bool signed_pack = env_flag_enabled("SUF_OPEN_PACK_SIGNED");
   const bool auto_pack = env_flag_enabled("SUF_OPEN_PACK_AUTO");
+  const bool no_negotiate = env_flag_enabled("SUF_OPEN_PACK_NO_NEGOTIATE");
+  enum class PackFormat : uint8_t { Bits = 0, Bytes = 1 };
+  // Default to bit-packing (Sigma-style) to avoid per-byte memcpy overhead.
+  PackFormat pack_format = PackFormat::Bits;
+  if (const char* env = std::getenv("SUF_OPEN_PACK_FORMAT")) {
+    std::string v(env);
+    std::transform(v.begin(), v.end(), v.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (v == "bits" || v == "bit") pack_format = PackFormat::Bits;
+    if (v == "bytes" || v == "byte") pack_format = PackFormat::Bytes;
+  }
   const double min_savings = []() -> double {
     const char* env = std::getenv("SUF_OPEN_PACK_MIN_SAVINGS_PCT");
     if (!env) return 0.25;
@@ -304,13 +398,11 @@ void OpenCollector::flush(int party, net::Chan& ch) {
   const bool device_pack = env_flag_enabled_default("SUF_OPEN_PACK_DEVICE", have_cuda_stream);
   const bool device_scatter = env_flag_enabled_default("SUF_OPEN_PACK_DEVICE_SCATTER", have_cuda_stream);
   const bool device_keep_opened = env_flag_enabled_default("SUF_OPEN_PACK_DEVICE_KEEP_OPENED", have_cuda_stream);
-  const size_t device_min_words = []() -> size_t {
-    const char* env = std::getenv("SUF_OPEN_PACK_DEVICE_MIN_WORDS");
-    if (!env) return 1ull << 18;
+  size_t device_min_words = have_cuda_stream ? (1ull << 15) : (1ull << 18);
+  if (const char* env = std::getenv("SUF_OPEN_PACK_DEVICE_MIN_WORDS")) {
     long long v = std::atoll(env);
-    if (v <= 0) return 1ull << 18;
-    return static_cast<size_t>(v);
-  }();
+    if (v > 0) device_min_words = static_cast<size_t>(v);
+  }
   size_t total_words = pending_words_;
   std::array<size_t, static_cast<size_t>(OpenKind::kCount)> words_by_kind{};
   for (const auto& req : requests_) {
@@ -365,30 +457,48 @@ void OpenCollector::flush(int party, net::Chan& ch) {
   const auto t_pack1 = std::chrono::steady_clock::now();
 
   const auto t_comm0 = std::chrono::steady_clock::now();
-  const bool pack = [&]() {
-    uint64_t remote = 0;
+  uint64_t wire_bytes_sent = 0;
+  auto decide_pack_local = [&]() -> bool {
     uint64_t local = want_pack ? 1ull : 0ull;
+    int eff_candidate = 64;
+    if (ring_bits > 0 && ring_bits < 64 && ring_bits <= max_pack_bits) eff_candidate = ring_bits;
+    if (dynamic_pack && max_bits > 0 && max_bits < eff_candidate) eff_candidate = max_bits;
+    if (eff_candidate >= 64) local = 0ull;
     if (local && auto_pack) {
-      int eff = 64;
-      if (ring_bits > 0 && ring_bits < 64 && ring_bits <= max_pack_bits) eff = ring_bits;
-      if (dynamic_pack && max_bits > 0 && max_bits < eff) eff = max_bits;
       const double total = static_cast<double>(total_words);
       if (total > 0.0) {
-        const double packed = static_cast<double>(packed_words_host(total_words, eff));
-        const double savings = (total - packed) / total;
+        const double packed_est =
+            static_cast<double>((pack_format == PackFormat::Bytes)
+                                    ? packed_words_bytes_host(total_words, bytes_per_val_host(eff_candidate))
+                                    : packed_words_host(total_words, eff_candidate));
+        const double savings = (total - packed_est) / total;
         if (savings < min_savings) local = 0ull;
       }
     }
-    if (party == 0) {
-      ch.send_u64(local);
-      remote = ch.recv_u64();
-    } else {
-      remote = ch.recv_u64();
-      ch.send_u64(local);
-    }
-    return (local != 0) && (remote != 0);
-  }();
-  const auto t_comm1 = std::chrono::steady_clock::now();
+    return local != 0;
+  };
+  bool pack = false;
+  auto t_comm1 = t_comm0;
+  if (no_negotiate && !dynamic_pack) {
+    pack = decide_pack_local();
+    t_comm1 = t_comm0;
+  } else {
+    pack = [&]() {
+      uint64_t remote = 0;
+      uint64_t local = decide_pack_local() ? 1ull : 0ull;
+      if (party == 0) {
+        ch.send_u64(local);
+        remote = ch.recv_u64();
+      } else {
+        remote = ch.recv_u64();
+        ch.send_u64(local);
+      }
+      return (local != 0) && (remote != 0);
+    }();
+    t_comm1 = std::chrono::steady_clock::now();
+    // Negotiation sends exactly one u64 per party.
+    wire_bytes_sent += sizeof(uint64_t);
+  }
   if (!pack) {
     // Fast-path: one bulk exchange per flush (no packing).
     auto& recv_flat = recv_flat_buf_;
@@ -402,6 +512,7 @@ void OpenCollector::flush(int party, net::Chan& ch) {
       if (!send_flat.empty()) ch.send_u64s(send_flat.data(), send_flat.size());
     }
     const auto t_comm3 = std::chrono::steady_clock::now();
+    wire_bytes_sent += static_cast<uint64_t>(total_words) * sizeof(uint64_t);
     const auto t_scatter0 = std::chrono::steady_clock::now();
     const uint64_t* recv_ptr = recv_flat.data();
     opened_flat_buf_.resize(total_words);
@@ -423,6 +534,7 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     for (size_t k = 0; k < words_by_kind.size(); ++k) {
       stats_.opened_words_by_kind[k] += words_by_kind[k];
     }
+    stats_.wire_bytes_sent += wire_bytes_sent;
     pending_words_ = 0;
     // Keep send buffer capacity for next flush but reset it so it doesn't retain old values.
     send_flat.clear();
@@ -448,16 +560,23 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     eff_local = ring_bits;
   }
   if (dynamic_pack && max_bits > 0 && max_bits < eff_local) eff_local = max_bits;
-  int eff_remote = 0;
-  const auto t_comm2 = std::chrono::steady_clock::now();
-  if (party == 0) {
-    ch.send_u64(static_cast<uint64_t>(eff_local));
-    eff_remote = static_cast<int>(ch.recv_u64());
-  } else {
-    eff_remote = static_cast<int>(ch.recv_u64());
-    ch.send_u64(static_cast<uint64_t>(eff_local));
+  int eff_remote = eff_local;
+  auto t_comm2 = t_comm1;
+  auto t_comm3 = t_comm1;
+  if (!(no_negotiate && !dynamic_pack)) {
+    eff_remote = 0;
+    t_comm2 = std::chrono::steady_clock::now();
+    if (party == 0) {
+      ch.send_u64(static_cast<uint64_t>(eff_local));
+      eff_remote = static_cast<int>(ch.recv_u64());
+    } else {
+      eff_remote = static_cast<int>(ch.recv_u64());
+      ch.send_u64(static_cast<uint64_t>(eff_local));
+    }
+    t_comm3 = std::chrono::steady_clock::now();
+    // Eff-bits negotiation sends exactly one u64 per party.
+    wire_bytes_sent += sizeof(uint64_t);
   }
-  const auto t_comm3 = std::chrono::steady_clock::now();
   int eff = std::max(eff_local, eff_remote);
   if (eff <= 0 || eff > 64) eff = 64;
 
@@ -468,17 +587,33 @@ void OpenCollector::flush(int party, net::Chan& ch) {
   if (eff > 0 && eff < 64) {
     auto& packed_local = packed_local_buf_;
     auto& packed_remote = packed_remote_buf_;
-    const size_t packed_words = packed_words_host(total_words, eff);
+    const size_t packed_words =
+        (pack_format == PackFormat::Bytes)
+            ? packed_words_bytes_host(total_words, bytes_per_val_host(eff))
+            : packed_words_host(total_words, eff);
     bool used_device_pack = false;
 #ifdef SUF_HAVE_CUDA
-    const bool want_device_pack = device_pack && total_words >= device_min_words;
+    const bool want_device_pack =
+        device_pack && (pack_format == PackFormat::Bits) && total_words >= device_min_words;
     if (want_device_pack) {
-      cudaStream_t stream = cuda_stream_ ? reinterpret_cast<cudaStream_t>(cuda_stream_) : nullptr;
       auto check_cuda = [](cudaError_t st, const char* what) {
         if (st != cudaSuccess) {
           throw std::runtime_error(std::string(what) + ": " + cudaGetErrorString(st));
         }
       };
+      auto pick_stream = [&]() -> cudaStream_t {
+        const bool use_caller_stream = env_flag_enabled_default("SUF_OPEN_PACK_USE_CALLER_STREAM", false);
+        if (use_caller_stream) {
+          return cuda_stream_ ? reinterpret_cast<cudaStream_t>(cuda_stream_) : nullptr;
+        }
+        if (cuda_pack_stream_ == nullptr) {
+          cudaStream_t s = nullptr;
+          check_cuda(cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking), "cudaStreamCreate open_pack");
+          cuda_pack_stream_ = reinterpret_cast<void*>(s);
+        }
+        return reinterpret_cast<cudaStream_t>(cuda_pack_stream_);
+      };
+      cudaStream_t stream = pick_stream();
       auto ensure_buffers = [&](size_t words, size_t packed_words_local) {
         const size_t in_bytes = words * sizeof(uint64_t);
         const size_t packed_bytes = packed_words_local * sizeof(uint64_t);
@@ -504,17 +639,31 @@ void OpenCollector::flush(int party, net::Chan& ch) {
       try {
         uint64_t* packed_local_ptr = nullptr;
         uint64_t* packed_remote_ptr = nullptr;
-        bool use_pinned = false;
-        if (env_flag_enabled("SUF_OPEN_PACK_PINNED")) {
+        bool use_pinned = env_flag_enabled_default("SUF_OPEN_PACK_PINNED", have_cuda_stream);
+        bool use_pinned_input = env_flag_enabled_default("SUF_OPEN_PACK_PINNED_INPUT", have_cuda_stream);
+        if (use_pinned) {
           size_t max_mb = 0;
           if (const char* env = std::getenv("SUF_OPEN_PACK_PINNED_MAX_MB")) {
             long long v = std::atoll(env);
             if (v > 0) max_mb = static_cast<size_t>(v);
           }
           size_t bytes = packed_words * sizeof(uint64_t);
-          if (max_mb == 0 || bytes <= max_mb * size_t{1024} * size_t{1024}) {
-            use_pinned = true;
+          if (!(max_mb == 0 || bytes <= max_mb * size_t{1024} * size_t{1024})) use_pinned = false;
+        }
+        if (use_pinned_input) {
+          size_t max_mb = 0;
+          if (const char* env = std::getenv("SUF_OPEN_PACK_PINNED_MAX_MB")) {
+            long long v = std::atoll(env);
+            if (v > 0) max_mb = static_cast<size_t>(v);
           }
+          const size_t bytes_in = total_words * sizeof(uint64_t);
+          if (!(max_mb == 0 || bytes_in <= max_mb * size_t{1024} * size_t{1024})) use_pinned_input = false;
+          size_t min_words = 1ull << 20;  // ~8MB; avoid pinning tiny flushes
+          if (const char* env = std::getenv("SUF_OPEN_PACK_PINNED_INPUT_MIN_WORDS")) {
+            long long v = std::atoll(env);
+            if (v > 0) min_words = static_cast<size_t>(v);
+          }
+          if (total_words < min_words) use_pinned_input = false;
         }
         const auto t_pack2_0 = std::chrono::steady_clock::now();
         ensure_buffers(total_words, packed_words);
@@ -539,7 +688,20 @@ void OpenCollector::flush(int party, net::Chan& ch) {
           packed_local_ptr = packed_local.data();
           packed_remote_ptr = packed_remote.data();
         }
-        check_cuda(cudaMemcpyAsync(pack_scratch_.d_in, send_flat.data(),
+        const uint64_t* send_ptr = send_flat.data();
+        if (use_pinned_input) {
+          if (pinned_scratch_.in_cap_words < total_words) {
+            if (pinned_scratch_.in) cudaFreeHost(pinned_scratch_.in);
+            pinned_scratch_.in = nullptr;
+            pinned_scratch_.in_cap_words = 0;
+            check_cuda(cudaMallocHost(&pinned_scratch_.in, total_words * sizeof(uint64_t)),
+                       "cudaMallocHost open_in");
+            pinned_scratch_.in_cap_words = total_words;
+          }
+          std::memcpy(pinned_scratch_.in, send_flat.data(), total_words * sizeof(uint64_t));
+          send_ptr = pinned_scratch_.in;
+        }
+        check_cuda(cudaMemcpyAsync(pack_scratch_.d_in, send_ptr,
                                    total_words * sizeof(uint64_t),
                                    cudaMemcpyHostToDevice,
                                    stream),
@@ -568,24 +730,20 @@ void OpenCollector::flush(int party, net::Chan& ch) {
                                    cudaMemcpyHostToDevice,
                                    stream),
                    "cudaMemcpyAsync H2D open_unpack");
-        launch_unpack_eff_bits_kernel(pack_scratch_.d_packed, eff, pack_scratch_.d_out,
-                                      total_words, stream);
         if (device_scatter) {
-          // Optional: compute opened values on device (including sign-extension to
-          // the current ring) to avoid the host-side scatter loop. This is usually
-          // only a win when each party has its own GPU; on single-GPU benchmarks,
-          // it can increase contention and inflate comm time.
-          launch_open_add_to_signed_kernel(pack_scratch_.d_in,
-                                           pack_scratch_.d_out,
-                                           pack_scratch_.d_out,
-                                           total_words,
-                                           n_bits,
-                                           proto::ring_mask(),
-                                           stream);
-          const bool beaver_only =
-              (words_by_kind[static_cast<size_t>(OpenKind::kBeaver)] == total_words);
-          if (device_keep_opened && beaver_only) {
-            // Keep opened values device-resident; GPU tasks can consume them via view_device_u64().
+          // Compute opened values on device (including ring sign-extension) to avoid
+          // host-side unpack + scatter.
+          launch_unpack_add_to_signed_kernel(pack_scratch_.d_in,
+                                             pack_scratch_.d_packed,
+                                             eff,
+                                             pack_scratch_.d_out,
+                                             total_words,
+                                             n_bits,
+                                             proto::ring_mask(),
+                                             stream);
+          if (device_keep_opened) {
+            // Keep opened values device-resident; host materialization happens lazily on view().
+            check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize open_scatter");
             opened_flat_buf_.clear();
             opened_device_ptr_ = pack_scratch_.d_out;
             opened_device_words_ = total_words;
@@ -607,6 +765,9 @@ void OpenCollector::flush(int party, net::Chan& ch) {
             opened_from_device = true;
           }
         } else {
+          // Device pack only (host scatter): unpack remote share to host and then add locally.
+          launch_unpack_eff_bits_kernel(pack_scratch_.d_packed, eff, pack_scratch_.d_out,
+                                        total_words, stream);
           check_cuda(cudaMemcpyAsync(other_flat.data(), pack_scratch_.d_out,
                                      total_words * sizeof(uint64_t),
                                      cudaMemcpyDeviceToHost,
@@ -630,7 +791,11 @@ void OpenCollector::flush(int party, net::Chan& ch) {
 #endif
     if (!used_device_pack) {
       const auto t_pack2_0 = std::chrono::steady_clock::now();
-      pack_eff_bits_host_into(send_flat, eff, packed_local);
+      if (pack_format == PackFormat::Bytes) {
+        pack_eff_bytes_host_into(send_flat, eff, packed_local);
+      } else {
+        pack_eff_bits_host_into(send_flat, eff, packed_local);
+      }
       packed_remote.resize(packed_local.size());
       const auto t_pack2_1 = std::chrono::steady_clock::now();
       const auto t_comm4 = std::chrono::steady_clock::now();
@@ -642,8 +807,13 @@ void OpenCollector::flush(int party, net::Chan& ch) {
         if (!packed_local.empty()) ch.send_u64s(packed_local.data(), packed_local.size());
       }
       const auto t_comm5 = std::chrono::steady_clock::now();
+      wire_bytes_sent += static_cast<uint64_t>(packed_local.size()) * sizeof(uint64_t);
       const auto t_pack2_2 = std::chrono::steady_clock::now();
-      unpack_eff_bits_host_into(packed_remote, eff, total_words, other_flat);
+      if (pack_format == PackFormat::Bytes) {
+        unpack_eff_bytes_host_into(packed_remote, eff, total_words, other_flat);
+      } else {
+        unpack_eff_bits_host_into(packed_remote, eff, total_words, other_flat);
+      }
       if (signed_pack && n_bits > 0 && n_bits <= 64) {
         for (auto& w : other_flat) w = sign_extend_to_nbits(w, eff, n_bits);
       }
@@ -652,6 +822,9 @@ void OpenCollector::flush(int party, net::Chan& ch) {
                                            (t_pack2_1 - t_pack2_0) + (t_pack2_3 - t_pack2_2))
                                            .count());
       add_ns(runtime::bench::OnlineTimeKind::OpenComm, t_comm4, t_comm5);
+    }
+    if (used_device_pack) {
+      wire_bytes_sent += static_cast<uint64_t>(packed_words) * sizeof(uint64_t);
     }
   } else {
     // Fallback: no packing.
@@ -665,6 +838,7 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     }
     const auto t_comm5 = std::chrono::steady_clock::now();
     add_ns(runtime::bench::OnlineTimeKind::OpenComm, t_comm4, t_comm5);
+    wire_bytes_sent += static_cast<uint64_t>(total_words) * sizeof(uint64_t);
   }
 
   const auto t_scatter0 = std::chrono::steady_clock::now();
@@ -686,6 +860,7 @@ void OpenCollector::flush(int party, net::Chan& ch) {
   for (size_t k = 0; k < words_by_kind.size(); ++k) {
     stats_.opened_words_by_kind[k] += words_by_kind[k];
   }
+  stats_.wire_bytes_sent += wire_bytes_sent;
   pending_words_ = 0;
   send_flat.clear();
   opened_ready_ = true;

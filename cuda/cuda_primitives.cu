@@ -43,6 +43,48 @@ __global__ void open_add_to_signed_kernel(const uint64_t* __restrict__ local_sha
   out_signed[idx] = v;
 }
 
+__device__ __forceinline__ uint64_t mask_low_bits(int bits) {
+  if (bits <= 0) return 0ull;
+  if (bits >= 64) return ~uint64_t(0);
+  return (uint64_t(1) << bits) - 1;
+}
+
+__global__ void unpack_add_to_signed_kernel(const uint64_t* __restrict__ local_share,
+                                            const uint64_t* __restrict__ packed_remote,
+                                            int eff_bits,
+                                            size_t packed_words,
+                                            uint64_t* __restrict__ out_signed,
+                                            size_t n,
+                                            int ring_bits,
+                                            uint64_t ring_mask) {
+  const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= n) return;
+  if (eff_bits >= 64) {
+    uint64_t v = local_share[idx] + packed_remote[idx];
+    if (ring_bits < 64) {
+      v &= ring_mask;
+      const uint64_t sign_bit = uint64_t(1) << (ring_bits - 1);
+      if (v & sign_bit) v |= ~ring_mask;
+    }
+    out_signed[idx] = v;
+    return;
+  }
+  const size_t bit_off = idx * static_cast<size_t>(eff_bits);
+  const size_t word = bit_off >> 6;
+  const int bit = static_cast<int>(bit_off & 63ull);
+  uint64_t lo = (word < packed_words) ? packed_remote[word] : 0ull;
+  uint64_t hi = (word + 1 < packed_words) ? packed_remote[word + 1] : 0ull;
+  uint64_t v = (bit == 0) ? lo : ((lo >> bit) | (hi << (64 - bit)));
+  v &= mask_low_bits(eff_bits);
+  v = local_share[idx] + v;
+  if (ring_bits < 64) {
+    v &= ring_mask;
+    const uint64_t sign_bit = uint64_t(1) << (ring_bits - 1);
+    if (v & sign_bit) v |= ~ring_mask;
+  }
+  out_signed[idx] = v;
+}
+
 __global__ void beaver_mul_kernel(int party,
                                   const uint64_t* __restrict__ x,
                                   const uint64_t* __restrict__ y,
@@ -814,5 +856,32 @@ extern "C" void launch_open_add_to_signed_kernel(const uint64_t* d_local_share,
   int grid = static_cast<int>((n + kBlock - 1) / kBlock);
   open_add_to_signed_kernel<<<grid, kBlock, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
       d_local_share, d_remote_share, d_out_signed, n, ring_bits, ring_mask);
+#endif
+}
+
+extern "C" void launch_unpack_add_to_signed_kernel(const uint64_t* d_local_share,
+                                                   const uint64_t* d_packed_remote,
+                                                   int eff_bits,
+                                                   uint64_t* d_out_signed,
+                                                   size_t n,
+                                                   int ring_bits,
+                                                   uint64_t ring_mask,
+                                                   void* stream) {
+#ifndef SUF_HAVE_CUDA
+  (void)d_local_share; (void)d_packed_remote; (void)eff_bits; (void)d_out_signed; (void)n;
+  (void)ring_bits; (void)ring_mask; (void)stream;
+#else
+  if (n == 0) return;
+  if (eff_bits <= 0) eff_bits = 1;
+  if (eff_bits > 64) eff_bits = 64;
+  if (ring_bits <= 0) ring_bits = 1;
+  if (ring_bits > 64) ring_bits = 64;
+  unsigned __int128 total_bits = static_cast<unsigned __int128>(n) *
+                                 static_cast<unsigned __int128>(eff_bits);
+  size_t packed_words = static_cast<size_t>((total_bits + 63) / 64);
+  constexpr int kBlock = 256;
+  int grid = static_cast<int>((n + kBlock - 1) / kBlock);
+  unpack_add_to_signed_kernel<<<grid, kBlock, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+      d_local_share, d_packed_remote, eff_bits, packed_words, d_out_signed, n, ring_bits, ring_mask);
 #endif
 }

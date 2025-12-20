@@ -244,14 +244,12 @@ inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t
     throw std::runtime_error("composite_gen_backend_with_masks: r_out size mismatch");
   }
   compiler::CoeffMode coeff_mode = compiler::CoeffMode::kStepDcf;
-  // Auto-select interval LUT mode when:
-  // - the SUF emits payload-only outputs (degree=0)
-  // - there are no boolean outputs (ell=0)
-  // - the backend supports interval LUT evaluation
-  //
-  // This avoids expensive Beaver-based selector networks and makes coeff selection
-  // communication-free (keys-only).
-  if (F.degree == 0 && F.l_out == 0) {
+  // Auto-select interval LUT mode when there are no boolean outputs (ell=0) and
+  // the backend supports interval LUT evaluation. For ell=0, the compiler can
+  // return all arithmetic coefficient words for the active interval as a single
+  // LUT payload and evaluate the polynomial locally (Beaver-free) on the public
+  // masked input `hatx`.
+  if (F.l_out == 0) {
     if (dynamic_cast<proto::PfssIntervalLutExt*>(&backend) != nullptr) {
       coeff_mode = compiler::CoeffMode::kIntervalLut;
     }
@@ -439,16 +437,20 @@ inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t
     out.k0.pred_keys.push_back(kp.k0);
     out.k1.pred_keys.push_back(kp.k1);
   }
-  // Cutpoint predicates for selector network (XOR bits)
-  for (const auto& cut : compiled.coeff.cutpoints_ge) {
-    int bits = (compiled.coeff.eff_bits > 0 && compiled.coeff.eff_bits <= compiled.coeff.n)
-                   ? compiled.coeff.eff_bits
-                   : compiled.coeff.n;
-    auto thr_bits = backend.u64_to_bits_msb(cut, bits);
-    std::vector<proto::u8> payload{1u};
-    auto kp = backend.gen_dcf(bits, thr_bits, payload);
-    out.k0.cut_pred_keys.push_back(kp.k0);
-    out.k1.cut_pred_keys.push_back(kp.k1);
+  // Cutpoint predicates for selector network (XOR bits). Only required when
+  // the caller consumes boolean outputs (ell > 0); arithmetic outputs are
+  // evaluated Beaver-free using public-hatx polynomials.
+  if (compiled.ell > 0) {
+    for (const auto& cut : compiled.coeff.cutpoints_ge) {
+      int bits = (compiled.coeff.eff_bits > 0 && compiled.coeff.eff_bits <= compiled.coeff.n)
+                     ? compiled.coeff.eff_bits
+                     : compiled.coeff.n;
+      auto thr_bits = backend.u64_to_bits_msb(cut, bits);
+      std::vector<proto::u8> payload{1u};
+      auto kp = backend.gen_dcf(bits, thr_bits, payload);
+      out.k0.cut_pred_keys.push_back(kp.k0);
+      out.k1.cut_pred_keys.push_back(kp.k1);
+    }
   }
 
   if (compiled.coeff.mode == compiler::CoeffMode::kIntervalLut) {
@@ -521,31 +523,24 @@ inline CompositeKeyPair composite_gen_backend_with_masks(const suf::SUF<uint64_t
     }
   }
 
-  // Triples: bool DAG + selectors + Horner
+  // Triples: bool DAG + selector network + boolean blending.
   size_t bool_mul_max = 0;
   for (const auto& piece : compiled.bool_per_piece) {
     size_t cnt = 0;
     for (const auto& b : piece) cnt += count_bool_mul(b);
     bool_mul_max = std::max(bool_mul_max, cnt);
   }
-  size_t horner_mul = static_cast<size_t>(compiled.r) * static_cast<size_t>(compiled.degree);
-  size_t cut_count = 0;
-  size_t piece_count = 0;
-  if (compiled.coeff.mode == compiler::CoeffMode::kStepDcf) {
-    cut_count = compiled.coeff.cutpoints_ge.size();
-    piece_count = cut_count + 1;
-  } else {
-    piece_count = compiled.coeff.intervals.size();
-  }
-  size_t conv_bits = compiled.pred.queries.size() + (compiled.coeff.mode == compiler::CoeffMode::kStepDcf ? cut_count : 0);
-  size_t selector_chain_mul = (compiled.coeff.mode == compiler::CoeffMode::kStepDcf && cut_count > 0) ? (cut_count - 1) : 0;
-  size_t coeff_select_mul = (compiled.coeff.mode == compiler::CoeffMode::kStepDcf)
-                                ? (piece_count * static_cast<size_t>(compiled.coeff.out_words))
-                                : 0;
-  size_t bool_select_mul = (compiled.coeff.mode == compiler::CoeffMode::kStepDcf)
-                               ? (piece_count * static_cast<size_t>(compiled.ell))
-                               : 0;
-  size_t need = (conv_bits + selector_chain_mul + coeff_select_mul + bool_select_mul + horner_mul) * batch_N;
+  // Horner is evaluated locally on public `hatx` (compile-time coefficient shift),
+  // so no 64-bit Beaver triples are needed for arithmetic outputs.
+  const size_t ell = static_cast<size_t>(std::max(0, compiled.ell));
+  const size_t cut_count = (compiled.ell > 0) ? compiled.coeff.cutpoints_ge.size() : 0;
+  const size_t piece_count = (cut_count > 0) ? (cut_count + 1) : (compiled.ell > 0 ? 1 : 0);
+  const size_t selector_chain_mul = (cut_count > 0) ? (cut_count - 1) : 0;
+  const size_t bool_b2a_mul = piece_count * ell;
+  const size_t bool_select_mul = piece_count * ell;
+  const size_t need =
+      (compiled.ell > 0 ? (cut_count + selector_chain_mul + bool_b2a_mul + bool_select_mul) : 0) *
+      batch_N;
   out.k0.triples.resize(need);
   out.k1.triples.resize(need);
   for (size_t i = 0; i < need; i++) {
@@ -1111,14 +1106,13 @@ inline std::vector<uint64_t> composite_eval_share_backend(int party,
     }
   } else {
     int stride = compiled.degree + 1;
-    uint64_t rin = r_in_at(k, 0);
-    uint64_t x_share = (party == 0) ? proto::sub_mod(hatx, rin)
-                                    : proto::sub_mod(0ull, rin);
     for (int j = 0; j < compiled.r; j++) {
       uint64_t acc = coeff[static_cast<size_t>(j * stride + compiled.degree)];
       for (int d = compiled.degree - 1; d >= 0; d--) {
-        acc = mul.mul(acc, x_share);
-        acc = proto::add_mod(acc, coeff[static_cast<size_t>(j * stride + d)]);
+        // Coefficients are compiled for the public masked input `hatx` (shifted by r_in at
+        // compile time), so Horner is local and Beaver-free.
+        acc = proto::add_mod(proto::mul_mod(acc, hatx),
+                             coeff[static_cast<size_t>(j * stride + d)]);
       }
       ys[static_cast<size_t>(j)] = proto::add_mod(acc, k.r_out_share[static_cast<size_t>(j)]);
     }
@@ -1150,12 +1144,17 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
   out.bool_share.resize(N * static_cast<size_t>(compiled.ell), 0);
   auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(&backend);
   bool want_device_out = staged && in.device_outputs;
+  const bool have_host_hatx = (in.hatx != nullptr);
+  if (!have_host_hatx && !(staged && in.hatx_device)) {
+    throw std::runtime_error("composite_eval_batch_backend: missing host hatx (and no device hatx)");
+  }
   if (auto* ref = dynamic_cast<proto::ReferenceBackend*>(&backend)) {
     // Benchmarking may request the full PFSS pipeline even when using the
     // deterministic reference backend; in that case, do not short-circuit.
     if (std::getenv("SUF_FORCE_PFSS")) {
       // fall through to PFSS path below.
     } else {
+    if (!in.hatx) throw std::runtime_error("composite_eval_batch_backend: missing host hatx for ReferenceBackend");
     // Deterministic path: evaluate SUF ref and mask with r_out; booleans additive on party0.
     for (size_t i = 0; i < N; ++i) {
       uint64_t x_plain = proto::sub_mod(in.hatx[i], compiled.r_in);
@@ -1188,10 +1187,8 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     return out;
     }
   }
-  if (compiled.coeff.mode == compiler::CoeffMode::kIntervalLut) {
-    if (compiled.degree != 0 || compiled.ell != 0) {
-      throw std::runtime_error("composite_eval_batch_backend: interval LUT mode currently supports degree=0, ell=0 only");
-    }
+  if (compiled.coeff.mode == compiler::CoeffMode::kIntervalLut &&
+      compiled.degree == 0 && compiled.ell == 0) {
     auto* lut_backend = dynamic_cast<proto::PfssIntervalLutExt*>(&backend);
     if (!lut_backend) {
       throw std::runtime_error("composite_eval_batch_backend: interval LUT selected but backend lacks PfssIntervalLutExt");
@@ -1215,6 +1212,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
           static_cast<int>(out_words),
           coeff_flat.data());
     } else {
+      if (!in.hatx) throw std::runtime_error("composite_eval_batch_backend: missing host hatx for interval LUT");
       std::vector<uint64_t> xs_vec(in.hatx, in.hatx + N);
       const size_t key_bytes = k.coeff_keys[0].bytes.size();
       std::vector<uint8_t> keys_flat(N * key_bytes);
@@ -1265,7 +1263,6 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     }
     // Evaluate primitive predicate bits as additive-u64 shares (0/1).
     std::vector<uint64_t> pred_add(compiled.pred.queries.size() * N, 0ull);
-    std::vector<uint64_t> xs_vec(in.hatx, in.hatx + N);
     for (size_t qi = 0; qi < compiled.pred.queries.size(); ++qi) {
       const bool prof = ::runtime::bench::online_profiling_enabled();
       int bits_in = (compiled.pred.queries[qi].kind == compiler::RawPredKind::kLtU64)
@@ -1285,6 +1282,8 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
                                                    /*out_bytes=*/8,
                                                    outs_flat.data());
       } else {
+        if (!in.hatx) throw std::runtime_error("composite_eval_batch_backend: missing host hatx for AddU64 pred");
+        std::vector<uint64_t> xs_vec(in.hatx, in.hatx + N);
         std::vector<uint8_t> keys_flat(N * key_bytes);
         for (size_t i = 0; i < N; ++i) {
           std::memcpy(keys_flat.data() + i * key_bytes, k.pred_keys[qi].bytes.data(), key_bytes);
@@ -1634,24 +1633,21 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     if (dbg) std::cerr << "[party " << party << "] cut eval done\n";
   }
 
-  // Step-DCF coefficient selection (Beaver-free):
-  //   coeff(x) = base + total_delta - Σ_i DCF_i(x),
-  // where DCF_i outputs delta_i when x < cutpoint_i.
   const size_t out_words = static_cast<size_t>(compiled.coeff.out_words);
   if (out_words == 0) {
     throw std::runtime_error("composite_eval_batch_backend: coeff out_words must be >0");
   }
-  if (compiled.coeff.mode != compiler::CoeffMode::kStepDcf) {
-    throw std::runtime_error("composite_eval_batch_backend: unexpected coeff mode (expected step-DCF)");
-  }
-  if (k.base_coeff_share.size() != out_words || k.total_delta_share.size() != out_words) {
-    throw std::runtime_error("composite_eval_batch_backend: base/total coeff share size mismatch");
-  }
-  if (k.coeff_keys.size() != k.cut_pred_keys.size()) {
-    throw std::runtime_error("composite_eval_batch_backend: coeff_keys size mismatch vs cut_pred_keys");
-  }
   std::vector<uint64_t> coeff_selected_soa(out_words * N, 0);
-  {
+  if (compiled.coeff.mode == compiler::CoeffMode::kStepDcf) {
+    // Step-DCF coefficient selection (Beaver-free):
+    //   coeff(x) = base + total_delta - Σ_i DCF_i(x),
+    // where DCF_i outputs delta_i when x < cutpoint_i.
+    if (k.base_coeff_share.size() != out_words || k.total_delta_share.size() != out_words) {
+      throw std::runtime_error("composite_eval_batch_backend: base/total coeff share size mismatch");
+    }
+    if (k.coeff_keys.size() != compiled.coeff.cutpoints_ge.size()) {
+      throw std::runtime_error("composite_eval_batch_backend: coeff_keys size mismatch vs cutpoints");
+    }
     std::vector<uint64_t> base_plus_total(out_words, 0);
     for (size_t j = 0; j < out_words; ++j) {
       base_plus_total[j] = proto::add_mod(k.base_coeff_share[j], k.total_delta_share[j]);
@@ -1705,22 +1701,63 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
         }
       }
     }
+  } else if (compiled.coeff.mode == compiler::CoeffMode::kIntervalLut) {
+    if (compiled.ell != 0) {
+      throw std::runtime_error("composite_eval_batch_backend: interval LUT coeff mode requires ell==0");
+    }
+    auto* lut_backend = dynamic_cast<proto::PfssIntervalLutExt*>(&backend);
+    if (!lut_backend) {
+      throw std::runtime_error("composite_eval_batch_backend: interval LUT selected but backend lacks PfssIntervalLutExt");
+    }
+    if (k.coeff_keys.empty() || k.coeff_keys[0].bytes.empty()) {
+      throw std::runtime_error("composite_eval_batch_backend: interval LUT key missing");
+    }
+    if (k.coeff_keys.size() != 1) {
+      throw std::runtime_error("composite_eval_batch_backend: interval LUT expects exactly 1 coeff key");
+    }
+    std::vector<uint64_t> coeff_aos(N * out_words, 0);
+    const bool prof = ::runtime::bench::online_profiling_enabled();
+    const auto t_eval0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+    if (staged && in.hatx_device) {
+      staged->eval_interval_lut_many_device_broadcast(
+          k.coeff_keys[0].bytes.size(),
+          k.coeff_keys[0].bytes.data(),
+          reinterpret_cast<const uint64_t*>(in.hatx_device),
+          N,
+          static_cast<int>(out_words),
+          coeff_aos.data());
+    } else {
+      const auto& xs = ensure_xs_vec();
+      const size_t key_bytes = k.coeff_keys[0].bytes.size();
+      std::vector<uint8_t> keys_flat(N * key_bytes);
+      for (size_t i = 0; i < N; ++i) {
+        std::memcpy(keys_flat.data() + i * key_bytes, k.coeff_keys[0].bytes.data(), key_bytes);
+      }
+      lut_backend->eval_interval_lut_many_u64(key_bytes, keys_flat.data(), xs,
+                                             static_cast<int>(out_words), coeff_aos.data());
+    }
+    if (prof) {
+      const auto t_eval1 = std::chrono::steady_clock::now();
+      ::runtime::bench::add_online_ns(
+          ::runtime::bench::OnlineTimeKind::PfssCoeffEval,
+          static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t_eval1 - t_eval0).count()));
+    }
+    for (size_t i = 0; i < N; ++i) {
+      const uint64_t* row = coeff_aos.data() + i * out_words;
+      for (size_t j = 0; j < out_words; ++j) {
+        coeff_selected_soa[j * N + i] = row[j];
+      }
+    }
+  } else {
+    throw std::runtime_error("composite_eval_batch_backend: unknown coeff mode");
   }
   if (dbg) std::cerr << "[party " << party << "] coeff eval done\n";
 
-  // Use offline-provisioned triples from the key. These are sized in keygen
-  // per batch_N to cover selectors, bool DAG, and Horner.
-  if (k.triples.empty()) {
-    throw std::runtime_error("composite_eval_batch_backend: missing Beaver 64-bit triples in key");
-  }
-  proto::BeaverMul64 mul_single{party, ch, k.triples, 0};
   // Thread-local scratch to reduce allocation churn in hot batched paths.
   thread_local std::vector<uint64_t> sel_mul_x;
   thread_local std::vector<uint64_t> sel_mul_y;
   thread_local std::vector<uint64_t> sel_mul_prod;
   thread_local std::vector<uint64_t> horner_acc;
-  thread_local std::vector<uint64_t> horner_y;
-  thread_local std::vector<uint64_t> horner_prod;
   const proto::BeaverTripleBitShare* bit_ptr =
       k.bit_triples.empty() ? nullptr : k.bit_triples.data();
   if (dbg) std::cerr << "[party " << party << "] enter packed composite path\n";
@@ -1731,13 +1768,26 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     // For GPU-backed end-to-end runs we strongly prefer large blocks to reduce
     // the number of Beaver/open rounds (a major bottleneck vs Sigma).
     // Keep CPU default smaller to avoid large transient allocations.
-    size_t v = (staged && in.hatx_device) ? 65536 : 16384;
+    size_t v = (staged && in.hatx_device) ? 131072 : 16384;
     if (const char* env = std::getenv("SUF_COMPOSITE_BLOCK")) {
       long long x = std::atoll(env);
       if (x > 0) v = static_cast<size_t>(x);
     }
+    // Cap the block size based on an approximate scratch budget for selector tables
+    // (pieces * block_sz words). This is intentionally generous on GPU to allow
+    // large blocks and reduce per-block Beaver rounds.
+    size_t budget_words = (staged && in.hatx_device) ? (1ull << 24) : (1ull << 23);  // 128MB/64MB
+    if (const char* env = std::getenv("SUF_COMPOSITE_SCRATCH_MB")) {
+      long long mb = std::atoll(env);
+      if (mb <= 0) budget_words = 0;
+      else budget_words = (static_cast<size_t>(mb) * size_t{1024} * size_t{1024}) / sizeof(uint64_t);
+    }
+    const size_t pieces = std::max<size_t>(1, k.cut_pred_keys.size() + 1);
+    if (budget_words > 0 && pieces > 0) {
+      v = std::min(v, std::max<size_t>(1, budget_words / pieces));
+    }
     const size_t kMin = 64;
-    const size_t kMax = 65536;
+    const size_t kMax = 262144;
     v = std::max(v, kMin);
     v = std::min(v, kMax);
     v = std::min(v, std::max<size_t>(1, N));
@@ -1751,14 +1801,12 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     const int degree = compiled.degree;
     const size_t r_words = static_cast<size_t>(compiled.r);
     const size_t stride = static_cast<size_t>(degree + 1);
-    std::vector<uint64_t> x_share_vec;
+    std::vector<uint64_t> hatx_vec;
     for (size_t blk = 0; blk < N; blk += block_sz) {
       const size_t bsize = std::min(block_sz, N - blk);
-      x_share_vec.resize(bsize);
+      hatx_vec.resize(bsize);
       for (size_t off = 0; off < bsize; ++off) {
-        uint64_t rin = r_in_at(k, blk + off);
-        x_share_vec[off] = (party == 0) ? proto::sub_mod(in.hatx[blk + off], rin)
-                                        : proto::sub_mod(0ull, rin);
+        hatx_vec[off] = proto::norm_mod(in.hatx[blk + off]);
       }
       if (degree <= 0) {
         for (size_t j = 0; j < r_words; ++j) {
@@ -1772,7 +1820,6 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       } else {
         const size_t horner_n = r_words * bsize;
         horner_acc.resize(horner_n);
-        horner_y.resize(horner_n);
         for (size_t j = 0; j < r_words; ++j) {
           const size_t base = j * stride;
           for (size_t off = 0; off < bsize; ++off) {
@@ -1780,18 +1827,14 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
                 coeff_selected_soa[(base + static_cast<size_t>(degree)) * N + (blk + off)];
           }
         }
-        for (size_t j = 0; j < r_words; ++j) {
-          uint64_t* ydst = horner_y.data() + j * bsize;
-          for (size_t off = 0; off < bsize; ++off) ydst[off] = x_share_vec[off];
-        }
         for (int d = degree - 1; d >= 0; --d) {
-          mul_single.mul_batch(horner_acc, horner_y, horner_prod);
           for (size_t j = 0; j < r_words; ++j) {
             const size_t base = j * stride;
             for (size_t off = 0; off < bsize; ++off) {
-              horner_acc[j * bsize + off] =
-                  proto::add_mod(horner_prod[j * bsize + off],
-                                 coeff_selected_soa[(base + static_cast<size_t>(d)) * N + (blk + off)]);
+              const uint64_t acc = horner_acc[j * bsize + off];
+              const uint64_t h = hatx_vec[off];
+              const uint64_t c = coeff_selected_soa[(base + static_cast<size_t>(d)) * N + (blk + off)];
+              horner_acc[j * bsize + off] = proto::add_mod(proto::mul_mod(acc, h), c);
             }
           }
         }
@@ -1804,9 +1847,15 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
         }
       }
     }
-    if (dbg) std::cerr << "[party " << party << "] exit horner-only path mul_used=" << mul_single.idx << "\n";
+    if (dbg) std::cerr << "[party " << party << "] exit horner-only path (beaver-free)\n";
     return out;
   }
+
+  // Use offline-provisioned triples from the key for selector network and boolean blending.
+  if (k.triples.empty()) {
+    throw std::runtime_error("composite_eval_batch_backend: missing Beaver 64-bit triples in key");
+  }
+  proto::BeaverMul64 mul_single{party, ch, k.triples, 0};
 
   if (k.use_packed_pred && !pred_masks.empty() && k.packed_pred_words > 0) {
     const size_t block_sz = read_block_sz(N);
@@ -1814,7 +1863,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     size_t stride = compiled.degree + 1;
     std::vector<uint64_t> selectors_block(pieces * block_sz, 0);
     std::vector<uint64_t> bool_block;
-    std::vector<uint64_t> x_share_vec;
+    std::vector<uint64_t> hatx_vec;
     for (size_t blk = 0; blk < N; blk += block_sz) {
       size_t bsize = std::min(block_sz, N - blk);
       if (compiled.ell > 0) {
@@ -1856,12 +1905,10 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
         }
         if (dbg) std::cerr << "[party " << party << "] block " << blk << " bools done mul_idx=" << mul_single.idx << "\n";
       }
-      // Batched Horner over the block to amortize Beaver rounds.
-      x_share_vec.resize(bsize);
+      // Batched Horner over the block (Beaver-free; polynomials are in public hatx).
+      hatx_vec.resize(bsize);
       for (size_t off = 0; off < bsize; off++) {
-        uint64_t rin = r_in_at(k, blk + off);
-        x_share_vec[off] = (party == 0) ? proto::sub_mod(in.hatx[blk + off], rin)
-                                        : proto::sub_mod(0ull, rin);
+        hatx_vec[off] = proto::norm_mod(in.hatx[blk + off]);
       }
       const size_t r_words = static_cast<size_t>(compiled.r);
       if (compiled.degree <= 0) {
@@ -1877,7 +1924,6 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
         const int degree = compiled.degree;
         const size_t horner_n = r_words * bsize;
         horner_acc.resize(horner_n);
-        horner_y.resize(horner_n);
         for (size_t j = 0; j < r_words; ++j) {
           const size_t base = j * stride;
           for (size_t off = 0; off < bsize; ++off) {
@@ -1885,20 +1931,14 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
                 coeff_selected_soa[(base + static_cast<size_t>(degree)) * N + (blk + off)];
           }
         }
-        for (size_t j = 0; j < r_words; ++j) {
-          uint64_t* ydst = horner_y.data() + j * bsize;
-          for (size_t off = 0; off < bsize; ++off) {
-            ydst[off] = x_share_vec[off];
-          }
-        }
         for (int d = degree - 1; d >= 0; --d) {
-          mul_single.mul_batch(horner_acc, horner_y, horner_prod);
           for (size_t j = 0; j < r_words; ++j) {
             const size_t base = j * stride;
             for (size_t off = 0; off < bsize; ++off) {
-              horner_acc[j * bsize + off] =
-                  proto::add_mod(horner_prod[j * bsize + off],
-                                 coeff_selected_soa[(base + static_cast<size_t>(d)) * N + (blk + off)]);
+              const uint64_t acc = horner_acc[j * bsize + off];
+              const uint64_t h = hatx_vec[off];
+              const uint64_t c = coeff_selected_soa[(base + static_cast<size_t>(d)) * N + (blk + off)];
+              horner_acc[j * bsize + off] = proto::add_mod(proto::mul_mod(acc, h), c);
             }
           }
         }
@@ -2043,13 +2083,10 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       }
     }
 
-    // Batched Horner over the block.
-    std::vector<uint64_t> x_share_vec(bsize);
+    // Batched Horner over the block (Beaver-free; polynomials are in public hatx).
+    std::vector<uint64_t> hatx_vec(bsize);
     for (size_t off = 0; off < bsize; off++) {
-      size_t i = blk + off;
-      uint64_t rin = r_in_at(k, i);
-      x_share_vec[off] = (party == 0) ? proto::sub_mod(in.hatx[i], rin)
-                                      : proto::sub_mod(0ull, rin);
+      hatx_vec[off] = proto::norm_mod(in.hatx[blk + off]);
     }
     const size_t r_words = static_cast<size_t>(compiled.r);
     if (compiled.degree <= 0) {
@@ -2065,7 +2102,6 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       const int degree = compiled.degree;
       const size_t horner_n = r_words * bsize;
       horner_acc.resize(horner_n);
-      horner_y.resize(horner_n);
       for (size_t j = 0; j < r_words; ++j) {
         const size_t base = j * stride;
         for (size_t off = 0; off < bsize; ++off) {
@@ -2073,20 +2109,14 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
               coeff_selected_soa[(base + static_cast<size_t>(degree)) * N + (blk + off)];
         }
       }
-      for (size_t j = 0; j < r_words; ++j) {
-        uint64_t* ydst = horner_y.data() + j * bsize;
-        for (size_t off = 0; off < bsize; ++off) {
-          ydst[off] = x_share_vec[off];
-        }
-      }
       for (int d = degree - 1; d >= 0; --d) {
-        mul_single.mul_batch(horner_acc, horner_y, horner_prod);
         for (size_t j = 0; j < r_words; ++j) {
           const size_t base = j * stride;
           for (size_t off = 0; off < bsize; ++off) {
-            horner_acc[j * bsize + off] =
-                proto::add_mod(horner_prod[j * bsize + off],
-                               coeff_selected_soa[(base + static_cast<size_t>(d)) * N + (blk + off)]);
+            const uint64_t acc = horner_acc[j * bsize + off];
+            const uint64_t h = hatx_vec[off];
+            const uint64_t c = coeff_selected_soa[(base + static_cast<size_t>(d)) * N + (blk + off)];
+            horner_acc[j * bsize + off] = proto::add_mod(proto::mul_mod(acc, h), c);
           }
         }
       }

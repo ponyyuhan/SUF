@@ -120,15 +120,19 @@ public:
       if (it == packed_.end()) throw std::runtime_error("SigmaFastBackend: unknown key");
       if (it->second.in_bits != in_bits) throw std::runtime_error("SigmaFastBackend: in_bits mismatch");
       const auto& thr = it->second.thresholds_masked.empty() ? it->second.thresholds : it->second.thresholds_masked;
-      std::vector<u64> cmp_masks(static_cast<size_t>(out_words) * (blk_end - blk_start), 0);
-      build_mask_block_words(xs_u64, blk_start, blk_end, thr, mask, static_cast<size_t>(out_words), cmp_masks.data());
+      const size_t n_blk = blk_end - blk_start;
+      const size_t cmp_words = static_cast<size_t>(out_words) * n_blk;
+      static thread_local std::vector<u64> cmp_masks_tls;
+      cmp_masks_tls.resize(cmp_words);
+      build_mask_block_words(xs_u64, blk_start, blk_end, thr, mask, static_cast<size_t>(out_words), cmp_masks_tls.data());
       // Apply keystream/masking per element.
-      std::vector<u64> ks(static_cast<size_t>(out_words), 0);
+      static thread_local std::vector<u64> ks_tls;
+      ks_tls.resize(static_cast<size_t>(out_words));
       for (size_t idx = blk_start; idx < blk_end; idx++) {
-        fill_keystream_words(it->second.aes0, (id << 32) ^ static_cast<u64>(idx), ks.data(), ks.size());
+        fill_keystream_words(it->second.aes0, (id << 32) ^ static_cast<u64>(idx), ks_tls.data(), ks_tls.size());
         for (int w = 0; w < out_words; w++) {
-          u64 cm = cmp_masks[(idx - blk_start) * static_cast<size_t>(out_words) + static_cast<size_t>(w)];
-          u64 share = ks[static_cast<size_t>(w)];
+          u64 cm = cmp_masks_tls[(idx - blk_start) * static_cast<size_t>(out_words) + static_cast<size_t>(w)];
+          u64 share = ks_tls[static_cast<size_t>(w)];
           if (params_.xor_bitmask && party == 1) share ^= cm;
           if (!params_.xor_bitmask && party == 1) share = cm;
           if (!params_.xor_bitmask && party == 0) share = 0ull;
@@ -205,16 +209,17 @@ public:
       if (intervals == 0) continue;
       const auto& bounds = ie.boundaries_masked;
       size_t cut_words = bounds.empty() ? 0 : ((bounds.size() + 63) / 64);
-      std::vector<u64> cmp_masks(cut_words * (blk_end - blk_start), 0);
+      static thread_local std::vector<u64> cmp_masks_tls;
+      cmp_masks_tls.resize(cut_words * (blk_end - blk_start));
       if (cut_words > 0) {
         build_mask_block_words(xs_u64, blk_start, blk_end, bounds, ie.mask,
-                               cut_words, cmp_masks.data());
+                               cut_words, cmp_masks_tls.data());
       }
       for (size_t idx_i = blk_start; idx_i < blk_end; idx_i++) {
         size_t local = idx_i - blk_start;
         size_t interval_idx = intervals - 1;
         if (cut_words > 0) {
-          const u64* base = cmp_masks.data() + local * cut_words;
+          const u64* base = cmp_masks_tls.data() + local * cut_words;
           for (size_t b = 0; b < bounds.size(); b++) {
             size_t w = b >> 6;
             size_t bit = b & 63;

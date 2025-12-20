@@ -1414,7 +1414,7 @@ void attention_forward(const AttentionConfig& cfg,
       auto it = cache_map.find(key);
       if (it == cache_map.end()) {
         std::mt19937_64 rng_relu(0x72656c75ull);  // "relu"
-        auto suf_gate = gates::make_relu_suf_u64();
+        auto suf_gate = gates::make_relu_value_suf_u64();
         std::vector<uint64_t> r_out(static_cast<size_t>(suf_gate.r_out), rng_relu());
         auto kp = gates::composite_gen_backend_with_masks(
             suf_gate,
@@ -1439,7 +1439,7 @@ void attention_forward(const AttentionConfig& cfg,
     }
 
     std::mt19937_64 rng_relu(0x72656c75ull);  // "relu"
-    auto suf_gate = gates::make_relu_suf_u64();
+    auto suf_gate = gates::make_relu_value_suf_u64();
     std::vector<uint64_t> r_out(static_cast<size_t>(suf_gate.r_out), rng_relu());
     auto kp = gates::composite_gen_backend_with_masks(
         suf_gate,
