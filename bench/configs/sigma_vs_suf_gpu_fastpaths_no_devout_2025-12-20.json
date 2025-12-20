@@ -1,0 +1,24 @@
+{
+  "models": ["bert-tiny", "bert-base", "bert-large", "gpt2", "gpt-neo-1.3b"],
+  "seq_lens": [128],
+  "batch_sizes": [1],
+  "backends": ["gpu"],
+  "n_iters": 2,
+  "sigma_root": "external/sigma_ezpc/GPU-MPC/experiments/sigma",
+  "sigma_binary": "sigma",
+  "sigma_cpu_threads": 16,
+  "results_dir": "bench/results/current_compare/2025-12-20_gpu_fastpaths_no_devout",
+  "suf_binary": "build_ninja/bench_suf_transformer",
+  "suf_extra_args": ["--open-pack", "1", "--per-element-masks", "0"],
+  "suf_env": {
+    "SUF_FORCE_PFSS": "1",
+    "SUF_BENCH_PROFILE": "1",
+    "SUF_BENCH_CPU_SAMPLER": "1",
+    "SUF_OPEN_PACK_MIN_SAVINGS_PCT": "10",
+    "SUF_BENCH_NET_RING_POW2": "25",
+    "SUF_BENCH_PFSS_RING_POW2": "27",
+    "SUF_PFSS_DEVICE_OUTPUTS": "0"
+  },
+  "notes": "GPU run with device-pipeline hooks + GPU fastpaths; PFSS device output staging disabled for now (avoids pageable H2D stage_out). SIGMA logs copied from 2025-12-19_current_gpu."
+}
+

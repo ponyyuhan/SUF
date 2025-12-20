@@ -840,6 +840,27 @@ int main() {
       std::cerr << "Softmax device-only mismatch at idx " << i
                 << " dev=" << recon_dev[i]
                 << " ref=" << recon_ref_probs[i] << "\n";
+      auto dump_diff = [&](const char* label,
+                           const std::vector<uint64_t>& ga,
+                           const std::vector<uint64_t>& gb,
+                           const std::vector<uint64_t>& ca,
+                           const std::vector<uint64_t>& cb) {
+        auto gsum = recon_stage(ga, gb);
+        auto csum = recon_stage(ca, cb);
+        for (size_t j = 0; j < gsum.size(); j++) {
+          if (gsum[j] != csum[j]) {
+            std::cerr << "[dbg] device-only " << label << " mismatch at idx " << j
+                      << " dev=" << gsum[j]
+                      << " ref=" << csum[j] << "\n";
+            return;
+          }
+        }
+      };
+      dump_diff("exp", d0_res.exp_qf, d1_res.exp_qf, c0_res.exp_qf, c1_res.exp_qf);
+      dump_diff("sum", d0_res.sum_qf, d1_res.sum_qf, c0_res.sum_qf, c1_res.sum_qf);
+      dump_diff("inv", d0_res.inv_qf, d1_res.inv_qf, c0_res.inv_qf, c1_res.inv_qf);
+      dump_diff("prod", d0_res.prod_q2f, d1_res.prod_q2f, c0_res.prod_q2f, c1_res.prod_q2f);
+      dump_diff("prob_qf", d0_res.prob_qf, d1_res.prob_qf, c0_res.prob_qf, c1_res.prob_qf);
       return 1;
     }
   }

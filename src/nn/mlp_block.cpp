@@ -392,6 +392,11 @@ void mlp_forward(const MLPConfig& cfg,
     // Share a single PFSS batch for coeff + trunc to maximize per-phase batching.
     R.pfss_trunc = &pe->pfss_coeff_batch();
     R.opens = &pe->open_collector();
+    // Safe overlap only when PFSS uses a dedicated channel (override) or a dedicated net channel.
+    R.overlap_pfss_open = (pfss_chan_override != nullptr) || (ctx && ctx->pfss_net_chan != nullptr);
+    if (ctx) {
+      R.cuda_stream = ctx->cuda_stream();
+    }
     runtime::PfssSuperBatch::Limits pfss_lim;
     pfss_lim.max_pending_jobs = 1ull << 13;
     pfss_lim.max_pending_hatx_words = 1ull << 21;
@@ -407,6 +412,10 @@ void mlp_forward(const MLPConfig& cfg,
     }
     pe->pfss_coeff_batch().set_limits(pfss_lim);
     pe->pfss_trunc_batch().set_limits(pfss_lim);
+    if (ctx && ctx->uses_gpu_backend() && ctx->pfss_gpu_stager) {
+      pe->pfss_coeff_batch().set_gpu_stager(ctx->pfss_gpu_stager);
+      pe->pfss_trunc_batch().set_gpu_stager(ctx->pfss_gpu_stager);
+    }
     runtime::OpenCollector::Limits open_lim;
     open_lim.max_pending_words = 1ull << 23;
     pe->open_collector().set_limits(open_lim);

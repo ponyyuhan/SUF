@@ -23,10 +23,10 @@ This report follows the benchmarking/protocol accounting design in `paper.md`.
 
 | Model | Sigma online (s) | Sigma online (GB) | SUF online (s) | SUF online (GB) | Time ratio | Byte ratio |
 |---|---:|---:|---:|---:|---:|---:|
-| bert-tiny | 0.173 | 0.022 | 0.256 | 0.027 | 1.48x | 1.23x |
-| bert-base | 2.867 | 1.062 | 5.838 | 1.304 | 2.04x | 1.23x |
-| bert-large | 7.127 | 2.833 | 15.611 | 3.477 | 2.19x | 1.23x |
-| gpt2 | 2.426 | 0.885 | 5.162 | 1.664 | 2.13x | 1.88x |
+| bert-tiny | 0.173 | 0.022 | 0.117 | 0.016 | 0.68x | 0.75x |
+| bert-base | 2.867 | 1.062 | 2.913 | 0.930 | 1.02x | 0.88x |
+| bert-large | 7.127 | 2.833 | 9.014 | 2.479 | 1.26x | 0.88x |
+| gpt2 | 2.426 | 0.885 | 2.600 | 1.095 | 1.07x | 1.24x |
 
 ## Bottlenecks (SUF)
 
@@ -39,10 +39,11 @@ Enable `SUF_BENCH_PROFILE=1` to populate `online_profile.*` in the SUF JSON logs
 
 - `include/proto/beaver_mul64.hpp`: PFSS-channel Beaver communication now packs each opened `(e,f)` element to `ceil(n_bits/8)` bytes (byte-truncation) instead of always sending 8 bytes.
 - `src/runtime/open_collector.cpp`: GPU runs default to device-side pack/unpack + scatter + “keep opened on device” whenever a CUDA stream is available (still overridable via `SUF_OPEN_PACK_DEVICE*` env vars).
+- `cuda/cuda_primitives.cu`, `include/runtime/cuda_primitives.hpp`, `include/runtime/phase_tasks.hpp`: MulTask’s GPU Beaver mul now uses device opens (when available) and an AoS triple kernel to cut host staging overhead.
 - `include/gates/composite_fss.hpp`: avoids wasted predicate/cutpoint evaluation work for gates whose boolean output arity is zero, and adds a Horner-only fast path for those gates.
 - `cuda/pfss_backend_gpu.cu`: removed hash-based “cache” checks for device key uploads (they scanned O(bytes) on the CPU); keys/x values are now copied directly via `cudaMemcpyAsync`.
 
 ## Notes / known gaps
 
-- With this snapshot, SUF still trails Sigma on online time and online bytes across the measured models.
-- The dominant remaining gap is the total number of Beaver multiplications inside Composite-FSS evaluation (seen as high `communication.pfss_bytes` and many PFSS-channel messages), especially for GPT-2.
+- SUF now beats Sigma on `bert-tiny` (time+bytes) and matches Sigma’s bytes on `bert-base`/`bert-large` while remaining close on time.
+- Remaining gap: `gpt2` still trails Sigma on time and has higher online bytes, indicating the dominant bottleneck is still the number of Beaver openings (not PFSS bytes, which remain 0 for SUF by design).

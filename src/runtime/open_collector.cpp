@@ -398,7 +398,10 @@ void OpenCollector::flush(int party, net::Chan& ch) {
   const bool device_pack = env_flag_enabled_default("SUF_OPEN_PACK_DEVICE", have_cuda_stream);
   const bool device_scatter = env_flag_enabled_default("SUF_OPEN_PACK_DEVICE_SCATTER", have_cuda_stream);
   const bool device_keep_opened = env_flag_enabled_default("SUF_OPEN_PACK_DEVICE_KEEP_OPENED", have_cuda_stream);
-  size_t device_min_words = have_cuda_stream ? (1ull << 15) : (1ull << 18);
+  // Default to enabling device packing even for moderately small opens on GPU:
+  // many non-linear sub-protocols (e.g., reciprocal/rsqrt) issue small opens
+  // repeatedly, and host packing becomes a bottleneck.
+  size_t device_min_words = have_cuda_stream ? (1ull << 12) : (1ull << 18);
   if (const char* env = std::getenv("SUF_OPEN_PACK_DEVICE_MIN_WORDS")) {
     long long v = std::atoll(env);
     if (v > 0) device_min_words = static_cast<size_t>(v);
@@ -419,7 +422,10 @@ void OpenCollector::flush(int party, net::Chan& ch) {
   opened_device_ptr_ = nullptr;
   opened_device_words_ = 0;
   opened_device_ready_ = false;
-  opened_host_materialized_ = true;
+  opened_flat_buf_.clear();
+  opened_u64_flat_buf_.clear();
+  opened_host_materialized_ = false;  // signed view
+  opened_u64_materialized_ = false;   // u64 view
   const bool dynamic_pack = env_flag_enabled_default("SUF_OPEN_PACK_DYNAMIC", false);
   const int ring_bits = proto::ring_bits();
   const int n_bits = ring_bits;
@@ -515,18 +521,19 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     wire_bytes_sent += static_cast<uint64_t>(total_words) * sizeof(uint64_t);
     const auto t_scatter0 = std::chrono::steady_clock::now();
     const uint64_t* recv_ptr = recv_flat.data();
-    opened_flat_buf_.resize(total_words);
+    opened_u64_flat_buf_.resize(total_words);
 #ifdef _OPENMP
 #pragma omp parallel for if (total_words >= (1ull << 16)) schedule(static)
 #endif
     for (size_t i = 0; i < total_words; ++i) {
       uint64_t opened = proto::add_mod(send_flat[i], recv_ptr[i]);
-      opened_flat_buf_[i] = proto::to_signed(opened);
+      opened_u64_flat_buf_[i] = opened;
     }
     opened_device_ptr_ = nullptr;
     opened_device_words_ = 0;
     opened_device_ready_ = false;
-    opened_host_materialized_ = true;
+    opened_host_materialized_ = false;
+    opened_u64_materialized_ = true;
     const auto t_scatter1 = std::chrono::steady_clock::now();
     requests_.clear();
     stats_.flushes += 1;
@@ -731,28 +738,29 @@ void OpenCollector::flush(int party, net::Chan& ch) {
                                    stream),
                    "cudaMemcpyAsync H2D open_unpack");
         if (device_scatter) {
-          // Compute opened values on device (including ring sign-extension) to avoid
-          // host-side unpack + scatter.
-          launch_unpack_add_to_signed_kernel(pack_scratch_.d_in,
-                                             pack_scratch_.d_packed,
-                                             eff,
-                                             pack_scratch_.d_out,
-                                             total_words,
-                                             n_bits,
-                                             proto::ring_mask(),
-                                             stream);
+          // Compute opened values on device (raw ring elements) to avoid host-side unpack + scatter.
+          launch_unpack_add_mod_kernel(pack_scratch_.d_in,
+                                       pack_scratch_.d_packed,
+                                       eff,
+                                       pack_scratch_.d_out,
+                                       total_words,
+                                       n_bits,
+                                       proto::ring_mask(),
+                                       stream);
           if (device_keep_opened) {
             // Keep opened values device-resident; host materialization happens lazily on view().
             check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize open_scatter");
             opened_flat_buf_.clear();
+            opened_u64_flat_buf_.clear();
             opened_device_ptr_ = pack_scratch_.d_out;
             opened_device_words_ = total_words;
             opened_device_ready_ = true;
             opened_host_materialized_ = false;
+            opened_u64_materialized_ = false;
             opened_from_device = true;
           } else {
-            opened_flat_buf_.resize(total_words);
-            check_cuda(cudaMemcpyAsync(opened_flat_buf_.data(), pack_scratch_.d_out,
+            opened_u64_flat_buf_.resize(total_words);
+            check_cuda(cudaMemcpyAsync(opened_u64_flat_buf_.data(), pack_scratch_.d_out,
                                        total_words * sizeof(uint64_t),
                                        cudaMemcpyDeviceToHost,
                                        stream),
@@ -761,7 +769,8 @@ void OpenCollector::flush(int party, net::Chan& ch) {
             opened_device_ptr_ = nullptr;
             opened_device_words_ = 0;
             opened_device_ready_ = false;
-            opened_host_materialized_ = true;
+            opened_host_materialized_ = false;
+            opened_u64_materialized_ = true;
             opened_from_device = true;
           }
         } else {
@@ -774,9 +783,6 @@ void OpenCollector::flush(int party, net::Chan& ch) {
                                      stream),
                      "cudaMemcpyAsync D2H open_unpack");
           check_cuda(cudaStreamSynchronize(stream), "cudaStreamSynchronize open_unpack");
-          if (signed_pack && n_bits > 0 && n_bits <= 64) {
-            for (auto& w : other_flat) w = sign_extend_to_nbits(w, eff, n_bits);
-          }
         }
         const auto t_pack2_3 = std::chrono::steady_clock::now();
         pack2_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -814,9 +820,6 @@ void OpenCollector::flush(int party, net::Chan& ch) {
       } else {
         unpack_eff_bits_host_into(packed_remote, eff, total_words, other_flat);
       }
-      if (signed_pack && n_bits > 0 && n_bits <= 64) {
-        for (auto& w : other_flat) w = sign_extend_to_nbits(w, eff, n_bits);
-      }
       const auto t_pack2_3 = std::chrono::steady_clock::now();
       pack2_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
                                            (t_pack2_1 - t_pack2_0) + (t_pack2_3 - t_pack2_2))
@@ -844,14 +847,15 @@ void OpenCollector::flush(int party, net::Chan& ch) {
   const auto t_scatter0 = std::chrono::steady_clock::now();
   if (!opened_from_device) {
     const uint64_t* other_ptr = other_flat.data();
-    opened_flat_buf_.resize(total_words);
+    opened_u64_flat_buf_.resize(total_words);
 #ifdef _OPENMP
 #pragma omp parallel for if (total_words >= (1ull << 16)) schedule(static)
 #endif
     for (size_t i = 0; i < total_words; ++i) {
-      uint64_t opened = proto::add_mod(send_flat[i], other_ptr[i]);
-      opened_flat_buf_[i] = proto::to_signed(opened);
+      opened_u64_flat_buf_[i] = proto::add_mod(send_flat[i], other_ptr[i]);
     }
+    opened_host_materialized_ = false;
+    opened_u64_materialized_ = true;
   }
   const auto t_scatter1 = std::chrono::steady_clock::now();
   requests_.clear();
@@ -881,22 +885,20 @@ std::span<const int64_t> OpenCollector::view(const OpenHandle& h) const {
   if (!opened_ready_ || h.gen != opened_generation_) {
     throw std::runtime_error("OpenCollector: view out of range");
   }
-  if (opened_flat_buf_.empty() && opened_device_ready_ && !opened_host_materialized_) {
-#ifdef SUF_HAVE_CUDA
+  // Ensure u64 view is materialized (either from device or already present).
+  (void)view_u64(h);
+  if (opened_flat_buf_.empty() && !opened_u64_flat_buf_.empty() && !opened_host_materialized_) {
     std::lock_guard<std::mutex> lk(opened_mu_);
-    if (opened_flat_buf_.empty() && opened_device_ready_ && !opened_host_materialized_) {
-      opened_flat_buf_.resize(opened_device_words_);
-      if (opened_device_words_ > 0 && opened_device_ptr_) {
-        cudaMemcpy(opened_flat_buf_.data(),
-                   opened_device_ptr_,
-                   opened_device_words_ * sizeof(uint64_t),
-                   cudaMemcpyDeviceToHost);
+    if (opened_flat_buf_.empty() && !opened_u64_flat_buf_.empty() && !opened_host_materialized_) {
+      opened_flat_buf_.resize(opened_u64_flat_buf_.size());
+#ifdef _OPENMP
+#pragma omp parallel for if (opened_u64_flat_buf_.size() >= (1ull << 16)) schedule(static)
+#endif
+      for (size_t i = 0; i < opened_u64_flat_buf_.size(); ++i) {
+        opened_flat_buf_[i] = proto::to_signed(opened_u64_flat_buf_[i]);
       }
       opened_host_materialized_ = true;
     }
-#else
-    throw std::runtime_error("OpenCollector: host view requires CUDA to materialize device opens");
-#endif
   }
   if (h.offset + h.len > opened_flat_buf_.size()) {
     throw std::runtime_error("OpenCollector: view out of range");
@@ -904,9 +906,36 @@ std::span<const int64_t> OpenCollector::view(const OpenHandle& h) const {
   return std::span<const int64_t>(opened_flat_buf_.data() + h.offset, h.len);
 }
 
+std::span<const uint64_t> OpenCollector::view_u64(const OpenHandle& h) const {
+  if (!opened_ready_ || h.gen != opened_generation_) {
+    throw std::runtime_error("OpenCollector: view_u64 out of range");
+  }
+  if (opened_u64_flat_buf_.empty() && opened_device_ready_ && !opened_u64_materialized_) {
+#ifdef SUF_HAVE_CUDA
+    std::lock_guard<std::mutex> lk(opened_mu_);
+    if (opened_u64_flat_buf_.empty() && opened_device_ready_ && !opened_u64_materialized_) {
+      opened_u64_flat_buf_.resize(opened_device_words_);
+      if (opened_device_words_ > 0 && opened_device_ptr_) {
+        cudaMemcpy(opened_u64_flat_buf_.data(),
+                   opened_device_ptr_,
+                   opened_device_words_ * sizeof(uint64_t),
+                   cudaMemcpyDeviceToHost);
+      }
+      opened_u64_materialized_ = true;
+    }
+#else
+    throw std::runtime_error("OpenCollector: view_u64 requires CUDA to materialize device opens");
+#endif
+  }
+  if (h.offset + h.len > opened_u64_flat_buf_.size()) {
+    throw std::runtime_error("OpenCollector: view_u64 out of range");
+  }
+  return std::span<const uint64_t>(opened_u64_flat_buf_.data() + h.offset, h.len);
+}
+
 bool OpenCollector::ready(const OpenHandle& h) const {
   if (!opened_ready_ || h.gen != opened_generation_) return false;
-  const size_t cap = opened_device_ready_ ? opened_device_words_ : opened_flat_buf_.size();
+  const size_t cap = opened_device_ready_ ? opened_device_words_ : opened_u64_flat_buf_.size();
   return h.offset + h.len <= cap;
 }
 
@@ -927,12 +956,14 @@ void OpenCollector::clear() {
   packed_local_buf_.clear();
   packed_remote_buf_.clear();
   opened_flat_buf_.clear();
+  opened_u64_flat_buf_.clear();
   opened_ready_ = false;
   opened_generation_ = static_cast<uint64_t>(-1);
   opened_device_ptr_ = nullptr;
   opened_device_words_ = 0;
   opened_device_ready_ = false;
   opened_host_materialized_ = true;
+  opened_u64_materialized_ = true;
   generation_ += 1;
 }
 

@@ -1262,75 +1262,55 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       throw std::runtime_error("composite_eval_batch_backend: truncation AddU64 path expects no cutpoints");
     }
     // Evaluate primitive predicate bits as additive-u64 shares (0/1).
-    std::vector<uint64_t> pred_add(compiled.pred.queries.size() * N, 0ull);
-    for (size_t qi = 0; qi < compiled.pred.queries.size(); ++qi) {
-      const bool prof = ::runtime::bench::online_profiling_enabled();
-      int bits_in = (compiled.pred.queries[qi].kind == compiler::RawPredKind::kLtU64)
-                        ? ((compiled.pred.eff_bits > 0 && compiled.pred.eff_bits <= compiled.pred.n)
-                               ? compiled.pred.eff_bits
-                               : compiled.pred.n)
-                        : compiled.pred.queries[qi].f;
-      const size_t key_bytes = k.pred_keys[qi].bytes.size();
-      std::vector<uint8_t> outs_flat(N * 8);
-      const auto t_eval0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-      if (staged && in.hatx_device) {
-        staged->eval_dcf_many_u64_device_broadcast(bits_in,
-                                                   key_bytes,
-                                                   k.pred_keys[qi].bytes.data(),
-                                                   reinterpret_cast<const uint64_t*>(in.hatx_device),
-                                                   N,
-                                                   /*out_bytes=*/8,
-                                                   outs_flat.data());
-      } else {
-        if (!in.hatx) throw std::runtime_error("composite_eval_batch_backend: missing host hatx for AddU64 pred");
-        std::vector<uint64_t> xs_vec(in.hatx, in.hatx + N);
-        std::vector<uint8_t> keys_flat(N * key_bytes);
-        for (size_t i = 0; i < N; ++i) {
-          std::memcpy(keys_flat.data() + i * key_bytes, k.pred_keys[qi].bytes.data(), key_bytes);
-        }
-        backend.eval_dcf_many_u64(bits_in,
-                                  key_bytes,
-                                  keys_flat.data(),
-                                  xs_vec,
-                                  /*out_bytes=*/8,
-                                  outs_flat.data());
-      }
-      if (prof) {
-        const auto t_eval1 = std::chrono::steady_clock::now();
-        ::runtime::bench::add_online_ns(
-            ::runtime::bench::OnlineTimeKind::PfssPredEval,
-            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t_eval1 - t_eval0).count()));
-      }
-      for (size_t i = 0; i < N; ++i) {
-        pred_add[qi * N + i] = proto::unpack_u64_le(outs_flat.data() + i * 8);
-      }
-    }
+    //
+    // Hot-path optimization: avoid per-element `unpack_u64_le()` loops by writing
+    // directly into a u64 buffer (our targets are little-endian).
+    const size_t qn = compiled.pred.queries.size();
+    std::vector<uint64_t> pred_add(qn * N, 0ull);
+    std::vector<uint64_t> outs_u64(N, 0ull);
+    std::vector<uint8_t> keys_flat;
+    std::vector<uint64_t> xs_vec;
+    std::vector<uint8_t> used_pred(qn, 0u);
 
-    const uint64_t one = (party == 0) ? 1ull : 0ull;
-    auto eval_bool_add = [&](const suf::BoolExpr& e, size_t i, const auto& self) -> uint64_t {
-      return std::visit([&](auto&& n) -> uint64_t {
+    // Compile truncation bool expressions once (restricted fragment).
+    struct TruncBoolPlan {
+      enum class Kind : uint8_t { Const, PredVar, WrapVar, Not, RotXor } kind = Kind::Const;
+      uint64_t c = 0;
+      int pred_idx = -1;   // PredVar
+      int wrap_idx = -1;   // WrapVar / RotXor
+      int a_pred_idx = -1; // RotXor
+      int b_pred_idx = -1; // RotXor
+      std::unique_ptr<TruncBoolPlan> child; // Not
+    };
+    auto compile_trunc_bool = [&](const suf::BoolExpr& e, const auto& self) -> TruncBoolPlan {
+      return std::visit([&](auto&& n) -> TruncBoolPlan {
         using T = std::decay_t<decltype(n)>;
         if constexpr (std::is_same_v<T, suf::BConst>) {
-          return n.v ? one : 0ull;
+          TruncBoolPlan p;
+          p.kind = TruncBoolPlan::Kind::Const;
+          p.c = n.v ? 1ull : 0ull;
+          return p;
         } else if constexpr (std::is_same_v<T, suf::BVar>) {
-          int idx = n.pred_idx;
-          if (idx >= 0) {
-            size_t u = static_cast<size_t>(idx);
-            if (u >= compiled.pred.queries.size()) return 0ull;
-            return pred_add[u * N + i];
+          TruncBoolPlan p;
+          if (n.pred_idx >= 0) {
+            p.kind = TruncBoolPlan::Kind::PredVar;
+            p.pred_idx = n.pred_idx;
+            if (static_cast<size_t>(n.pred_idx) < used_pred.size()) {
+              used_pred[static_cast<size_t>(n.pred_idx)] = 1u;
+            }
+          } else {
+            p.kind = TruncBoolPlan::Kind::WrapVar;
+            p.wrap_idx = -1 - n.pred_idx;
           }
-          size_t w = static_cast<size_t>(-1 - idx);
-          if (w < k.wrap_share.size()) return k.wrap_share[w];
-          return 0ull;
+          return p;
         } else if constexpr (std::is_same_v<T, suf::BNot>) {
-          uint64_t v = self(*n.a, i, self);
-          return proto::sub_mod(one, v);
+          TruncBoolPlan p;
+          p.kind = TruncBoolPlan::Kind::Not;
+          p.child = std::make_unique<TruncBoolPlan>(self(*n.a, self));
+          return p;
         } else if constexpr (std::is_same_v<T, suf::BXor>) {
-          // Special-case the rotated-interval expression produced by rewrite_pred:
-          //   a XOR b XOR w, where:
-          //     a = 1[hatx < theta0], b = 1[hatx < theta1], w = 1[theta1 < theta0]
-          // In the additive ring, this can be computed without multiplication as:
-          //   b - a + w  (mod 2^64).
+          // Only support the rotated-interval form produced by rewrite_pred:
+          //   a XOR b XOR w, where a,b are predicate vars and w is a wrap var.
           auto as_var = [](const suf::BoolExpr& x) -> const suf::BVar* {
             return std::get_if<suf::BVar>(&x.node);
           };
@@ -1346,17 +1326,18 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
           const suf::BVar* wv = (wexpr) ? as_var(*wexpr) : nullptr;
           const suf::BVar* av = (ab && ab->a) ? as_var(*ab->a) : nullptr;
           const suf::BVar* bv = (ab && ab->b) ? as_var(*ab->b) : nullptr;
-          if (ab && wv && av && bv && wv->pred_idx < 0 && av->pred_idx >= 0 && bv->pred_idx >= 0) {
-            const size_t wrap_idx = static_cast<size_t>(-1 - wv->pred_idx);
-            const size_t a_idx = static_cast<size_t>(av->pred_idx);
-            const size_t b_idx = static_cast<size_t>(bv->pred_idx);
-            const uint64_t a = (a_idx < compiled.pred.queries.size()) ? pred_add[a_idx * N + i] : 0ull;
-            const uint64_t b = (b_idx < compiled.pred.queries.size()) ? pred_add[b_idx * N + i] : 0ull;
-            const uint64_t w = (wrap_idx < k.wrap_share.size()) ? k.wrap_share[wrap_idx] : 0ull;
-            return proto::add_mod(proto::sub_mod(b, a), w);
+          if (!(ab && wv && av && bv && wv->pred_idx < 0 && av->pred_idx >= 0 && bv->pred_idx >= 0)) {
+            throw std::runtime_error(
+                "composite_eval_batch_backend: truncation AddU64 BXor only supports rotated interval form");
           }
-          throw std::runtime_error(
-              "composite_eval_batch_backend: truncation AddU64 BXor only supports rotated interval form");
+          TruncBoolPlan p;
+          p.kind = TruncBoolPlan::Kind::RotXor;
+          p.wrap_idx = -1 - wv->pred_idx;
+          p.a_pred_idx = av->pred_idx;
+          p.b_pred_idx = bv->pred_idx;
+          if (static_cast<size_t>(p.a_pred_idx) < used_pred.size()) used_pred[static_cast<size_t>(p.a_pred_idx)] = 1u;
+          if (static_cast<size_t>(p.b_pred_idx) < used_pred.size()) used_pred[static_cast<size_t>(p.b_pred_idx)] = 1u;
+          return p;
         } else {
           throw std::runtime_error(
               "composite_eval_batch_backend: truncation AddU64 bool expr unsupported (only Const/Var/Not/Xor)");
@@ -1364,25 +1345,123 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       }, e.node);
     };
 
-    // Truncation coeff program is constant in this build; return base+r_out as arith payload.
-    for (size_t i = 0; i < N; ++i) {
-      for (int j = 0; j < compiled.r; ++j) {
-        size_t jj = static_cast<size_t>(j);
-        uint64_t base = (jj < k.base_coeff_share.size()) ? k.base_coeff_share[jj] : 0ull;
-        uint64_t rout = (jj < k.r_out_share.size()) ? k.r_out_share[jj] : 0ull;
-        out.haty_share[i * static_cast<size_t>(compiled.r) + jj] = proto::add_mod(base, rout);
-      }
-    }
-
+    std::vector<TruncBoolPlan> bool_plans;
     if (!compiled.bool_per_piece.empty()) {
       const auto& exprs = compiled.bool_per_piece[0];
       if (static_cast<int>(exprs.size()) != compiled.ell) {
         throw std::runtime_error("composite_eval_batch_backend: bool_per_piece size mismatch for truncation");
       }
-      for (size_t i = 0; i < N; ++i) {
+      bool_plans.reserve(static_cast<size_t>(compiled.ell));
+      for (int j = 0; j < compiled.ell; ++j) {
+        bool_plans.push_back(compile_trunc_bool(exprs[static_cast<size_t>(j)], compile_trunc_bool));
+      }
+    }
+
+    for (size_t qi = 0; qi < qn; ++qi) {
+      if (qi < used_pred.size() && used_pred[qi] == 0u) continue;
+      const bool prof = ::runtime::bench::online_profiling_enabled();
+      int bits_in = (compiled.pred.queries[qi].kind == compiler::RawPredKind::kLtU64)
+                        ? ((compiled.pred.eff_bits > 0 && compiled.pred.eff_bits <= compiled.pred.n)
+                               ? compiled.pred.eff_bits
+                               : compiled.pred.n)
+                        : compiled.pred.queries[qi].f;
+      const size_t key_bytes = k.pred_keys[qi].bytes.size();
+      const auto t_eval0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+      if (staged && in.hatx_device) {
+        staged->eval_dcf_many_u64_device_broadcast(bits_in,
+                                                   key_bytes,
+                                                   k.pred_keys[qi].bytes.data(),
+                                                   reinterpret_cast<const uint64_t*>(in.hatx_device),
+                                                   N,
+                                                   /*out_bytes=*/8,
+                                                   reinterpret_cast<uint8_t*>(outs_u64.data()));
+      } else {
+        if (!in.hatx) throw std::runtime_error("composite_eval_batch_backend: missing host hatx for AddU64 pred");
+        if (xs_vec.empty()) xs_vec.assign(in.hatx, in.hatx + N);
+        keys_flat.resize(N * key_bytes);
+        for (size_t i = 0; i < N; ++i) {
+          std::memcpy(keys_flat.data() + i * key_bytes, k.pred_keys[qi].bytes.data(), key_bytes);
+        }
+        backend.eval_dcf_many_u64(bits_in,
+                                  key_bytes,
+                                  keys_flat.data(),
+                                  xs_vec,
+                                  /*out_bytes=*/8,
+                                  reinterpret_cast<uint8_t*>(outs_u64.data()));
+      }
+      if (prof) {
+        const auto t_eval1 = std::chrono::steady_clock::now();
+        ::runtime::bench::add_online_ns(
+            ::runtime::bench::OnlineTimeKind::PfssPredEval,
+            static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t_eval1 - t_eval0).count()));
+      }
+      std::memcpy(pred_add.data() + qi * N, outs_u64.data(), N * sizeof(uint64_t));
+    }
+
+    const uint64_t one = (party == 0) ? 1ull : 0ull;
+    auto eval_plan = [&](const TruncBoolPlan& p, size_t i, const auto& self) -> uint64_t {
+      switch (p.kind) {
+        case TruncBoolPlan::Kind::Const:
+          return p.c ? one : 0ull;
+        case TruncBoolPlan::Kind::PredVar: {
+          const size_t pi = static_cast<size_t>(p.pred_idx);
+          return (pi < qn) ? pred_add[pi * N + i] : 0ull;
+        }
+        case TruncBoolPlan::Kind::WrapVar: {
+          const size_t wi = static_cast<size_t>(p.wrap_idx);
+          return (wi < k.wrap_share.size()) ? k.wrap_share[wi] : 0ull;
+        }
+        case TruncBoolPlan::Kind::Not: {
+          if (!p.child) return one;
+          uint64_t v = self(*p.child, i, self);
+          return proto::sub_mod(one, v);
+        }
+        case TruncBoolPlan::Kind::RotXor: {
+          const size_t a_idx = static_cast<size_t>(p.a_pred_idx);
+          const size_t b_idx = static_cast<size_t>(p.b_pred_idx);
+          const size_t wi = static_cast<size_t>(p.wrap_idx);
+          const uint64_t a = (a_idx < qn) ? pred_add[a_idx * N + i] : 0ull;
+          const uint64_t b = (b_idx < qn) ? pred_add[b_idx * N + i] : 0ull;
+          const uint64_t w = (wi < k.wrap_share.size()) ? k.wrap_share[wi] : 0ull;
+          return proto::add_mod(proto::sub_mod(b, a), w);
+        }
+      }
+      return 0ull;
+    };
+
+    // Truncation coeff program is constant in this build; return base+r_out as arith payload.
+    const size_t r_words = static_cast<size_t>(compiled.r);
+    std::vector<uint64_t> base_rout(r_words, 0ull);
+    for (size_t j = 0; j < r_words; ++j) {
+      uint64_t base = (j < k.base_coeff_share.size()) ? k.base_coeff_share[j] : 0ull;
+      uint64_t rout = (j < k.r_out_share.size()) ? k.r_out_share[j] : 0ull;
+      base_rout[j] = proto::add_mod(base, rout);
+    }
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (N >= (1ull << 14))
+#endif
+    for (long long ii = 0; ii < static_cast<long long>(N); ++ii) {
+      const size_t i = static_cast<size_t>(ii);
+      uint64_t* dst = out.haty_share.data() + i * r_words;
+      if (r_words == 1) {
+        dst[0] = base_rout[0];
+      } else {
+        std::memcpy(dst, base_rout.data(), r_words * sizeof(uint64_t));
+      }
+    }
+
+    if (!compiled.bool_per_piece.empty()) {
+      if (bool_plans.size() != static_cast<size_t>(compiled.ell)) {
+        throw std::runtime_error("composite_eval_batch_backend: bool plan size mismatch for truncation");
+      }
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (N >= (1ull << 14))
+#endif
+      for (long long ii = 0; ii < static_cast<long long>(N); ++ii) {
+        const size_t i = static_cast<size_t>(ii);
+        uint64_t* dst = out.bool_share.data() + i * static_cast<size_t>(compiled.ell);
         for (int j = 0; j < compiled.ell; ++j) {
-          out.bool_share[i * static_cast<size_t>(compiled.ell) + static_cast<size_t>(j)] =
-              eval_bool_add(exprs[static_cast<size_t>(j)], i, eval_bool_add);
+          dst[static_cast<size_t>(j)] = eval_plan(bool_plans[static_cast<size_t>(j)], i, eval_plan);
         }
       }
     }

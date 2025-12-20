@@ -542,8 +542,7 @@ class Matmul2DTask final : public runtime::detail::PhaseTask {
               dD_open = d_opened;
               dE_open = d_opened + A_words;
             } else {
-              // Opened values are stored as int64_t on host; bit-pattern is the ring element.
-              auto opened = R.opens->view(h_open_);
+              auto opened = R.opens->view_u64(h_open_);
               if (opened.size() != A_words + B_words) {
                 throw std::runtime_error("Matmul2DTask: opened size mismatch");
               }
@@ -768,7 +767,7 @@ class BatchedMatmul2DTask final : public runtime::detail::PhaseTask {
                                 stream);
               }
             } else {
-              auto opened = R.opens->view(h_open_);
+              auto opened = R.opens->view_u64(h_open_);
               if (opened.size() != static_cast<size_t>(batches_) * per) {
                 throw std::runtime_error("BatchedMatmul2DTask: opened size mismatch");
               }
@@ -1161,6 +1160,10 @@ void attention_forward(const AttentionConfig& cfg,
     truncR.pfss_chan = pfss_chan_override ? pfss_chan_override : &pch;
     truncR.pfss_trunc = &pe->pfss_coeff_batch();  // share batch for trunc + coeff
     truncR.opens = &pe->open_collector();
+    truncR.overlap_pfss_open = (pfss_chan_override != nullptr) || (ctx && ctx->pfss_net_chan != nullptr);
+    if (ctx) {
+      truncR.cuda_stream = ctx->cuda_stream();
+    }
     if (!(ctx && ctx->force_eager_pfss)) {
       truncR.pfss_planner = &pfss_phase_planner;
     }
@@ -1388,6 +1391,10 @@ void attention_forward(const AttentionConfig& cfg,
     // Share a single PFSS batch for coeff + trunc to maximize per-phase batching.
     phase_R.pfss_trunc = &pe->pfss_coeff_batch();
     phase_R.opens = &pe->open_collector();
+    phase_R.overlap_pfss_open = (pfss_chan_override != nullptr) || (ctx && ctx->pfss_net_chan != nullptr);
+    if (ctx) {
+      phase_R.cuda_stream = ctx->cuda_stream();
+    }
     phase_planner.bind(phase_R.pfss_coeff, phase_R.pfss_trunc);
     if (!(ctx && ctx->force_eager_pfss)) {
       phase_R.pfss_planner = &phase_planner;
@@ -2362,6 +2369,11 @@ void attention_forward(const AttentionConfig& cfg,
     truncR.pfss_chan = pfss_chan_override ? pfss_chan_override : &pch;
     truncR.pfss_trunc = &pe->pfss_coeff_batch();  // share batch for trunc + coeff
     truncR.opens = &pe->open_collector();
+    // Safe overlap only when PFSS uses a dedicated channel (override) or a dedicated net channel.
+    truncR.overlap_pfss_open = (pfss_chan_override != nullptr) || (ctx && ctx->pfss_net_chan != nullptr);
+    if (ctx) {
+      truncR.cuda_stream = ctx->cuda_stream();
+    }
     runtime::PfssPhasePlanner planner;
     planner.bind(&pe->pfss_coeff_batch(), truncR.pfss_trunc);
     if (!(ctx && ctx->force_eager_pfss)) {
@@ -2374,9 +2386,9 @@ void attention_forward(const AttentionConfig& cfg,
         std::span<const uint64_t>(Y_share.data, Y_share.numel()),
         std::span<uint64_t>(Y_share.data, Y_share.numel())));
     pe->run(truncR);
-      barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
-                                                       .drain_pfss_coeff = true,
-                                                       .drain_pfss_trunc = true});
+    barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
+                                                     .drain_pfss_coeff = true,
+                                                     .drain_pfss_trunc = true});
     record_phase_plan(planner);
   }
 }

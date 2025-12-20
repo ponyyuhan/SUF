@@ -22,24 +22,32 @@ namespace proto {
 struct GrottoBackend::Impl {
   using DpfKey = dpf::dpf_key<dpf::prg::aes128, dpf::prg::aes128, uint64_t, dpf::bit>;
 
-  struct DcfEntry {
-    int in_bits = 0;
-    std::vector<u8> payload0;
-    std::vector<u8> payload1;
-    DpfKey key0;
-    DpfKey key1;
-
-    DcfEntry(int bits,
-             std::vector<u8> p0,
-             std::vector<u8> p1,
-             DpfKey&& k0,
-             DpfKey&& k1)
-        : in_bits(bits),
-          payload0(std::move(p0)),
-          payload1(std::move(p1)),
-          key0(std::move(k0)),
-          key1(std::move(k1)) {}
-  };
+  static inline void append_u16_le(std::vector<u8>& out, uint16_t v) {
+    out.push_back(static_cast<u8>(v & 0xFFu));
+    out.push_back(static_cast<u8>((v >> 8) & 0xFFu));
+  }
+  static inline uint16_t read_u16_le(const uint8_t* p) {
+    return static_cast<uint16_t>(static_cast<uint16_t>(p[0]) |
+                                 (static_cast<uint16_t>(p[1]) << 8));
+  }
+  static inline void append_u32_le(std::vector<u8>& out, uint32_t v) {
+    out.push_back(static_cast<u8>(v & 0xFFu));
+    out.push_back(static_cast<u8>((v >> 8) & 0xFFu));
+    out.push_back(static_cast<u8>((v >> 16) & 0xFFu));
+    out.push_back(static_cast<u8>((v >> 24) & 0xFFu));
+  }
+  static inline uint32_t read_u32_le(const uint8_t* p) {
+    return static_cast<uint32_t>(static_cast<uint32_t>(p[0]) |
+                                 (static_cast<uint32_t>(p[1]) << 8) |
+                                 (static_cast<uint32_t>(p[2]) << 16) |
+                                 (static_cast<uint32_t>(p[3]) << 24));
+  }
+  static inline void pad_to_align(std::vector<u8>& out, size_t align) {
+    if (align == 0) return;
+    size_t rem = out.size() % align;
+    if (rem == 0) return;
+    out.insert(out.end(), align - rem, 0u);
+  }
 
   static uint64_t mask_bits(int bits) {
     if (bits <= 0) return 0ull;
@@ -55,22 +63,6 @@ struct GrottoBackend::Impl {
     return x;
   }
 
-  static std::pair<u64, int> decode_key_bytes(const uint8_t* ptr, size_t key_bytes) {
-    if (!ptr || key_bytes < 8) throw std::runtime_error("GrottoBackend: key truncated");
-    u64 kid = unpack_u64_le(ptr);
-    u64 id = kid >> 1;
-    int party = static_cast<int>(kid & 1ull);
-    return {id, party};
-  }
-
-  static std::pair<u64, int> decode_key(const FssKey& kb) {
-    if (kb.bytes.size() < 8) throw std::runtime_error("GrottoBackend: key truncated");
-    u64 kid = unpack_u64_le(kb.bytes.data());
-    u64 id = kid >> 1;
-    int party = static_cast<int>(kid & 1ull);
-    return {id, party};
-  }
-
   static uint8_t prefix_parity_single(const DpfKey& key, uint64_t x) {
     std::array<uint64_t, 1> endpoints{x};
     auto res = grotto::prefix_parities(key, endpoints);
@@ -78,8 +70,7 @@ struct GrottoBackend::Impl {
     return parities[0] ? 1u : 0u;
   }
 
-  uint8_t eval_lt_share(const DcfEntry& entry, int party, uint64_t x) const {
-    const DpfKey& key = (party == 0) ? entry.key0 : entry.key1;
+  uint8_t eval_lt_share(const DpfKey& key, int party, uint64_t x) const {
     uint8_t ge_share = prefix_parity_single(key, x);
     // Convert GE share -> LT share by flipping party 0.
     if (party == 0) ge_share ^= 1u;
@@ -100,47 +91,75 @@ struct GrottoBackend::Impl {
     for (size_t i = 0; i < count; ++i) out_bits[i] = parities[i] ? 1u : 0u;
   }
 
-  void eval_lt_shares(const DcfEntry& entry,
-                      int party,
-                      const std::vector<u64>& xs,
-                      std::vector<uint8_t>& out_bits) const {
-    out_bits.assign(xs.size(), 0);
-    if (xs.empty()) return;
-    const uint64_t mask = mask_bits(entry.in_bits);
-    std::vector<size_t> order(xs.size());
-    std::iota(order.begin(), order.end(), 0);
-    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-      return (xs[a] & mask) < (xs[b] & mask);
-    });
-    std::vector<uint64_t> xs_sorted(xs.size());
-    for (size_t i = 0; i < xs.size(); ++i) xs_sorted[i] = xs[order[i]] & mask;
-    std::vector<uint8_t> bits_sorted(xs.size(), 0);
-
-    constexpr size_t kBlock = 128;
-    const size_t blocks = (xs_sorted.size() + kBlock - 1) / kBlock;
-#ifdef _OPENMP
-#pragma omp parallel for schedule(static) if (blocks >= 8)
-#endif
-    for (long long b = 0; b < static_cast<long long>(blocks); ++b) {
-      size_t off = static_cast<size_t>(b) * kBlock;
-      size_t take = std::min(kBlock, xs_sorted.size() - off);
-      eval_prefix_parities_block<kBlock>((party == 0) ? entry.key0 : entry.key1,
-                                         xs_sorted.data() + off,
-                                         take,
-                                         bits_sorted.data() + off);
-    }
-    if (party == 0) {
-      for (auto& v : bits_sorted) v ^= 1u;
-    }
-    for (size_t i = 0; i < xs.size(); ++i) {
-      out_bits[order[i]] = bits_sorted[i];
-    }
-  }
-
   Params params_{};
   SigmaFastBackend sigma_{};
-  mutable std::unordered_map<u64, DcfEntry> dcf_{};
-  u64 next_id_ = 1;
+  // Embedded key cache: hash(key_bytes) -> parsed DPF key (per-backend instance).
+  mutable std::unordered_map<u64, std::shared_ptr<DpfKey>> dpf_cache_{};
+  mutable std::mutex cache_mu_;
+
+  static u64 hash64(const uint8_t* p, size_t n) {
+    // FNV-1a 64-bit.
+    u64 h = 1469598103934665603ull;
+    for (size_t i = 0; i < n; ++i) {
+      h ^= static_cast<u64>(p[i]);
+      h *= 1099511628211ull;
+    }
+    return h;
+  }
+
+  static std::vector<u8> serialize_dpf_key(const DpfKey& k) {
+    std::vector<u8> out;
+    out.reserve(sizeof(typename DpfKey::interior_node) +
+                sizeof(typename DpfKey::correction_words_array) +
+                sizeof(typename DpfKey::correction_advice_array) +
+                sizeof(std::tuple_element_t<0, typename DpfKey::leaf_tuple>) +
+                sizeof(typename DpfKey::input_type));
+    auto append_raw = [&](const void* ptr, size_t bytes) {
+      const auto* b = reinterpret_cast<const uint8_t*>(ptr);
+      out.insert(out.end(), b, b + bytes);
+    };
+    auto root = k.root();
+    append_raw(&root, sizeof(root));
+    auto cws = k.correction_words();
+    append_raw(cws.data(), sizeof(cws));
+    auto adv = k.correction_advice();
+    append_raw(adv.data(), sizeof(adv));
+    auto leaf0 = std::get<0>(k.leaf_nodes).get();
+    append_raw(&leaf0, sizeof(leaf0));
+    typename DpfKey::input_type offset_share{};
+    append_raw(&offset_share, sizeof(offset_share));
+    return out;
+  }
+
+  static DpfKey deserialize_dpf_key(const uint8_t* p, size_t n, size_t& off) {
+    auto need = [&](size_t bytes) {
+      if (off + bytes > n) throw std::runtime_error("GrottoBackend: dpf key truncated");
+    };
+    typename DpfKey::interior_node root{};
+    need(sizeof(root));
+    std::memcpy(&root, p + off, sizeof(root));
+    off += sizeof(root);
+    typename DpfKey::correction_words_array cws{};
+    need(sizeof(cws));
+    std::memcpy(cws.data(), p + off, sizeof(cws));
+    off += sizeof(cws);
+    typename DpfKey::correction_advice_array adv{};
+    need(sizeof(adv));
+    std::memcpy(adv.data(), p + off, sizeof(adv));
+    off += sizeof(adv);
+    using Leaf0 = std::tuple_element_t<0, typename DpfKey::leaf_tuple>;
+    Leaf0 leaf0{};
+    need(sizeof(leaf0));
+    std::memcpy(&leaf0, p + off, sizeof(leaf0));
+    off += sizeof(leaf0);
+    typename DpfKey::input_type offset_share{};
+    need(sizeof(offset_share));
+    std::memcpy(&offset_share, p + off, sizeof(offset_share));
+    off += sizeof(offset_share);
+    typename DpfKey::leaf_tuple leaves{leaf0};
+    typename DpfKey::beaver_tuple beavers{};
+    return DpfKey(root, cws, adv, leaves, beavers, offset_share);
+  }
 };
 
 GrottoBackend::GrottoBackend() : impl_(std::make_unique<Impl>()) {}
@@ -168,14 +187,26 @@ DcfKeyPair GrottoBackend::gen_dcf(int in_bits,
   uint64_t alpha = Impl::bits_to_u64_msb(alpha_bits);
   alpha &= Impl::mask_bits(in_bits);
   auto kp = dpf::make_dpf<dpf::prg::aes128>(alpha);
-  std::vector<u8> payload0 = payload_bytes;
-  std::vector<u8> payload1(payload_bytes.size(), 0u);
-  uint64_t id = impl_->next_id_++;
-  impl_->dcf_.emplace(id, Impl::DcfEntry(in_bits, std::move(payload0), std::move(payload1),
-                                        std::move(kp.first), std::move(kp.second)));
+  if (payload_bytes.size() > 0xFFFFu) throw std::runtime_error("GrottoBackend: payload too large");
+  auto key_blob0 = Impl::serialize_dpf_key(kp.first);
+  auto key_blob1 = Impl::serialize_dpf_key(kp.second);
+
+  auto build = [&](int party, const std::vector<u8>& dpf_blob, const std::vector<u8>& payload) -> std::vector<u8> {
+    std::vector<u8> out;
+    out.reserve(4 + 1 + 1 + 2 + 4 + dpf_blob.size() + payload.size());
+    out.insert(out.end(), {'G','D','C','1'});
+    out.push_back(static_cast<u8>(party & 1));
+    out.push_back(static_cast<u8>(in_bits));
+    Impl::append_u16_le(out, static_cast<uint16_t>(payload.size()));
+    Impl::append_u32_le(out, static_cast<uint32_t>(dpf_blob.size()));
+    Impl::pad_to_align(out, 8);
+    out.insert(out.end(), dpf_blob.begin(), dpf_blob.end());
+    out.insert(out.end(), payload.begin(), payload.end());
+    return out;
+  };
   DcfKeyPair out;
-  out.k0.bytes = pack_u64_le(id << 1);
-  out.k1.bytes = pack_u64_le((id << 1) | 1ull);
+  out.k0.bytes = build(/*party=*/0, key_blob0, payload_bytes);
+  out.k1.bytes = build(/*party=*/1, key_blob1, std::vector<u8>(payload_bytes.size(), 0u));
   return out;
 }
 
@@ -185,17 +216,45 @@ std::vector<u8> GrottoBackend::eval_dcf(int in_bits,
   if (static_cast<int>(x_bits.size()) != in_bits) {
     throw std::runtime_error("GrottoBackend: eval_dcf x_bits size mismatch");
   }
-  auto [id, party] = Impl::decode_key(kb);
-  auto it = impl_->dcf_.find(id);
-  if (it == impl_->dcf_.end()) throw std::runtime_error("GrottoBackend: unknown key id");
-  const auto& entry = it->second;
-  if (entry.in_bits != in_bits) throw std::runtime_error("GrottoBackend: in_bits mismatch");
+  if (kb.bytes.size() < 4 || std::memcmp(kb.bytes.data(), "GDC1", 4) != 0) {
+    throw std::runtime_error("GrottoBackend: unsupported key format (expected embedded GDC1)");
+  }
+  if (kb.bytes.size() < 4 + 1 + 1 + 2 + 4) throw std::runtime_error("GrottoBackend: key truncated");
+  const int party = static_cast<int>(kb.bytes[4] & 1u);
+  const int kb_bits = static_cast<int>(kb.bytes[5]);
+  if (kb_bits != in_bits) throw std::runtime_error("GrottoBackend: in_bits mismatch");
+  const uint16_t payload_len = Impl::read_u16_le(kb.bytes.data() + 6);
+  const uint32_t blob_len = Impl::read_u32_le(kb.bytes.data() + 8);
+  size_t off = 4 + 1 + 1 + 2 + 4;
+  size_t pad = (8 - (off % 8)) & 7;
+  off += pad;
+  if (kb.bytes.size() < off + static_cast<size_t>(blob_len) + static_cast<size_t>(payload_len)) {
+    throw std::runtime_error("GrottoBackend: key truncated body");
+  }
+  const uint8_t* blob = kb.bytes.data() + off;
+  const uint8_t* payload_ptr = kb.bytes.data() + off + static_cast<size_t>(blob_len);
+  const size_t payload_bytes = static_cast<size_t>(payload_len);
+  const u64 key_hash = Impl::hash64(blob, static_cast<size_t>(blob_len));
+  std::shared_ptr<Impl::DpfKey> key_sp;
+  {
+    std::lock_guard<std::mutex> lk(impl_->cache_mu_);
+    auto it = impl_->dpf_cache_.find(key_hash);
+    if (it != impl_->dpf_cache_.end()) {
+      key_sp = it->second;
+    }
+  }
+  if (!key_sp) {
+    size_t boff = 0;
+    auto key_obj = std::make_shared<Impl::DpfKey>(Impl::deserialize_dpf_key(blob, blob_len, boff));
+    std::lock_guard<std::mutex> lk(impl_->cache_mu_);
+    impl_->dpf_cache_[key_hash] = key_obj;
+    key_sp = std::move(key_obj);
+  }
   uint64_t x = Impl::bits_to_u64_msb(x_bits) & Impl::mask_bits(in_bits);
-  uint8_t bit_share = impl_->eval_lt_share(entry, party, x);
-  const auto& payload = (party == 0) ? entry.payload0 : entry.payload1;
-  std::vector<u8> out(payload.size(), 0u);
-  if (bit_share & 1u) {
-    std::memcpy(out.data(), payload.data(), payload.size());
+  uint8_t bit_share = impl_->eval_lt_share(*key_sp, party, x);
+  std::vector<u8> out(payload_bytes, 0u);
+  if ((bit_share & 1u) && payload_bytes) {
+    std::memcpy(out.data(), payload_ptr, payload_bytes);
   }
   return out;
 }
@@ -208,19 +267,15 @@ void GrottoBackend::eval_dcf_many_u64(int in_bits,
                                      uint8_t* outs_flat) const {
   if (xs_u64.empty()) return;
   if (!keys_flat || !outs_flat) throw std::runtime_error("GrottoBackend: null buffers");
-  if (key_bytes < 8) throw std::runtime_error("GrottoBackend: key_bytes too small");
+  if (key_bytes < 4) throw std::runtime_error("GrottoBackend: key_bytes too small");
   if (in_bits <= 0 || in_bits > 64) throw std::runtime_error("GrottoBackend: in_bits out of range");
 
-  const auto [id0, party0] = Impl::decode_key_bytes(keys_flat, key_bytes);
-  bool broadcast = true;
-  for (size_t i = 1; i < xs_u64.size(); ++i) {
-    const auto [idi, part] = Impl::decode_key_bytes(keys_flat + i * key_bytes, key_bytes);
-    if (idi != id0 || part != party0) {
-      broadcast = false;
-      break;
-    }
+  // Fast-path: embedded broadcast keys are extremely common; parse once and reuse.
+  if (std::memcmp(keys_flat, "GDC1", 4) != 0) {
+    throw std::runtime_error("GrottoBackend: unsupported key format (expected embedded GDC1)");
   }
-  if (!broadcast) {
+  // If keys are not broadcast (rare), fall back to per-element evaluation.
+  if (xs_u64.size() > 1 && std::memcmp(keys_flat, keys_flat + key_bytes, std::min<size_t>(key_bytes, 64)) != 0) {
     for (size_t i = 0; i < xs_u64.size(); ++i) {
       FssKey kb;
       kb.bytes.assign(keys_flat + i * key_bytes, keys_flat + (i + 1) * key_bytes);
@@ -233,25 +288,72 @@ void GrottoBackend::eval_dcf_many_u64(int in_bits,
     }
     return;
   }
-
-  auto it = impl_->dcf_.find(id0);
-  if (it == impl_->dcf_.end()) throw std::runtime_error("GrottoBackend: unknown key id");
-  const auto& entry = it->second;
-  if (entry.in_bits != in_bits) throw std::runtime_error("GrottoBackend: in_bits mismatch");
-  const auto& payload = (party0 == 0) ? entry.payload0 : entry.payload1;
-  if (payload.size() != static_cast<size_t>(out_bytes)) {
-    throw std::runtime_error("GrottoBackend: output size mismatch");
+  if (key_bytes < 4 + 1 + 1 + 2 + 4) throw std::runtime_error("GrottoBackend: key truncated");
+  const int party = static_cast<int>(keys_flat[4] & 1u);
+  const int kb_bits = static_cast<int>(keys_flat[5]);
+  if (kb_bits != in_bits) throw std::runtime_error("GrottoBackend: in_bits mismatch");
+  const uint16_t payload_len = Impl::read_u16_le(keys_flat + 6);
+  const uint32_t blob_len = Impl::read_u32_le(keys_flat + 8);
+  if (static_cast<int>(payload_len) != out_bytes) throw std::runtime_error("GrottoBackend: output size mismatch");
+  size_t off = 4 + 1 + 1 + 2 + 4;
+  size_t pad = (8 - (off % 8)) & 7;
+  off += pad;
+  if (key_bytes < off + static_cast<size_t>(blob_len) + static_cast<size_t>(payload_len)) {
+    throw std::runtime_error("GrottoBackend: key truncated body");
+  }
+  const uint8_t* blob = keys_flat + off;
+  const uint8_t* payload_ptr = keys_flat + off + static_cast<size_t>(blob_len);
+  const u64 key_hash = Impl::hash64(blob, static_cast<size_t>(blob_len));
+  std::shared_ptr<Impl::DpfKey> key_sp;
+  {
+    std::lock_guard<std::mutex> lk(impl_->cache_mu_);
+    auto it = impl_->dpf_cache_.find(key_hash);
+    if (it != impl_->dpf_cache_.end()) key_sp = it->second;
+  }
+  if (!key_sp) {
+    size_t boff = 0;
+    auto key_obj = std::make_shared<Impl::DpfKey>(Impl::deserialize_dpf_key(blob, blob_len, boff));
+    std::lock_guard<std::mutex> lk(impl_->cache_mu_);
+    impl_->dpf_cache_[key_hash] = key_obj;
+    key_sp = std::move(key_obj);
   }
 
   std::vector<uint8_t> bit_shares;
-  impl_->eval_lt_shares(entry, party0, xs_u64, bit_shares);
+  // Reuse the old batched sorter-based engine, but operating on a single party key.
+  // NOTE: This keeps semantics identical to prefix_parities-based eval.
+  bit_shares.assign(xs_u64.size(), 0);
+  if (!xs_u64.empty()) {
+    const uint64_t mask = Impl::mask_bits(in_bits);
+    std::vector<size_t> order(xs_u64.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+      return (xs_u64[a] & mask) < (xs_u64[b] & mask);
+    });
+    std::vector<uint64_t> xs_sorted(xs_u64.size());
+    for (size_t i = 0; i < xs_u64.size(); ++i) xs_sorted[i] = xs_u64[order[i]] & mask;
+    std::vector<uint8_t> bits_sorted(xs_u64.size(), 0);
+    constexpr size_t kBlock = 128;
+    const size_t blocks = (xs_sorted.size() + kBlock - 1) / kBlock;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static) if (blocks >= 8)
+#endif
+    for (long long b = 0; b < static_cast<long long>(blocks); ++b) {
+      size_t start = static_cast<size_t>(b) * kBlock;
+      size_t take = std::min(kBlock, xs_sorted.size() - start);
+      Impl::eval_prefix_parities_block<kBlock>(*key_sp, xs_sorted.data() + start, take, bits_sorted.data() + start);
+    }
+    if (party == 0) {
+      for (auto& v : bits_sorted) v ^= 1u;
+    }
+    for (size_t i = 0; i < xs_u64.size(); ++i) bit_shares[order[i]] = bits_sorted[i];
+  }
 
   for (size_t i = 0; i < xs_u64.size(); ++i) {
     uint8_t* out = outs_flat + i * static_cast<size_t>(out_bytes);
     if (bit_shares[i] & 1u) {
-      std::memcpy(out, payload.data(), payload.size());
+      std::memcpy(out, payload_ptr, static_cast<size_t>(payload_len));
     } else {
-      std::memset(out, 0, payload.size());
+      std::memset(out, 0, static_cast<size_t>(payload_len));
     }
   }
 }
@@ -284,4 +386,3 @@ void GrottoBackend::eval_interval_lut_many_u64(size_t key_bytes,
 }  // namespace proto
 
 #endif  // SUF_HAVE_LIBDPF
-

@@ -38,6 +38,11 @@ namespace std { using std::experimental::span; }
 #include "nn/kv_cache.hpp"
 #include "nn/tensor_view.hpp"
 #include "nn/softmax_block_task.hpp"
+#include "proto/backend_factory.hpp"
+
+#ifdef SUF_HAVE_CUDA
+#include <cuda_runtime.h>
+#endif
 #include "proto/backend_clear.hpp"
 #include "proto/backend_gpu.hpp"
 #include "proto/beaver.hpp"
@@ -765,8 +770,13 @@ int main(int argc, char** argv) {
         ::setenv("SUF_OPEN_PACK_EFFBITS", "0", /*overwrite=*/0);
       }
     }
-	    // Auto-packing: skip bit-packing when savings are small to reduce CPU overhead.
-	    ::setenv("SUF_OPEN_PACK_AUTO", "1", /*overwrite=*/0);
+	    // Auto-packing: on GPU we prefer always packing to ring bits (Sigma-style) since
+	    // device-side packing is enabled; on CPU we keep auto-pack to avoid overhead.
+	    if (args.backend == "gpu") {
+	      ::setenv("SUF_OPEN_PACK_AUTO", "0", /*overwrite=*/0);
+	    } else {
+	      ::setenv("SUF_OPEN_PACK_AUTO", "1", /*overwrite=*/0);
+	    }
 	    // Benchmark-only: when packing decision is deterministic (no dynamic eff-bits),
 	    // skip per-flush packing negotiation to reduce protocol overhead.
 	    if (args.backend == "gpu") {
@@ -850,25 +860,36 @@ int main(int argc, char** argv) {
 
 	    // Backends
 	    std::unique_ptr<proto::PfssBackendBatch> be0, be1;
-#ifdef SUF_HAVE_CUDA
 	    if (args.backend == "gpu") {
-	      be0 = proto::make_real_gpu_backend();
-	      be1 = proto::make_real_gpu_backend();
-	    }
-#endif
-	    if (!be0 || !be1) {
+	      // Default to GPU PFSS, but allow overriding via SUF_PFSS_BACKEND (e.g., grotto)
+	      // so we can swap in a faster predicate/LUT engine without changing semantics.
+	      const proto::PfssBackendOptions defaults{.kind = proto::PfssBackendKind::Gpu, .allow_gpu_stub = true};
+	      be0 = proto::make_pfss_backend_from_env(defaults);
+	      be1 = proto::make_pfss_backend_from_env(defaults);
+	    } else {
 	      // CPU benchmark mode:
 	      // - default: deterministic reference path for fast functional testing
 	      // - when `SUF_FORCE_PFSS=1`: run the full PFSS pipeline using a fast CPU backend
 	      //   so numbers remain meaningful (and comparable across implementations).
 	      if (std::getenv("SUF_FORCE_PFSS")) {
-	        be0 = std::make_unique<proto::SigmaFastBackend>();
-	        be1 = std::make_unique<proto::SigmaFastBackend>();
+	        const proto::PfssBackendOptions defaults{.kind = proto::PfssBackendKind::SigmaFast, .allow_gpu_stub = true};
+	        be0 = proto::make_pfss_backend_from_env(defaults);
+	        be1 = proto::make_pfss_backend_from_env(defaults);
 	      } else {
 	        be0 = std::make_unique<proto::ReferenceBackend>();
 	        be1 = std::make_unique<proto::ReferenceBackend>();
 	      }
 	    }
+
+#ifdef SUF_HAVE_CUDA
+    // If the PFSS backend is CPU-based but the benchmark requests `--backend gpu`,
+    // OpenCollector may still use CUDA for device packing. Force CUDA context
+    // initialization here (single-threaded) to avoid a rare multi-thread init
+    // deadlock when both party threads hit the first CUDA call concurrently.
+    if (args.backend == "gpu" && dynamic_cast<proto::PfssGpuStagedEval*>(be0.get()) == nullptr) {
+      (void)cudaFree(0);
+    }
+#endif
 
     compiler::TruncationPassContext trunc_ctx0(*be0, 0x77726c3064756c6cull);
     compiler::TruncationPassContext trunc_ctx1(*be1, 0x77726c3164756c6cull);
@@ -886,9 +907,18 @@ int main(int argc, char** argv) {
                          std::vector<uint64_t>& Xshare) {
       tl_party = party;
 #ifdef _OPENMP
+      // This benchmark runs both parties in one process. If the user doesn't
+      // pin OpenMP explicitly, default to splitting cores across parties to
+      // avoid severe oversubscription (especially after enabling more OpenMP
+      // in hot Composite-FSS post-processing loops).
       if (args.omp_threads > 0) {
         omp_set_dynamic(0);
         omp_set_num_threads(args.omp_threads);
+      } else if (!std::getenv("OMP_NUM_THREADS")) {
+        int procs = omp_get_num_procs();
+        int threads = std::max(1, std::min(16, procs / 2));
+        omp_set_dynamic(0);
+        omp_set_num_threads(threads);
       }
 #endif
       if (std::getenv("SUF_BENCH_TRACE")) {
@@ -896,15 +926,32 @@ int main(int argc, char** argv) {
                      party, args.backend.c_str(), rows, cols);
       }
       runtime::PhaseExecutor pe;
+      // Performance default: do not retain per-handle PFSS host buffers unless
+      // explicitly requested (most transformer runs never call `view()`).
+      const bool store_pfss_results = []() {
+        const char* env = std::getenv("SUF_PFSS_STORE_RESULTS");
+        if (!env) return false;
+        std::string v(env);
+        std::transform(v.begin(), v.end(), v.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return !(v == "0" || v == "false" || v == "off" || v == "no");
+      }();
+      pe.pfss_coeff_batch().set_store_results(store_pfss_results);
+      pe.pfss_trunc_batch().set_store_results(store_pfss_results);
       if (args.backend == "gpu") {
         // Default benchmark path materializes PFSS outputs to host immediately.
         // Keeping PFSS outputs on device is only beneficial when downstream tasks
-        // can consume device pointers; otherwise it adds extra staging overhead.
+        // can consume device pointers; enable via `SUF_BENCH_DEVICE_PIPELINE=1`.
         if (std::getenv("SUF_BENCH_DEVICE_PIPELINE")) {
           pe.set_device_pipeline(true);
           pe.set_device_pipeline_materialize(false);
-          pe.pfss_coeff_batch().set_device_outputs(true);
-          pe.pfss_trunc_batch().set_device_outputs(true);
+          // Device outputs are opt-in: when enabled, PFSS superbatches stage their
+          // outputs to device so downstream tasks can avoid D2H.
+          if (std::getenv("SUF_PFSS_DEVICE_OUTPUTS") == nullptr ||
+              std::string(std::getenv("SUF_PFSS_DEVICE_OUTPUTS")) != "0") {
+            pe.pfss_coeff_batch().set_device_outputs(true);
+            pe.pfss_trunc_batch().set_device_outputs(true);
+          }
         }
       }
 
@@ -913,6 +960,17 @@ int main(int argc, char** argv) {
       ctx.pfss_backend_override = &be;
       ctx.pfss_chan = &pfss_ch;
       ctx.frac_bits = fb;
+#ifdef SUF_HAVE_CUDA
+      // When the PFSS backend is CPU-based but the benchmark runs with `--backend gpu`,
+      // still enable OpenCollector device packing via a lightweight CUDA stream.
+      cudaStream_t open_stream = nullptr;
+      if (args.backend == "gpu" && dynamic_cast<proto::PfssGpuStagedEval*>(&be) == nullptr) {
+        cudaError_t st = cudaStreamCreateWithFlags(&open_stream, cudaStreamNonBlocking);
+        if (st == cudaSuccess) {
+          ctx.cuda_stream_override = reinterpret_cast<void*>(open_stream);
+        }
+      }
+#endif
       // Benchmarking default: rely on stall-driven flushing (no explicit phase barriers)
       // to maximize batching and reduce synchronization overhead. Set
       // `SUF_BENCH_KEEP_BARRIERS=1` to restore explicit barriers.
@@ -1006,6 +1064,12 @@ int main(int argc, char** argv) {
             &pe);
         Xshare.swap(Y);
       }
+#ifdef SUF_HAVE_CUDA
+      if (open_stream) {
+        cudaStreamDestroy(open_stream);
+        open_stream = nullptr;
+      }
+#endif
       if (std::getenv("SUF_BENCH_TRACE")) {
         std::fprintf(stderr, "[bench_suf] party %d finished transformer_layer_forward\n", party);
       }

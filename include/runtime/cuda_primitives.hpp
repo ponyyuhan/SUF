@@ -24,6 +24,16 @@ void launch_beaver_mul_kernel(int party,
                               size_t n,
                               void* stream /* cudaStream_t */);
 
+// Beaver multiplication (AoS triples): z = c + d*b + e*a (+ d*e if party==0), all mod 2^64.
+// `d_triples` points to an array of triples with layout {a,b,c} per element.
+void launch_beaver_mul_aos_kernel(int party,
+                                  const void* d_triples,  // array of {u64 a,b,c}
+                                  const uint64_t* d_d_open,
+                                  const uint64_t* d_e_open,
+                                  uint64_t* d_out,
+                                  size_t n,
+                                  void* stream /* cudaStream_t */);
+
 // Faithful truncation: y = x >> frac_bits (unsigned, wrap-free).
 // Inputs/outputs are device pointers. No carry handling; intended for sanity tests.
 void launch_trunc_shift_kernel(const uint64_t* d_in,
@@ -203,6 +213,18 @@ void launch_unpack_add_to_signed_kernel(const uint64_t* d_local_share,
                                         int ring_bits,
                                         uint64_t ring_mask,
                                         void* stream /* cudaStream_t */);
+
+// Unpack `eff_bits`-packed remote shares, add to local shares, and mask to the ring bitwidth
+// (raw u64 ring elements, no sign-extension). This is the preferred OpenCollector GPU path
+// when downstream consumers only need modulo-2^n values.
+void launch_unpack_add_mod_kernel(const uint64_t* d_local_share,
+                                  const uint64_t* d_packed_remote,
+                                  int eff_bits,
+                                  uint64_t* d_out_mod,  // masked ring elements
+                                  size_t n,
+                                  int ring_bits,
+                                  uint64_t ring_mask,
+                                  void* stream /* cudaStream_t */);
 
 #ifdef __cplusplus
 }  // extern "C"

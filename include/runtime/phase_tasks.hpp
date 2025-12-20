@@ -73,6 +73,27 @@ namespace runtime {
 inline int64_t to_signed(uint64_t v) { return proto::to_signed(v); }
 inline uint64_t to_ring(int64_t v) { return proto::from_signed(v); }
 
+inline bool env_flag_enabled_default(const char* name, bool defv) {
+  const char* env = std::getenv(name);
+  if (!env) return defv;
+  std::string v(env);
+  std::transform(v.begin(), v.end(), v.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return !(v == "0" || v == "false" || v == "off" || v == "no");
+}
+
+inline size_t env_size_t_default(const char* name, size_t defv) {
+  const char* env = std::getenv(name);
+  if (!env) return defv;
+  try {
+    long long v = std::stoll(std::string(env));
+    if (v <= 0) return defv;
+    return static_cast<size_t>(v);
+  } catch (...) {
+    return defv;
+  }
+}
+
 // Simple Beaver mul task (secret x secret). Uses OpenCollector if provided,
 // otherwise falls back to direct channel opens.
 class MulTask final : public detail::PhaseTask {
@@ -119,9 +140,9 @@ class MulTask final : public detail::PhaseTask {
         for (size_t i = 0; i < diff_.size(); ++i) {
           if (R.party == 0) {
             R.net_chan->send_u64(diff_[i]);
-            opened_[i] = static_cast<int64_t>(diff_[i] + R.net_chan->recv_u64());
+            opened_[i] = proto::add_mod(diff_[i], R.net_chan->recv_u64());
           } else {
-            opened_[i] = static_cast<int64_t>(diff_[i] + R.net_chan->recv_u64());
+            opened_[i] = proto::add_mod(diff_[i], R.net_chan->recv_u64());
             R.net_chan->send_u64(diff_[i]);
           }
         }
@@ -132,11 +153,24 @@ class MulTask final : public detail::PhaseTask {
         if (st_ == St::WaitOpen) {
           if (!R.opens) throw std::runtime_error("MulTask: no OpenCollector");
           if (!R.opens->ready(h_)) return detail::Need::Open;
-          auto v = R.opens->view(h_);
+#ifdef SUF_HAVE_CUDA
+          // Prefer device opens when available (avoids a full D2H materialization).
+          d_opened_ = R.opens->view_device_u64(h_);
+          d_opened_words_ = d_opened_ ? (2 * x_.size()) : 0;
+          if (!d_opened_) {
+            auto v = R.opens->view_u64(h_);
+            if (v.size() != 2 * x_.size()) {
+              throw std::runtime_error("MulTask: opened size mismatch");
+            }
+            opened_.assign(v.begin(), v.end());
+          }
+#else
+          auto v = R.opens->view_u64(h_);
           if (v.size() != 2 * x_.size()) {
             throw std::runtime_error("MulTask: opened size mismatch");
           }
           opened_.assign(v.begin(), v.end());
+#endif
           st_ = St::Finalize;
         }
         [[fallthrough]];
@@ -144,7 +178,13 @@ class MulTask final : public detail::PhaseTask {
       case St::Finalize: {
         bool use_gpu = false;
 #ifdef SUF_HAVE_CUDA
-        if (!force_cpu_mul_ && std::getenv("SUF_MUL_GPU")) use_gpu = true;
+        const bool gpu_backend =
+            (R.pfss_backend && dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr) ||
+            (R.cuda_stream != nullptr);
+        const bool want_gpu = env_flag_enabled_default("SUF_MUL_GPU", gpu_backend);
+        const size_t min_elems =
+            env_size_t_default("SUF_MUL_GPU_MIN_ELEMS", gpu_backend ? (1ull << 12) : (1ull << 20));
+        if (!force_cpu_mul_ && want_gpu && x_.size() >= min_elems) use_gpu = true;
 #endif
         if (use_gpu) {
 #ifdef SUF_HAVE_CUDA
@@ -156,7 +196,9 @@ class MulTask final : public detail::PhaseTask {
           }
           size_t n = x_.size();
           size_t bytes = n * sizeof(uint64_t);
-          uint64_t *d_d = nullptr, *d_e = nullptr, *d_a = nullptr, *d_b = nullptr, *d_c = nullptr, *d_out = nullptr;
+          uint64_t* d_out = nullptr;
+          uint64_t* d_open_tmp = nullptr;
+          void* d_tri = nullptr;
           auto do_malloc = [&](uint64_t** p, size_t sz) {
             cudaError_t st = cudaSuccess;
 #if defined(CUDART_VERSION) && (CUDART_VERSION >= 11020)
@@ -193,52 +235,64 @@ class MulTask final : public detail::PhaseTask {
                                        cudaGetErrorString(st));
             }
           };
-          do_malloc(&d_d, bytes);
-          do_malloc(&d_e, bytes);
-          do_malloc(&d_a, bytes);
-          do_malloc(&d_b, bytes);
-          do_malloc(&d_c, bytes);
           do_malloc(&d_out, bytes);
-          // d and e are the opened diffs.
-          cudaMemcpyAsync(d_d, opened_.data(), bytes, cudaMemcpyHostToDevice, stream);
-          cudaMemcpyAsync(d_e, opened_.data() + n, bytes, cudaMemcpyHostToDevice, stream);
-          // Flatten triples to device.
-          std::vector<uint64_t> a_host(n), b_host(n), c_host(n);
-          for (size_t i = 0; i < n; ++i) {
-            a_host[i] = triples_[i].a;
-            b_host[i] = triples_[i].b;
-            c_host[i] = triples_[i].c;
+          const uint64_t* d_open = d_opened_;
+          if (!d_open || d_opened_words_ < 2 * n) {
+            if (opened_.empty()) {
+              if (!R.opens) throw std::runtime_error("MulTask: no OpenCollector");
+              auto v = R.opens->view_u64(h_);
+              if (v.size() != 2 * n) throw std::runtime_error("MulTask: opened size mismatch");
+              opened_.assign(v.begin(), v.end());
+            }
+            do_malloc(&d_open_tmp, 2 * bytes);
+            cudaMemcpyAsync(d_open_tmp, opened_.data(), 2 * bytes, cudaMemcpyHostToDevice, stream);
+            d_open = d_open_tmp;
           }
-          cudaMemcpyAsync(d_a, a_host.data(), bytes, cudaMemcpyHostToDevice, stream);
-          cudaMemcpyAsync(d_b, b_host.data(), bytes, cudaMemcpyHostToDevice, stream);
-          cudaMemcpyAsync(d_c, c_host.data(), bytes, cudaMemcpyHostToDevice, stream);
-          launch_beaver_mul_kernel(R.party,
-                                   /*x_unused=*/d_d,
-                                   /*y_unused=*/d_e,
-                                   d_a,
-                                   d_b,
-                                   d_c,
-                                   d_d,
-                                   d_e,
-                                   d_out,
-                                   n,
-                                   stream);
+          {
+            cudaError_t st = cudaMalloc(&d_tri, n * sizeof(proto::BeaverTriple64Share));
+            if (st != cudaSuccess) {
+              throw std::runtime_error(std::string("MulTask cudaMalloc(d_tri) failed: ") +
+                                       cudaGetErrorString(st));
+            }
+          }
+          {
+            cudaError_t st = cudaMemcpyAsync(d_tri,
+                                             triples_.data(),
+                                             n * sizeof(proto::BeaverTriple64Share),
+                                             cudaMemcpyHostToDevice,
+                                             stream);
+            if (st != cudaSuccess) {
+              throw std::runtime_error(std::string("MulTask cudaMemcpyAsync(triples) failed: ") +
+                                       cudaGetErrorString(st));
+            }
+          }
+          launch_beaver_mul_aos_kernel(R.party,
+                                       d_tri,
+                                       d_open,
+                                       d_open + n,
+                                       d_out,
+                                       n,
+                                       stream);
           cudaMemcpyAsync(out_.data(), d_out, bytes, cudaMemcpyDeviceToHost, stream);
           cudaStreamSynchronize(stream);
-          do_free(d_d);
-          do_free(d_e);
-          do_free(d_a);
-          do_free(d_b);
-          do_free(d_c);
+          if (d_open_tmp) do_free(d_open_tmp);
+          if (d_tri) cudaFree(d_tri);
           do_free(d_out);
 #else
           (void)use_gpu;
 #endif
         } else {
+          if (opened_.empty() && R.opens) {
+            auto v = R.opens->view_u64(h_);
+            if (v.size() != 2 * x_.size()) {
+              throw std::runtime_error("MulTask: opened size mismatch");
+            }
+            opened_.assign(v.begin(), v.end());
+          }
           #pragma omp parallel for schedule(static)
           for (size_t i = 0; i < x_.size(); ++i) {
-            uint64_t d = static_cast<uint64_t>(opened_[i]);
-            uint64_t e = static_cast<uint64_t>(opened_[x_.size() + i]);
+            uint64_t d = opened_[i];
+            uint64_t e = opened_[x_.size() + i];
             uint64_t z = triples_[i].c;
             z = proto::add_mod(z, proto::mul_mod(d, triples_[i].b));
             z = proto::add_mod(z, proto::mul_mod(e, triples_[i].a));
@@ -262,12 +316,16 @@ class MulTask final : public detail::PhaseTask {
   std::span<const uint64_t> x_;
   std::span<const uint64_t> y_;
   std::span<uint64_t> out_;
-  std::span<const proto::BeaverTriple64Share> triples_;
+	  std::span<const proto::BeaverTriple64Share> triples_;
 
-  std::vector<uint64_t> diff_;
-  std::vector<int64_t> opened_;
-  OpenHandle h_{};
-  bool force_cpu_mul_ = false; // preserve for future tuning
+	  std::vector<uint64_t> diff_;
+	  std::vector<uint64_t> opened_;
+	  OpenHandle h_{};
+#ifdef SUF_HAVE_CUDA
+  const uint64_t* d_opened_ = nullptr;  // points into OpenCollector device opened buffer
+  size_t d_opened_words_ = 0;
+#endif
+	  bool force_cpu_mul_ = false; // preserve for future tuning
 };
 
 // Faithful truncation task (TR/ARS/GapARS) using existing composite bundle.
@@ -420,9 +478,9 @@ class TruncTask final : public detail::PhaseTask {
         for (size_t i = 0; i < masked_.size(); ++i) {
           if (R.party == 0) {
             R.net_chan->send_u64(masked_[i]);
-            opened_[i] = static_cast<int64_t>(masked_[i] + R.net_chan->recv_u64());
+            opened_[i] = proto::add_mod(masked_[i], R.net_chan->recv_u64());
           } else {
-            opened_[i] = static_cast<int64_t>(masked_[i] + R.net_chan->recv_u64());
+            opened_[i] = proto::add_mod(masked_[i], R.net_chan->recv_u64());
             R.net_chan->send_u64(masked_[i]);
           }
         }
@@ -437,13 +495,10 @@ class TruncTask final : public detail::PhaseTask {
 #ifdef SUF_HAVE_CUDA
           // Device-only hatx is only safe/beneficial in device-pipeline mode, where
           // downstream consumers can keep data on GPU and avoid host staging.
-          const bool want_device_hatx = [&]() -> bool {
-            if (!R.device_pipeline) return false;
-            if (!R.pfss_backend) return false;
-            if (dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) == nullptr) return false;
-            const char* env = std::getenv("SUF_TRUNC_DEVICE_HATX");
-            return env && std::string(env) != "0";
-          }();
+          const bool want_device_hatx =
+              env_flag_enabled_default("SUF_TRUNC_DEVICE_HATX", false) &&
+              R.device_pipeline && R.pfss_backend &&
+              dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr;
           if (want_device_hatx) {
             const uint64_t* d_hatx_src = R.opens->view_device_u64(h_open_);
             if (d_hatx_src) {
@@ -479,7 +534,7 @@ class TruncTask final : public detail::PhaseTask {
             }
           }
 #endif
-          auto v = R.opens->view(h_open_);
+          auto v = R.opens->view_u64(h_open_);
           opened_.assign(v.begin(), v.end());
           device_hatx_only_ = false;
           if (R.pfss_backend &&
@@ -493,7 +548,7 @@ class TruncTask final : public detail::PhaseTask {
                 if (!k_i->compiled.extra_u64.empty()) {
                   shift = static_cast<int>(k_i->compiled.extra_u64[0]);
                 }
-                uint64_t x_plain = proto::sub_mod(static_cast<uint64_t>(opened_[i]), k_i->compiled.r_in);
+                uint64_t x_plain = proto::sub_mod(opened_[i], k_i->compiled.r_in);
                 int64_t shifted = (shift >= 64) ? 0ll : (static_cast<int64_t>(x_plain) >> shift);
                 out_[i] = (R.party == 0) ? static_cast<uint64_t>(shifted) : 0ull;
               }
@@ -505,7 +560,7 @@ class TruncTask final : public detail::PhaseTask {
                 shift = static_cast<int>(bundle_->keys.k0.compiled.extra_u64[0]);
               }
               for (size_t i = 0; i < opened_.size(); ++i) {
-                uint64_t x_plain = proto::sub_mod(static_cast<uint64_t>(opened_[i]), key_->compiled.r_in);
+                uint64_t x_plain = proto::sub_mod(opened_[i], key_->compiled.r_in);
                 int64_t shifted = (shift >= 64) ? 0ll : (static_cast<int64_t>(x_plain) >> shift);
                 out_[i] = (R.party == 0) ? static_cast<uint64_t>(shifted) : 0ull;
               }
@@ -528,9 +583,12 @@ class TruncTask final : public detail::PhaseTask {
             PreparedCompositeJob job;
             job.suf = &bundle_->per_elems[elem].suf;
             job.key = per_keys_[elem];
-            job.hook = nullptr;  // Run postproc locally to avoid double-application.
+            // Per-element masks are primarily a correctness mode; always materialize via PfssSuperBatch
+            // so the task doesn't need to `view()` and copy raw PFSS payloads.
+            job.hook = per_hooks_[elem];
             job.hatx_public.resize(1);
-            job.hatx_public[0] = static_cast<uint64_t>(opened_[elem]);
+            job.hatx_public[0] = opened_[elem];
+            job.out = nn::TensorView<uint64_t>(&out_[elem], {1});
             try {
               pfss_handles_.push_back(R.pfss_trunc->enqueue_composite(std::move(job)));
               pfss_next_elem_++;
@@ -546,7 +604,7 @@ class TruncTask final : public detail::PhaseTask {
           PreparedCompositeJob job;
           job.suf = &bundle_->suf;
           job.key = key_;
-          job.hook = nullptr;  // Run postproc locally after PFSS finalize.
+          job.hook = R.device_pipeline ? nullptr : hook_;
           const size_t elems = in_.size();
 #ifdef SUF_HAVE_CUDA
           if (R.device_pipeline &&
@@ -567,6 +625,9 @@ class TruncTask final : public detail::PhaseTask {
               job.hatx_device = d_in_device_;
               job.hatx_device_words = std::min(d_in_elems_, opened_.size());
             }
+          }
+          if (!R.device_pipeline) {
+            job.out = nn::TensorView<uint64_t>(out_.data(), {out_.size()});
           }
           if (row_offsets_hint_ && row_lengths_hint_ &&
               row_offsets_hint_->size() == row_lengths_hint_->size() + 1 &&
@@ -596,49 +657,6 @@ class TruncTask final : public detail::PhaseTask {
           for (size_t i = 0; i < pfss_handles_.size(); ++i) {
             if (!R.pfss_trunc->ready(pfss_handles_[i])) return detail::Need::PfssTrunc;
           }
-          for (size_t i = 0; i < pfss_handles_.size(); ++i) {
-            size_t elem = pfss_chunk_begin_ + i;
-            if (elem >= opened_.size()) {
-              throw std::runtime_error("TruncTask: per-element chunk index out of range");
-            }
-            auto v = R.pfss_trunc->view(pfss_handles_[i]);
-            if (v.arith_words < v.r) {
-              throw std::runtime_error("TruncTask: PFSS arith slice too small (per-element)");
-            }
-            std::vector<uint64_t> hook_out(v.r, 0);
-            const bool hook_needs_mul =
-                !(dynamic_cast<const gates::FaithfulTruncPostProc*>(per_hooks_[elem]) ||
-                  dynamic_cast<const gates::FaithfulArsPostProc*>(per_hooks_[elem]) ||
-                  dynamic_cast<const gates::GapArsPostProc*>(per_hooks_[elem]));
-            size_t need_triples = hook_needs_mul ? std::max<size_t>(v.ell, v.r) : 0;
-            const auto* key_i = per_keys_[elem];
-            const std::vector<proto::BeaverTriple64Share>* triples = &key_i->triples;
-            std::vector<proto::BeaverTriple64Share> tmp_triples;
-            if (triples->size() < need_triples && !triples->empty()) {
-              tmp_triples.reserve(need_triples);
-              for (size_t t = 0; t < need_triples; ++t) {
-                tmp_triples.push_back((*triples)[t % triples->size()]);
-              }
-              triples = &tmp_triples;
-            }
-            if (triples->size() < need_triples) {
-              throw std::runtime_error("TruncTask: insufficient triples (per-element)");
-            }
-            static const std::vector<proto::BeaverTriple64Share> k_empty_triples;
-            proto::BeaverMul64 mul{R.party, *R.pfss_chan, hook_needs_mul ? *triples : k_empty_triples};
-            uint64_t hatx_public = static_cast<uint64_t>(opened_[elem]);
-            per_hooks_[elem]->run_batch(R.party,
-                                     *R.pfss_chan,
-                                     mul,
-                                     &hatx_public,
-                                     v.arith,
-                                     v.r,
-                                     v.bools,
-                                     v.ell,
-                                     /*N=*/1,
-                                     hook_out.data());
-            out_[elem] = hook_out[0];
-          }
           pfss_handles_.clear();
           if (pfss_next_elem_ < opened_.size()) {
             st_ = St::EnqueuePfss;
@@ -648,6 +666,10 @@ class TruncTask final : public detail::PhaseTask {
           return detail::Need::None;
         }
         if (!R.pfss_trunc->ready(h_pfss_)) return detail::Need::PfssTrunc;
+        if (!R.device_pipeline) {
+          st_ = St::Done;
+          return detail::Need::None;
+        }
         auto v = R.pfss_trunc->view(h_pfss_);
         size_t elems = in_.size();
         if (v.arith_words < elems * v.r) {
@@ -657,7 +679,11 @@ class TruncTask final : public detail::PhaseTask {
         uint64_t* d_tmp_out = nullptr;
         cudaStream_t trunc_stream = nullptr;
 #ifdef SUF_HAVE_CUDA
-        if (R.device_pipeline && R.pfss_backend && std::getenv("SUF_TRUNC_GPU") && v.arith_device) {
+        if (R.device_pipeline && R.pfss_backend &&
+            env_flag_enabled_default(
+                "SUF_TRUNC_GPU",
+                dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr) &&
+            v.arith_device) {
             if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend)) {
               trunc_stream = reinterpret_cast<cudaStream_t>(staged->device_stream());
               gpu_direct = true;
@@ -972,7 +998,7 @@ class TruncTask final : public detail::PhaseTask {
 	  std::span<const uint64_t> in_;
 	  std::span<uint64_t> out_;
 	  std::vector<uint64_t> masked_;
-	  std::vector<int64_t> opened_;
+	  std::vector<uint64_t> opened_;
 	  OpenHandle h_open_{};
   PfssHandle h_pfss_{};
   const std::vector<int>* row_offsets_hint_ = nullptr;
@@ -988,15 +1014,13 @@ class TruncTask final : public detail::PhaseTask {
   size_t d_hatx_words_ = 0;
 #endif
 
-  const uint64_t* job_hatx() {
-    if (hatx_public_.empty()) {
-      hatx_public_.resize(opened_.size());
-      for (size_t i = 0; i < opened_.size(); ++i) {
-        hatx_public_[i] = static_cast<uint64_t>(opened_[i]);
-      }
-    }
-    return hatx_public_.data();
-  }
+	  const uint64_t* job_hatx() {
+	    if (hatx_public_.empty()) {
+	      hatx_public_.resize(opened_.size());
+	      for (size_t i = 0; i < opened_.size(); ++i) hatx_public_[i] = opened_[i];
+	    }
+	    return hatx_public_.data();
+	  }
 
   std::vector<uint64_t> hatx_public_;
 };
@@ -1098,9 +1122,9 @@ class ReluTask final : public detail::PhaseTask {
         for (size_t i = 0; i < masked_.size(); ++i) {
           if (R.party == 0) {
             R.net_chan->send_u64(masked_[i]);
-            opened_[i] = static_cast<int64_t>(masked_[i] + R.net_chan->recv_u64());
+            opened_[i] = proto::add_mod(masked_[i], R.net_chan->recv_u64());
           } else {
-            opened_[i] = static_cast<int64_t>(masked_[i] + R.net_chan->recv_u64());
+            opened_[i] = proto::add_mod(masked_[i], R.net_chan->recv_u64());
             R.net_chan->send_u64(masked_[i]);
           }
         }
@@ -1111,7 +1135,7 @@ class ReluTask final : public detail::PhaseTask {
         if (st_ == St::WaitOpen) {
           if (!R.opens) throw std::runtime_error("ReluTask: no OpenCollector");
           if (!R.opens->ready(h_open_)) return detail::Need::Open;
-          auto v = R.opens->view(h_open_);
+          auto v = R.opens->view_u64(h_open_);
           opened_.assign(v.begin(), v.end());
           st_ = St::EnqueuePfss;
         }
@@ -1150,7 +1174,7 @@ class ReluTask final : public detail::PhaseTask {
   const gates::CompositePartyKey* key_ = nullptr;
 
   std::vector<uint64_t> masked_;
-  std::vector<int64_t> opened_;
+  std::vector<uint64_t> opened_;
   OpenHandle h_open_{};
   PfssHandle h_pfss_{};
 };
@@ -1214,7 +1238,7 @@ class RsqrtTask final : public detail::PhaseTask {
       }
       case St::WaitOpen: {
         if (!R.opens->ready(h_open_)) return detail::Need::Open;
-        auto v = R.opens->view(h_open_);
+        auto v = R.opens->view_u64(h_open_);
         opened_.assign(v.begin(), v.end());
         st_ = St::EnqueueInit;
         [[fallthrough]];
@@ -1228,6 +1252,11 @@ class RsqrtTask final : public detail::PhaseTask {
         if (!opened_.empty()) {
           std::memcpy(job.hatx_public.data(), opened_.data(), opened_.size() * sizeof(uint64_t));
         }
+        const size_t elems = x_.size();
+        const size_t r = static_cast<size_t>(std::max(0, key_->compiled.r));
+        if (r == 0) throw std::runtime_error("RsqrtTask: compiled coeff gate has r=0");
+        coeff_buf_.assign(elems * r, 0ull);
+        job.out = nn::TensorView<uint64_t>(coeff_buf_.data(), {coeff_buf_.size()});
         if (!R.pfss_coeff) throw std::runtime_error("RsqrtTask: missing coeff PFSS batch");
         coeff_handle_ = R.pfss_coeff->enqueue_composite(std::move(job));
         st_ = St::WaitInit;
@@ -1236,20 +1265,19 @@ class RsqrtTask final : public detail::PhaseTask {
       }
       case St::WaitInit: {
         if (!R.pfss_coeff->ready(coeff_handle_)) return detail::Need::PfssCoeff;
-        auto v = R.pfss_coeff->view(coeff_handle_);
         size_t elems = x_.size();
-        if (v.r < 2 || v.arith_words < elems * v.r) {
+        const size_t r = static_cast<size_t>(std::max(0, key_->compiled.r));
+        if (r < 2 || coeff_buf_.size() < elems * r) {
           throw std::runtime_error("RsqrtTask: coeff payload too small");
         }
-        init_r_ = static_cast<int>(v.r);
-        coeff_buf_.assign(v.arith, v.arith + elems * v.r);
+        init_r_ = static_cast<int>(r);
         c0_.assign(elems, 0);
         c1_.assign(elems, 0);
         y_.assign(elems, 0);
         for (size_t i = 0; i < elems; ++i) {
-          c0_[i] = coeff_buf_[i * v.r + 0];
-          c1_[i] = (v.r > 1) ? coeff_buf_[i * v.r + 1] : 0ull;
-          uint64_t x_plain_ring = proto::sub_mod(static_cast<uint64_t>(opened_[i]), key_->compiled.r_in);
+          c0_[i] = coeff_buf_[i * r + 0];
+          c1_[i] = (r > 1) ? coeff_buf_[i * r + 1] : 0ull;
+          uint64_t x_plain_ring = proto::sub_mod(opened_[i], key_->compiled.r_in);
           int64_t x_plain_signed = to_signed(x_plain_ring);
           x_plain_debug_.push_back(x_plain_ring);
           int64_t c0s = to_signed(c0_[i]);
@@ -1415,7 +1443,7 @@ class RsqrtTask final : public detail::PhaseTask {
   std::span<const uint64_t> x_;
   std::span<uint64_t> out_;
   std::vector<uint64_t> masked_;
-  std::vector<int64_t> opened_;
+  std::vector<uint64_t> opened_;
   OpenHandle h_open_{};
   PfssHandle coeff_handle_{};
 
@@ -1565,16 +1593,19 @@ class MulRowBroadcastTask final : public detail::PhaseTask {
       }
       case St::WaitOpen: {
         if (!R.opens->ready(h_open_)) return detail::Need::Open;
-        auto opened = R.opens->view(h_open_);
-        if (opened.size() != mat_.size() + static_cast<size_t>(rows_)) {
+        size_t off_e = mat_.size();
+        if (h_open_.len != mat_.size() + static_cast<size_t>(rows_)) {
           throw std::runtime_error("MulRowBroadcastTask: opened mismatch");
         }
-        size_t off_e = mat_.size();
         bool gpu_mul = false;
 #ifdef SUF_HAVE_CUDA
-        if (std::getenv("SUF_MUL_GPU")) {
-          gpu_mul = true;
-        }
+        const bool gpu_backend =
+            (R.pfss_backend && dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr) ||
+            (R.cuda_stream != nullptr);
+        const bool want_gpu = env_flag_enabled_default("SUF_MUL_GPU", gpu_backend);
+        const size_t min_elems =
+            env_size_t_default("SUF_MUL_GPU_MIN_ELEMS", gpu_backend ? (1ull << 12) : (1ull << 20));
+        if (want_gpu && mat_.size() >= min_elems) gpu_mul = true;
 #endif
         if (gpu_mul) {
 #ifdef SUF_HAVE_CUDA
@@ -1586,18 +1617,31 @@ class MulRowBroadcastTask final : public detail::PhaseTask {
           }
           size_t elems = mat_.size();
           size_t bytes_mat = elems * sizeof(uint64_t);
-          std::vector<uint64_t> e_rows(static_cast<size_t>(rows_), 0);
-          for (int r = 0; r < rows_; ++r) {
-            e_rows[static_cast<size_t>(r)] = static_cast<uint64_t>(opened[off_e + static_cast<size_t>(r)]);
-          }
           const size_t bytes_rows = static_cast<size_t>(rows_) * sizeof(uint64_t);
+          const uint64_t* d_opened = R.opens->view_device_u64(h_open_);
+          const uint64_t* d_d_open = nullptr;
+          const uint64_t* d_e_open_rows = nullptr;
+          if (d_opened) {
+            d_d_open = d_opened;
+            d_e_open_rows = d_opened + off_e;
+          }
           uint64_t *d_d = nullptr, *d_a = nullptr, *d_b_rows = nullptr, *d_c = nullptr, *d_e_rows = nullptr, *d_out = nullptr;
           int* d_valid = nullptr;
-          cudaMalloc(&d_d, bytes_mat);
+          bool own_d_d = false;
+          bool own_d_e = false;
+          if (!d_d_open) {
+            cudaMalloc(&d_d, bytes_mat);
+            own_d_d = true;
+            d_d_open = d_d;
+          }
           cudaMalloc(&d_a, bytes_mat);
           cudaMalloc(&d_b_rows, bytes_rows);
           cudaMalloc(&d_c, bytes_mat);
-          cudaMalloc(&d_e_rows, bytes_rows);
+          if (!d_e_open_rows) {
+            cudaMalloc(&d_e_rows, bytes_rows);
+            own_d_e = true;
+            d_e_open_rows = d_e_rows;
+          }
           cudaMalloc(&d_out, bytes_mat);
           if (valid_lens_.size() != 0) {
             cudaMalloc(&d_valid, static_cast<size_t>(rows_) * sizeof(int));
@@ -1605,17 +1649,27 @@ class MulRowBroadcastTask final : public detail::PhaseTask {
                             static_cast<size_t>(rows_) * sizeof(int),
                             cudaMemcpyHostToDevice, stream);
           }
-          cudaMemcpyAsync(d_d, opened.data(), bytes_mat, cudaMemcpyHostToDevice, stream);
+          if (!d_opened) {
+            auto opened = R.opens->view_u64(h_open_);
+            if (opened.size() != mat_.size() + static_cast<size_t>(rows_)) {
+              throw std::runtime_error("MulRowBroadcastTask: opened mismatch");
+            }
+            cudaMemcpyAsync(d_d, opened.data(), bytes_mat, cudaMemcpyHostToDevice, stream);
+            std::vector<uint64_t> e_rows(static_cast<size_t>(rows_), 0);
+            for (int r = 0; r < rows_; ++r) {
+              e_rows[static_cast<size_t>(r)] = opened[off_e + static_cast<size_t>(r)];
+            }
+            cudaMemcpyAsync(d_e_rows, e_rows.data(), bytes_rows, cudaMemcpyHostToDevice, stream);
+          }
           cudaMemcpyAsync(d_a, triple_.A.data(), bytes_mat, cudaMemcpyHostToDevice, stream);
           cudaMemcpyAsync(d_c, triple_.C.data(), bytes_mat, cudaMemcpyHostToDevice, stream);
           cudaMemcpyAsync(d_b_rows, triple_.B.data(), bytes_rows, cudaMemcpyHostToDevice, stream);
-          cudaMemcpyAsync(d_e_rows, e_rows.data(), bytes_rows, cudaMemcpyHostToDevice, stream);
           launch_row_broadcast_mul_kernel(R.party,
                                           d_a,
                                           d_b_rows,
                                           d_c,
-                                          d_d,
-                                          d_e_rows,
+                                          d_d_open,
+                                          d_e_open_rows,
                                           rows_,
                                           cols_,
                                           d_valid,
@@ -1631,11 +1685,11 @@ class MulRowBroadcastTask final : public detail::PhaseTask {
             d_out_elems_ = elems;
             d_out = nullptr;
           }
-          if (d_d) cudaFree(d_d);
+          if (own_d_d && d_d) cudaFree(d_d);
           if (d_a) cudaFree(d_a);
           if (d_b_rows) cudaFree(d_b_rows);
           if (d_c) cudaFree(d_c);
-          if (d_e_rows) cudaFree(d_e_rows);
+          if (own_d_e && d_e_rows) cudaFree(d_e_rows);
           if (d_valid) cudaFree(d_valid);
           if (d_out) cudaFree(d_out);
           st_ = St::Done;
@@ -1643,16 +1697,20 @@ class MulRowBroadcastTask final : public detail::PhaseTask {
 #endif
         }
         // CPU fallback: compute Z shares.
+        auto opened = R.opens->view_u64(h_open_);
+        if (opened.size() != mat_.size() + static_cast<size_t>(rows_)) {
+          throw std::runtime_error("MulRowBroadcastTask: opened mismatch");
+        }
         for (int r = 0; r < rows_; ++r) {
           int L = (valid_lens_.size() == 0) ? cols_ : valid_lens_[r];
-          uint64_t e = static_cast<uint64_t>(opened[off_e + r]);
+          uint64_t e = opened[off_e + static_cast<size_t>(r)];
           for (int c = 0; c < cols_; ++c) {
             size_t idx = static_cast<size_t>(r * cols_ + c);
             if (c >= L) {
               out_[idx] = 0;
               continue;
             }
-            uint64_t d = static_cast<uint64_t>(opened[idx]);
+            uint64_t d = opened[idx];
             uint64_t z = triple_.C[idx];
             z = proto::add_mod(z, proto::mul_mod(d, triple_.B[r]));
             z = proto::add_mod(z, proto::mul_mod(e, triple_.A[idx]));
@@ -1798,7 +1856,13 @@ class LayerNormTask final : public detail::PhaseTask {
     switch (st_) {
       case St::Mean: {
 #ifdef SUF_HAVE_CUDA
-        if (R.device_pipeline && std::getenv("SUF_LN_GPU")) {
+        const bool want_gpu =
+            R.device_pipeline &&
+            env_flag_enabled_default(
+                "SUF_LN_GPU",
+                (R.pfss_backend && dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr) ||
+                    (R.cuda_stream != nullptr));
+        if (want_gpu) {
           cudaStream_t stream = nullptr;
           if (R.pfss_backend) {
             if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend)) {
@@ -1884,7 +1948,13 @@ class LayerNormTask final : public detail::PhaseTask {
       }
       case St::VarMul: {
 #ifdef SUF_HAVE_CUDA
-        if (R.device_pipeline && std::getenv("SUF_LN_GPU")) {
+        const bool want_gpu =
+            R.device_pipeline &&
+            env_flag_enabled_default(
+                "SUF_LN_GPU",
+                (R.pfss_backend && dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr) ||
+                    (R.cuda_stream != nullptr));
+        if (want_gpu) {
           if (std::getenv("SOFTMAX_BENCH_TRACE")) {
             std::fprintf(stderr, "[LayerNormTask] VarMul GPU rows=%d cols=%d elems=%zu\n",
                          rows_, cols_, x_.size());
@@ -2260,9 +2330,9 @@ class CubicPolyTask final : public detail::PhaseTask {
         for (size_t i = 0; i < masked_.size(); ++i) {
           if (R.party == 0) {
             R.net_chan->send_u64(masked_[i]);
-            opened_[i] = static_cast<int64_t>(masked_[i] + R.net_chan->recv_u64());
+            opened_[i] = proto::add_mod(masked_[i], R.net_chan->recv_u64());
           } else {
-            opened_[i] = static_cast<int64_t>(masked_[i] + R.net_chan->recv_u64());
+            opened_[i] = proto::add_mod(masked_[i], R.net_chan->recv_u64());
             R.net_chan->send_u64(masked_[i]);
           }
         }
@@ -2273,7 +2343,7 @@ class CubicPolyTask final : public detail::PhaseTask {
         if (st_ == St::WaitXhatOpen) {
           if (!R.opens) throw std::runtime_error("CubicPolyTask: no OpenCollector");
           if (!R.opens->ready(h_open_)) return detail::Need::Open;
-          auto v = R.opens->view(h_open_);
+          auto v = R.opens->view_u64(h_open_);
           opened_.assign(v.begin(), v.end());
           st_ = St::EnqueueCoeff;
         }
@@ -2288,6 +2358,11 @@ class CubicPolyTask final : public detail::PhaseTask {
         if (!opened_.empty()) {
           std::memcpy(job.hatx_public.data(), opened_.data(), opened_.size() * sizeof(uint64_t));
         }
+        const size_t elems = x_.size();
+        const size_t r = static_cast<size_t>(std::max(0, key_->compiled.r));
+        if (r == 0) throw std::runtime_error("CubicPolyTask: compiled coeff gate has r=0");
+        coeff_buf_.assign(elems * r, 0ull);  // AoS layout written by PFSS finalize
+        job.out = nn::TensorView<uint64_t>(coeff_buf_.data(), {coeff_buf_.size()});
         if (row_offsets_hint_ && row_lengths_hint_ &&
             row_offsets_hint_->size() == row_lengths_hint_->size() + 1 &&
             !row_offsets_hint_->empty()) {
@@ -2312,28 +2387,29 @@ class CubicPolyTask final : public detail::PhaseTask {
       }
       case St::WaitCoeff: {
         if (!R.pfss_coeff->ready(coeff_handle_)) return detail::Need::PfssCoeff;
-        auto v = R.pfss_coeff->view(coeff_handle_);
         size_t elems = x_.size();
         // Some backends may already return the evaluated polynomial (r=1).
-        if (v.r == 1 && v.arith_words == elems) {
-          for (size_t i = 0; i < elems; ++i) out_[i] = v.arith[i];
+        const size_t r = static_cast<size_t>(std::max(0, key_->compiled.r));
+        if (r == 1 && coeff_buf_.size() >= elems) {
+          for (size_t i = 0; i < elems; ++i) out_[i] = coeff_buf_[i];
           st_ = St::Done;
           return detail::Need::None;
         }
-        if (v.r < 4) throw std::runtime_error("CubicPolyTask: coeff payload too small");
-        coeff_buf_.assign(v.arith, v.arith + elems * v.r);  // AoS layout
+        if (r < 4 || coeff_buf_.size() < elems * r) {
+          throw std::runtime_error("CubicPolyTask: coeff payload too small");
+        }
         soa_buf_.assign(4 * elems, 0);
         if (std::getenv("SOFTMAX_DBG_COEFF")) {
-          std::cerr << "[CubicPolyTask p" << R.party << "] coeff v.r=" << v.r
-                    << " arith_words=" << v.arith_words
+          std::cerr << "[CubicPolyTask p" << R.party << "] coeff r=" << r
+                    << " arith_words=" << coeff_buf_.size()
                     << " elems=" << elems
-                    << " first=" << (v.arith_words > 0 ? v.arith[0] : 0) << "\n";
+                    << " first=" << (coeff_buf_.empty() ? 0 : coeff_buf_[0]) << "\n";
         }
         for (size_t i = 0; i < elems; ++i) {
-          soa_buf_[0 * elems + i] = coeff_buf_[i * v.r + 0];
-          soa_buf_[1 * elems + i] = coeff_buf_[i * v.r + 1];
-          soa_buf_[2 * elems + i] = coeff_buf_[i * v.r + 2];
-          soa_buf_[3 * elems + i] = coeff_buf_[i * v.r + 3];
+          soa_buf_[0 * elems + i] = coeff_buf_[i * r + 0];
+          soa_buf_[1 * elems + i] = coeff_buf_[i * r + 1];
+          soa_buf_[2 * elems + i] = coeff_buf_[i * r + 2];
+          soa_buf_[3 * elems + i] = coeff_buf_[i * r + 3];
         }
         c0_ = std::span<const uint64_t>(soa_buf_.data() + 0 * elems, elems);
         c1_ = std::span<const uint64_t>(soa_buf_.data() + 1 * elems, elems);
@@ -2344,7 +2420,7 @@ class CubicPolyTask final : public detail::PhaseTask {
           logged = true;
           if (std::getenv("SUF_CUBIC_TRACE")) {
             std::cerr << "CubicPolyTask coeffs: c0=" << c0_[0] << " c1=" << c1_[0]
-                      << " c2=" << c2_[0] << " c3=" << c3_[0] << " r=" << v.r << "\n";
+                      << " c2=" << c2_[0] << " c3=" << c3_[0] << " r=" << r << "\n";
           }
         }
         if (R.pfss_backend &&
@@ -2514,7 +2590,7 @@ class CubicPolyTask final : public detail::PhaseTask {
   std::span<uint64_t> out_;
 
   std::vector<uint64_t> masked_;
-  std::vector<int64_t> opened_;
+  std::vector<uint64_t> opened_;
   OpenHandle h_open_{};
   PfssHandle coeff_handle_{};
   std::span<const proto::BeaverTriple64Share> triple_span_;
@@ -2656,7 +2732,7 @@ class RecipTask final : public detail::PhaseTask {
         if (st_ == St::WaitXhatOpen) {
           if (!R.opens) throw std::runtime_error("RecipTask: no OpenCollector");
           if (!R.opens->ready(h_open_)) return detail::Need::Open;
-          auto v = R.opens->view(h_open_);
+          auto v = R.opens->view_u64(h_open_);
           opened_.assign(v.begin(), v.end());
           if (!force_ref_full_ &&
               R.pfss_backend &&
@@ -2665,7 +2741,7 @@ class RecipTask final : public detail::PhaseTask {
               !std::getenv("SUF_FORCE_PFSS")) {
             y_.assign(opened_.size(), 0);
             for (size_t i = 0; i < opened_.size(); ++i) {
-              uint64_t x_plain_ring = proto::sub_mod(static_cast<uint64_t>(opened_[i]), key_->compiled.r_in);
+              uint64_t x_plain_ring = proto::sub_mod(opened_[i], key_->compiled.r_in);
               int64_t x_plain_signed = to_signed(x_plain_ring);
               uint64_t share = (R.party == 0)
                                    ? static_cast<uint64_t>(gates::ref_reciprocal_fixed(
@@ -2690,6 +2766,11 @@ class RecipTask final : public detail::PhaseTask {
         if (!opened_.empty()) {
           std::memcpy(job.hatx_public.data(), opened_.data(), opened_.size() * sizeof(uint64_t));
         }
+        const size_t elems = x_.size();
+        const size_t r = static_cast<size_t>(std::max(0, key_->compiled.r));
+        if (r == 0) throw std::runtime_error("RecipTask: compiled coeff gate has r=0");
+        coeff_buf_.assign(elems * r, 0ull);  // AoS layout written by PFSS finalize
+        job.out = nn::TensorView<uint64_t>(coeff_buf_.data(), {coeff_buf_.size()});
         if (!R.pfss_coeff) throw std::runtime_error("RecipTask: missing coeff PFSS batch");
         coeff_handle_ = R.pfss_coeff->enqueue_composite(std::move(job));
         st_ = St::WaitCoeff;
@@ -2698,29 +2779,28 @@ class RecipTask final : public detail::PhaseTask {
       }
       case St::WaitCoeff: {
         if (!R.pfss_coeff->ready(coeff_handle_)) return detail::Need::PfssCoeff;
-        auto v = R.pfss_coeff->view(coeff_handle_);
         size_t elems = x_.size();
+        const size_t r = static_cast<size_t>(std::max(0, key_->compiled.r));
         if (std::getenv("SOFTMAX_DBG_COEFF")) {
-          std::cerr << "[RecipTask p" << R.party << "] coeff v.r=" << v.r
-                    << " arith_words=" << v.arith_words
+          std::cerr << "[RecipTask p" << R.party << "] coeff r=" << r
+                    << " arith_words=" << coeff_buf_.size()
                     << " elems=" << elems
-                    << " first=" << (v.arith_words > 0 ? v.arith[0] : 0) << "\n";
+                    << " first=" << (coeff_buf_.empty() ? 0 : coeff_buf_[0]) << "\n";
         }
         // Some backends may already emit evaluated init (single arith word).
-        if (v.r == 1 && v.arith_words >= elems) {
-          y_.assign(v.arith, v.arith + elems);
+        if (r == 1 && coeff_buf_.size() >= elems) {
+          y_.assign(coeff_buf_.begin(), coeff_buf_.begin() + elems);
           st_ = St::IterMul1;
           iter_ = 0;
           return detail::Need::None;
         }
-        if (v.r < 2 || v.arith_words < elems * v.r) {
+        if (r < 2 || coeff_buf_.size() < elems * r) {
           throw std::runtime_error("RecipTask: coeff payload too small");
         }
-        coeff_buf_.assign(v.arith, v.arith + elems * v.r);
         soa_buf_.assign(2 * elems, 0);
         for (size_t i = 0; i < elems; ++i) {
-          soa_buf_[0 * elems + i] = coeff_buf_[i * v.r + 0];
-          soa_buf_[1 * elems + i] = coeff_buf_[i * v.r + 1];
+          soa_buf_[0 * elems + i] = coeff_buf_[i * r + 0];
+          soa_buf_[1 * elems + i] = coeff_buf_[i * r + 1];
         }
         c0_ = std::span<const uint64_t>(soa_buf_.data() + 0 * elems, elems);
         c1_ = std::span<const uint64_t>(soa_buf_.data() + 1 * elems, elems);
@@ -2948,7 +3028,7 @@ class RecipTask final : public detail::PhaseTask {
   std::span<uint64_t> out_;
 
   std::vector<uint64_t> masked_;
-  std::vector<int64_t> opened_;
+  std::vector<uint64_t> opened_;
   OpenHandle h_open_{};
   PfssHandle coeff_handle_{};
 

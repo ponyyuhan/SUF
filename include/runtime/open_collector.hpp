@@ -110,6 +110,8 @@ class OpenCollector {
 
   // View opened values for a handle. Valid until next clear/flush.
   std::span<const int64_t> view(const OpenHandle& h) const;
+  // View opened values as raw ring elements (no sign-extension). Valid until next clear/flush.
+  std::span<const uint64_t> view_u64(const OpenHandle& h) const;
   // Optional device-resident opened view (u64 bit-patterns). Only available when
   // the last flush kept opened values on device (see `SUF_OPEN_PACK_DEVICE_KEEP_OPENED`).
   const uint64_t* view_device_u64(const OpenHandle& h) const;
@@ -144,10 +146,12 @@ class OpenCollector {
   uint64_t opened_generation_ = static_cast<uint64_t>(-1);
   bool opened_ready_ = false;
   mutable std::vector<int64_t> opened_flat_buf_;
+  mutable std::vector<uint64_t> opened_u64_flat_buf_;
   void* opened_device_ptr_ = nullptr;
   size_t opened_device_words_ = 0;
   bool opened_device_ready_ = false;
-  mutable bool opened_host_materialized_ = true;
+  mutable bool opened_host_materialized_ = true;  // signed view materialized
+  mutable bool opened_u64_materialized_ = true;
   mutable std::mutex opened_mu_;
   // Scratch buffers to avoid per-flush allocations in hot paths.
   std::vector<uint64_t> send_flat_buf_;

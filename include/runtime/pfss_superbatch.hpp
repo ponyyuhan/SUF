@@ -202,6 +202,11 @@ class PfssSuperBatch {
   PfssGpuStager* gpu_stager() const { return gpu_stager_; }
   void set_device_outputs(bool enable) { device_outputs_ = enable; }
   bool device_outputs() const { return device_outputs_; }
+  // When disabled, PFSS batches only materialize outputs to `job.out` and do not
+  // retain per-handle host copies for `view()`. This is a large end-to-end win
+  // for transformer inference where most handles are never inspected.
+  void set_store_results(bool enable) { store_results_ = enable; }
+  bool store_results() const { return store_results_; }
 
   // Evaluate all queued composite jobs and store PFSS outputs.
   void flush_eval(int party, proto::PfssBackendBatch& backend, proto::IChannel& ch);
@@ -266,6 +271,8 @@ class PfssSuperBatch {
     const uint64_t* dev_bools_ptr = nullptr;
     size_t dev_bools_words = 0;
   };
+
+  bool store_results_ = true;
   struct CompletedJob {
     size_t r = 0;
     size_t ell = 0;

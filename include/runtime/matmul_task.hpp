@@ -73,7 +73,7 @@ class MatmulTask final : public detail::PhaseTask {
       }
       case St::WaitOpen: {
         if (!R.opens->ready(h_open_)) return detail::Need::Open;
-        auto opened = R.opens->view(h_open_);
+        auto opened = R.opens->view_u64(h_open_);
         size_t total = static_cast<size_t>(M_) * static_cast<size_t>(N_) * static_cast<size_t>(K_);
         if (opened.size() != 2 * total) {
           throw std::runtime_error("MatmulTask: opened size mismatch");
@@ -86,8 +86,8 @@ class MatmulTask final : public detail::PhaseTask {
             for (int k = 0; k < K_; ++k) {
               size_t idx = static_cast<size_t>(m) * static_cast<size_t>(N_) * static_cast<size_t>(K_) +
                            static_cast<size_t>(n) * static_cast<size_t>(K_) + static_cast<size_t>(k);
-              uint64_t d = static_cast<uint64_t>(opened[idx]);
-              uint64_t e = static_cast<uint64_t>(opened[total + idx]);
+              uint64_t d = opened[idx];
+              uint64_t e = opened[total + idx];
               uint64_t z = triples_[idx].c;
               z = proto::add_mod(z, proto::mul_mod(d, triples_[idx].b));
               z = proto::add_mod(z, proto::mul_mod(e, triples_[idx].a));

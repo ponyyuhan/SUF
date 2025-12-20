@@ -503,6 +503,22 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   }
   pe->pfss_coeff_batch().set_limits(pfss_lim);
   pe->pfss_trunc_batch().set_limits(pfss_lim);
+  if (ctx && ctx->uses_gpu_backend() && ctx->pfss_gpu_stager) {
+    pe->pfss_coeff_batch().set_gpu_stager(ctx->pfss_gpu_stager);
+    pe->pfss_trunc_batch().set_gpu_stager(ctx->pfss_gpu_stager);
+  }
+  // Performance default: do not retain per-handle PFSS host buffers unless requested.
+  // This avoids large host copies for transformer runs that never call `view()`.
+  const bool store_pfss_results = []() {
+    const char* env = std::getenv("SUF_PFSS_STORE_RESULTS");
+    if (!env) return false;
+    std::string v(env);
+    std::transform(v.begin(), v.end(), v.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return !(v == "0" || v == "false" || v == "off" || v == "no");
+  }();
+  pe->pfss_coeff_batch().set_store_results(store_pfss_results);
+  pe->pfss_trunc_batch().set_store_results(store_pfss_results);
   runtime::OpenCollector::Limits open_lim;
   open_lim.max_pending_words = 1ull << 23;
   pe->open_collector().set_limits(open_lim);
@@ -529,6 +545,11 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   R.pfss_coeff = &pe->pfss_coeff_batch();
   R.pfss_trunc = &pe->pfss_coeff_batch();  // share batch for trunc + coeff
   R.opens = &pe->open_collector();
+  // Safe overlap only when PFSS uses a dedicated channel (override) or a dedicated net channel.
+  R.overlap_pfss_open = (pfss_chan_override != nullptr) || (ctx && ctx->pfss_net_chan != nullptr);
+  if (ctx) {
+    R.cuda_stream = ctx->cuda_stream();
+  }
   runtime::PfssPhasePlanner phase_planner;
   if (!(ctx && ctx->force_eager_pfss)) {
     R.pfss_planner = &phase_planner;

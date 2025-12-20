@@ -143,8 +143,6 @@ PfssHandle PfssSuperBatch::enqueue_composite(PreparedCompositeJob job) {
   }
   if (!slots_[job.token]) {
     slots_[job.token] = std::make_shared<PfssResultSlot>();
-    slots_[job.token]->arith_storage = std::make_shared<std::vector<uint64_t>>();
-    slots_[job.token]->bool_storage = std::make_shared<std::vector<uint64_t>>();
   }
   size_t hatx_words = hatx_words_for_job(job);
   size_t hatx_bytes = hatx_words * sizeof(uint64_t);
@@ -818,7 +816,16 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
   stats_.pending_jobs = 0;
   stats_.pending_hatx = 0;
   stats_.pending_device_bytes = 0;
-  populate_completed_();
+  if (store_results_) {
+    populate_completed_();
+  } else {
+    populate_device_views_();
+    for (const auto& job : jobs_) {
+      if (job.token < slots_.size() && slots_[job.token]) {
+        slots_[job.token]->ready.store(true);
+      }
+    }
+  }
   if (prof) {
     runtime::bench::add_online_ns(runtime::bench::OnlineTimeKind::PfssFlushEvalStageHatx, ns_stage_hatx);
     runtime::bench::add_online_ns(runtime::bench::OnlineTimeKind::PfssFlushEvalEval, ns_eval);
@@ -1075,6 +1082,91 @@ void PfssSuperBatch::finalize_all(int party, proto::IChannel& ch) {
   const bool prof = runtime::bench::online_profiling_enabled();
   const auto t0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   populate_device_views_();
+  if (!store_results_) {
+    for (size_t idx = 0; idx < jobs_.size(); ++idx) {
+      const auto& job = jobs_[idx];
+      if (idx >= slices_.size()) continue;
+      const auto& sl = slices_[idx];
+      if (sl.group_result == static_cast<size_t>(-1)) continue;
+      if (sl.group_result >= group_results_.size()) continue;
+      const auto& gr = group_results_[sl.group_result];
+
+      const size_t r = gr.r;
+      const size_t ell = gr.ell;
+      const size_t arith_words = sl.len * r;
+      const size_t bool_words = sl.len * ell;
+      const uint64_t* arith_base = gr.arith.data() + sl.start * r;
+      const uint64_t* bool_base =
+          (ell > 0 && !gr.bools.empty()) ? (gr.bools.data() + sl.start * ell) : nullptr;
+
+      const uint64_t* arith_in = arith_base;
+      std::vector<uint64_t> arith_hooked;
+      if (job.hook && job.out.data) {
+        job.hook->configure(job.key->compiled.layout);
+        arith_hooked.assign(arith_words, 0);
+
+        const bool hook_needs_mul =
+            !(dynamic_cast<const gates::FaithfulTruncPostProc*>(job.hook) ||
+              dynamic_cast<const gates::FaithfulArsPostProc*>(job.hook) ||
+              dynamic_cast<const gates::GapArsPostProc*>(job.hook));
+        const size_t need_triples = hook_needs_mul ? std::max(arith_words, bool_words) : 0;
+
+        const std::vector<proto::BeaverTriple64Share>* triples =
+            (job.key != nullptr) ? &job.key->triples : nullptr;
+        if (need_triples > 0) {
+          if (!triples || triples->empty()) {
+            throw std::runtime_error("PfssSuperBatch::finalize_all: missing Beaver triples for hook");
+          }
+          if (triples->size() < need_triples) {
+            throw std::runtime_error("PfssSuperBatch::finalize_all: insufficient Beaver triples for hook");
+          }
+        }
+        proto::BeaverMul64 mul{party, ch, hook_needs_mul ? *triples : k_empty_triples, 0};
+        job.hook->run_batch(party,
+                            ch,
+                            mul,
+                            job.hatx_public.data(),
+                            arith_base,
+                            r,
+                            bool_base,
+                            ell,
+                            sl.len,
+                            arith_hooked.data());
+        arith_in = arith_hooked.data();
+      }
+
+      if (job.out.data && job.key) {
+        const size_t out_cap = job.out.numel();
+        const size_t nwrite = std::min(arith_words, out_cap);
+#ifdef _OPENMP
+#pragma omp parallel for if (nwrite >= (1ull << 15)) schedule(static)
+#endif
+        for (size_t out_idx = 0; out_idx < nwrite; ++out_idx) {
+          const size_t rr = (r > 0) ? (out_idx % r) : 0;
+          uint64_t rout = (rr < job.key->r_out_share.size()) ? job.key->r_out_share[rr] : 0ull;
+          job.out.data[out_idx] = proto::sub_mod(arith_in[out_idx], rout);
+        }
+      }
+      if (job.token < slots_.size() && slots_[job.token]) {
+        auto& slot = slots_[job.token];
+        slot->r = r;
+        slot->ell = ell;
+        slot->ready.store(true);
+      }
+    }
+    jobs_.clear();
+    slices_.clear();
+    group_results_.clear();
+    flushed_ = false;
+    if (prof) {
+      const auto t1 = std::chrono::steady_clock::now();
+      runtime::bench::add_online_ns(
+          runtime::bench::OnlineTimeKind::PfssFinalizeTotal,
+          static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()));
+    }
+    return;
+  }
+
   if (completed_.empty()) populate_completed_();
   for (size_t idx = 0; idx < jobs_.size(); ++idx) {
     const auto& job = jobs_[idx];
@@ -1178,6 +1270,86 @@ void PfssSuperBatch::materialize_host(int party, proto::IChannel& ch) {
   const bool prof = runtime::bench::online_profiling_enabled();
   const auto t0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   populate_device_views_();
+  if (!store_results_) {
+    for (size_t idx = 0; idx < jobs_.size(); ++idx) {
+      const auto& job = jobs_[idx];
+      if (idx >= slices_.size()) continue;
+      const auto& sl = slices_[idx];
+      if (sl.group_result == static_cast<size_t>(-1)) continue;
+      if (sl.group_result >= group_results_.size()) continue;
+      const auto& gr = group_results_[sl.group_result];
+
+      const size_t r = gr.r;
+      const size_t ell = gr.ell;
+      const size_t arith_words = sl.len * r;
+      const size_t bool_words = sl.len * ell;
+      const uint64_t* arith_base = gr.arith.data() + sl.start * r;
+      const uint64_t* bool_base =
+          (ell > 0 && !gr.bools.empty()) ? (gr.bools.data() + sl.start * ell) : nullptr;
+
+      const uint64_t* arith_in = arith_base;
+      std::vector<uint64_t> arith_hooked;
+      if (job.hook && job.out.data) {
+        job.hook->configure(job.key->compiled.layout);
+        arith_hooked.assign(arith_words, 0);
+
+        const bool hook_needs_mul =
+            !(dynamic_cast<const gates::FaithfulTruncPostProc*>(job.hook) ||
+              dynamic_cast<const gates::FaithfulArsPostProc*>(job.hook) ||
+              dynamic_cast<const gates::GapArsPostProc*>(job.hook));
+        const size_t need_triples = hook_needs_mul ? std::max(arith_words, bool_words) : 0;
+
+        const std::vector<proto::BeaverTriple64Share>* triples =
+            (job.key != nullptr) ? &job.key->triples : nullptr;
+        if (need_triples > 0) {
+          if (!triples || triples->empty()) {
+            throw std::runtime_error("PfssSuperBatch::materialize_host: missing Beaver triples for hook");
+          }
+          if (triples->size() < need_triples) {
+            throw std::runtime_error("PfssSuperBatch::materialize_host: insufficient Beaver triples for hook");
+          }
+        }
+        proto::BeaverMul64 mul{party, ch, hook_needs_mul ? *triples : k_empty_triples, 0};
+        job.hook->run_batch(party,
+                            ch,
+                            mul,
+                            job.hatx_public.data(),
+                            arith_base,
+                            r,
+                            bool_base,
+                            ell,
+                            sl.len,
+                            arith_hooked.data());
+        arith_in = arith_hooked.data();
+      }
+
+      if (job.out.data && job.key) {
+        const size_t out_cap = job.out.numel();
+        const size_t nwrite = std::min(arith_words, out_cap);
+#ifdef _OPENMP
+#pragma omp parallel for if (nwrite >= (1ull << 15)) schedule(static)
+#endif
+        for (size_t out_idx = 0; out_idx < nwrite; ++out_idx) {
+          const size_t rr = (r > 0) ? (out_idx % r) : 0;
+          uint64_t rout = (rr < job.key->r_out_share.size()) ? job.key->r_out_share[rr] : 0ull;
+          job.out.data[out_idx] = proto::sub_mod(arith_in[out_idx], rout);
+        }
+      }
+      if (job.token < slots_.size() && slots_[job.token]) {
+        auto& slot = slots_[job.token];
+        slot->r = r;
+        slot->ell = ell;
+        slot->ready.store(true);
+      }
+    }
+    if (prof) {
+      const auto t1 = std::chrono::steady_clock::now();
+      runtime::bench::add_online_ns(
+          runtime::bench::OnlineTimeKind::PfssMaterializeHost,
+          static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()));
+    }
+    return;
+  }
   if (completed_.empty()) populate_completed_();
   for (size_t idx = 0; idx < jobs_.size(); ++idx) {
     const auto& job = jobs_[idx];

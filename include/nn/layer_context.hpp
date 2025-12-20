@@ -37,6 +37,11 @@ struct LayerContext {
   std::unique_ptr<proto::PfssBackendBatch> owned_pfss_backend;  // managed override if set
   proto::IChannel* pfss_chan = nullptr;  // optional dedicated PFSS byte channel
   net::Chan* pfss_net_chan = nullptr;  // optional dedicated PFSS channel; defaults to main chan
+#ifdef SUF_HAVE_CUDA
+  // Optional CUDA stream override used for OpenCollector device packing/unpacking
+  // and other CUDA helpers even when the PFSS backend is CPU-based.
+  void* cuda_stream_override = nullptr;  // cudaStream_t
+#endif
   int frac_bits = 16;
   // Enable a layer-wide super-plan: suppress inner PFSS/Open drains inside attention/MLP
   // and only drain at explicit layer barriers chosen by the caller.
@@ -97,6 +102,14 @@ struct LayerContext {
 #endif
     (void)b;
     return nullptr;
+  }
+
+  // Unified CUDA stream accessor used by runtime scheduling. Prefers explicit override.
+  void* cuda_stream() const {
+#ifdef SUF_HAVE_CUDA
+    if (cuda_stream_override) return cuda_stream_override;
+#endif
+    return pfss_compute_stream();
   }
 
   bool uses_gpu_backend() const {

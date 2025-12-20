@@ -85,6 +85,33 @@ __global__ void unpack_add_to_signed_kernel(const uint64_t* __restrict__ local_s
   out_signed[idx] = v;
 }
 
+__global__ void unpack_add_mod_kernel(const uint64_t* __restrict__ local_share,
+                                      const uint64_t* __restrict__ packed_remote,
+                                      int eff_bits,
+                                      size_t packed_words,
+                                      uint64_t* __restrict__ out_mod,
+                                      size_t n,
+                                      int ring_bits,
+                                      uint64_t ring_mask) {
+  const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= n) return;
+  uint64_t v = 0;
+  if (eff_bits >= 64) {
+    v = local_share[idx] + packed_remote[idx];
+  } else {
+    const size_t bit_off = idx * static_cast<size_t>(eff_bits);
+    const size_t word = bit_off >> 6;
+    const int bit = static_cast<int>(bit_off & 63ull);
+    uint64_t lo = (word < packed_words) ? packed_remote[word] : 0ull;
+    uint64_t hi = (word + 1 < packed_words) ? packed_remote[word + 1] : 0ull;
+    uint64_t r = (bit == 0) ? lo : ((lo >> bit) | (hi << (64 - bit)));
+    r &= mask_low_bits(eff_bits);
+    v = local_share[idx] + r;
+  }
+  if (ring_bits < 64) v &= ring_mask;
+  out_mod[idx] = v;
+}
+
 __global__ void beaver_mul_kernel(int party,
                                   const uint64_t* __restrict__ x,
                                   const uint64_t* __restrict__ y,
@@ -102,6 +129,32 @@ __global__ void beaver_mul_kernel(int party,
   uint64_t z = c[idx];
   z = add_mod(z, mul_mod(d, b[idx]));
   z = add_mod(z, mul_mod(e, a[idx]));
+  if (party == 0) {
+    z = add_mod(z, mul_mod(d, e));
+  }
+  out[idx] = z;
+}
+
+struct BeaverTripleAos {
+  uint64_t a;
+  uint64_t b;
+  uint64_t c;
+};
+
+__global__ void beaver_mul_aos_kernel(int party,
+                                      const BeaverTripleAos* __restrict__ triples,
+                                      const uint64_t* __restrict__ d_open,
+                                      const uint64_t* __restrict__ e_open,
+                                      uint64_t* __restrict__ out,
+                                      size_t n) {
+  size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= n) return;
+  uint64_t d = d_open[idx];
+  uint64_t e = e_open[idx];
+  BeaverTripleAos t = triples[idx];
+  uint64_t z = t.c;
+  z = add_mod(z, mul_mod(d, t.b));
+  z = add_mod(z, mul_mod(e, t.a));
   if (party == 0) {
     z = add_mod(z, mul_mod(d, e));
   }
@@ -524,6 +577,29 @@ extern "C" void launch_beaver_mul_kernel(int party,
 #endif
 }
 
+extern "C" void launch_beaver_mul_aos_kernel(int party,
+                                             const void* d_triples,
+                                             const uint64_t* d_d_open,
+                                             const uint64_t* d_e_open,
+                                             uint64_t* d_out,
+                                             size_t n,
+                                             void* stream) {
+#ifndef SUF_HAVE_CUDA
+  (void)party; (void)d_triples; (void)d_d_open; (void)d_e_open; (void)d_out; (void)n; (void)stream;
+#else
+  if (n == 0) return;
+  constexpr int kBlock = 256;
+  int grid = static_cast<int>((n + kBlock - 1) / kBlock);
+  beaver_mul_aos_kernel<<<grid, kBlock, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+      party,
+      reinterpret_cast<const BeaverTripleAos*>(d_triples),
+      d_d_open,
+      d_e_open,
+      d_out,
+      n);
+#endif
+}
+
 extern "C" void launch_trunc_shift_kernel(const uint64_t* d_in,
                                           uint64_t* d_out,
                                           int frac_bits,
@@ -883,5 +959,32 @@ extern "C" void launch_unpack_add_to_signed_kernel(const uint64_t* d_local_share
   int grid = static_cast<int>((n + kBlock - 1) / kBlock);
   unpack_add_to_signed_kernel<<<grid, kBlock, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
       d_local_share, d_packed_remote, eff_bits, packed_words, d_out_signed, n, ring_bits, ring_mask);
+#endif
+}
+
+extern "C" void launch_unpack_add_mod_kernel(const uint64_t* d_local_share,
+                                             const uint64_t* d_packed_remote,
+                                             int eff_bits,
+                                             uint64_t* d_out_mod,
+                                             size_t n,
+                                             int ring_bits,
+                                             uint64_t ring_mask,
+                                             void* stream) {
+#ifndef SUF_HAVE_CUDA
+  (void)d_local_share; (void)d_packed_remote; (void)eff_bits; (void)d_out_mod; (void)n;
+  (void)ring_bits; (void)ring_mask; (void)stream;
+#else
+  if (n == 0) return;
+  if (eff_bits <= 0) eff_bits = 1;
+  if (eff_bits > 64) eff_bits = 64;
+  if (ring_bits <= 0) ring_bits = 1;
+  if (ring_bits > 64) ring_bits = 64;
+  unsigned __int128 total_bits = static_cast<unsigned __int128>(n) *
+                                 static_cast<unsigned __int128>(eff_bits);
+  size_t packed_words = static_cast<size_t>((total_bits + 63) / 64);
+  constexpr int kBlock = 256;
+  int grid = static_cast<int>((n + kBlock - 1) / kBlock);
+  unpack_add_mod_kernel<<<grid, kBlock, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+      d_local_share, d_packed_remote, eff_bits, packed_words, d_out_mod, n, ring_bits, ring_mask);
 #endif
 }

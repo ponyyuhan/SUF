@@ -63,13 +63,27 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
   const runtime::RecipTask* recip_task_debug() const { return recip_task_.get(); }
 #ifdef SUF_HAVE_CUDA
   // Optional device probability buffer when device-only softmax is used.
-  uint64_t* device_prob() const { return d_prob_device_; }
+  uint64_t* device_prob() const {
+    // Callers that access the raw pointer often follow up with a D2H copy on the
+    // host. Ensure the producing stream has completed so synchronous copies see
+    // consistent data. This is intentionally lazy to avoid adding syncs to the
+    // normal end-to-end GPU pipeline (where the pointer stays on-device).
+    if (d_prob_device_ && !d_prob_synced_) {
+      if (d_prob_stream_) {
+        cudaStreamSynchronize(reinterpret_cast<cudaStream_t>(d_prob_stream_));
+      }
+      d_prob_synced_ = true;
+    }
+    return d_prob_device_;
+  }
   size_t device_prob_elems() const { return d_prob_elems_; }
   void release_device_prob() {
     if (d_prob_device_) {
       cudaFree(d_prob_device_);
       d_prob_device_ = nullptr;
       d_prob_elems_ = 0;
+      d_prob_stream_ = nullptr;
+      d_prob_synced_ = false;
     }
   }
 #endif
@@ -223,7 +237,13 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
       }
       case St::SumLocal: {
 #ifdef SUF_HAVE_CUDA
-        if (std::getenv("SUF_SOFTMAX_GPU") && R.device_pipeline) {
+        const bool want_gpu =
+            R.device_pipeline &&
+            runtime::env_flag_enabled_default(
+                "SUF_SOFTMAX_GPU",
+                (R.pfss_backend && dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr) ||
+                    (R.cuda_stream != nullptr));
+        if (want_gpu) {
           // GPU row-sum of exp_packed_. valid_lens optional.
           cudaStream_t stream = nullptr;
           if (R.pfss_backend) {
@@ -400,6 +420,13 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
             size_t have = trunc_task_->device_out_elems();
             // Keep ownership so downstream device consumers can reuse the buffer.
             d_prob_device_ = trunc_task_->take_device_out(&d_prob_elems_);
+            d_prob_stream_ = nullptr;
+            d_prob_synced_ = false;
+            if (R.pfss_backend) {
+              if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend)) {
+                d_prob_stream_ = staged->device_stream();
+              }
+            }
           }
           st_ = St::Done;
           return runtime::detail::Need::None;
@@ -410,11 +437,28 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
             size_t have = trunc_task_->device_out_elems();
             // Always keep device buffer for optional downstream consumers.
             d_prob_device_ = trunc_task_->take_device_out(&d_prob_elems_);
+            d_prob_stream_ = nullptr;
+            d_prob_synced_ = false;
+            cudaStream_t stream = nullptr;
+            if (R.pfss_backend) {
+              if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend)) {
+                stream = reinterpret_cast<cudaStream_t>(staged->device_stream());
+                d_prob_stream_ = staged->device_stream();
+              }
+            }
             if (plan_.materialize_host) {
               size_t n = prob_packed_.empty() ? prob_qf_.size() : prob_packed_.size();
               n = std::min(n, have);
               uint64_t* dst = prob_packed_.empty() ? prob_qf_.data() : prob_packed_.data();
-              cudaMemcpy(dst, d_prob_device_, n * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+              // Ensure the trunc output is ready on its producing stream before
+              // materializing to host.
+              if (stream) {
+                cudaMemcpyAsync(dst, d_prob_device_, n * sizeof(uint64_t), cudaMemcpyDeviceToHost, stream);
+                cudaStreamSynchronize(stream);
+              } else {
+                cudaMemcpy(dst, d_prob_device_, n * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+              }
+              d_prob_synced_ = true;
             }
           }
         }
@@ -464,6 +508,8 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
   size_t d_prod_elems_ = 0;
   uint64_t* d_prob_device_ = nullptr;  // owned trunc output when device_only
   size_t d_prob_elems_ = 0;
+  void* d_prob_stream_ = nullptr;      // cudaStream_t that produced d_prob_device_
+  mutable bool d_prob_synced_ = false;
 #endif
 
   void build_offsets() {

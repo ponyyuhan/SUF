@@ -28,8 +28,91 @@ public:
   SigmaFastBackend() : params_() {}
   explicit SigmaFastBackend(Params p) : params_(p) {}
 
+  // Embedded-key format.
+  //
+  // Historically, SigmaFastBackend returned 8-byte "IDs" and stored the full key
+  // material inside each backend instance. That breaks any setting where keys
+  // are cached/serialized and later evaluated by a *different* backend instance
+  // (e.g., benchmark material caching, separate processes per party).
+  //
+  // To match paper.md's PFSS abstraction (keys are self-contained byte strings),
+  // we default to embedded, self-contained key blobs. Set `SUF_SIGMAFAST_EMBED_KEYS=0`
+  // to restore the legacy ID-backed behavior for debugging.
+  static bool embedded_keys_enabled() {
+    const char* env = std::getenv("SUF_SIGMAFAST_EMBED_KEYS");
+    if (!env) return true;
+    std::string v(env);
+    std::transform(v.begin(), v.end(), v.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return !(v == "0" || v == "false" || v == "off" || v == "no");
+  }
+
+  static inline void append_u16_le(std::vector<u8>& out, uint16_t v) {
+    out.push_back(static_cast<u8>(v & 0xFFu));
+    out.push_back(static_cast<u8>((v >> 8) & 0xFFu));
+  }
+  static inline uint16_t read_u16_le(const uint8_t* p) {
+    return static_cast<uint16_t>(static_cast<uint16_t>(p[0]) |
+                                 (static_cast<uint16_t>(p[1]) << 8));
+  }
+  static inline void append_u32_le(std::vector<u8>& out, uint32_t v) {
+    out.push_back(static_cast<u8>(v & 0xFFu));
+    out.push_back(static_cast<u8>((v >> 8) & 0xFFu));
+    out.push_back(static_cast<u8>((v >> 16) & 0xFFu));
+    out.push_back(static_cast<u8>((v >> 24) & 0xFFu));
+  }
+  static inline uint32_t read_u32_le(const uint8_t* p) {
+    return static_cast<uint32_t>(static_cast<uint32_t>(p[0]) |
+                                 (static_cast<uint32_t>(p[1]) << 8) |
+                                 (static_cast<uint32_t>(p[2]) << 16) |
+                                 (static_cast<uint32_t>(p[3]) << 24));
+  }
+  static inline void pad_to_align(std::vector<u8>& out, size_t align) {
+    if (align == 0) return;
+    size_t rem = out.size() % align;
+    if (rem == 0) return;
+    size_t need = align - rem;
+    out.insert(out.end(), need, 0u);
+  }
+  static inline bool has_tag4(const std::vector<u8>& bytes, const char* tag4) {
+    return bytes.size() >= 4 && tag4 && std::memcmp(bytes.data(), tag4, 4) == 0;
+  }
+  static inline u64 bits_to_u64_msb(const std::vector<u8>& bits, int in_bits) {
+    u64 x = 0;
+    for (int i = 0; i < in_bits; ++i) {
+      x = (x << 1) | (static_cast<u64>(bits[static_cast<size_t>(i)]) & 1ull);
+    }
+    return x;
+  }
+
   // Base PfssBackend interface (fallback to un-packed storage for compatibility)
   DcfKeyPair gen_dcf(int in_bits, const std::vector<u8>& alpha_bits, const std::vector<u8>& payload_bytes) override {
+    if (embedded_keys_enabled()) {
+      if (in_bits <= 0 || in_bits > 64) throw std::runtime_error("SigmaFastBackend::gen_dcf in_bits out of range");
+      if (static_cast<int>(alpha_bits.size()) != in_bits) {
+        throw std::runtime_error("SigmaFastBackend::gen_dcf alpha_bits size mismatch");
+      }
+      const u64 alpha = bits_to_u64_msb(alpha_bits, in_bits);
+      if (payload_bytes.size() > 0xFFFFu) {
+        throw std::runtime_error("SigmaFastBackend::gen_dcf payload too large");
+      }
+      auto build = [&](int party, const std::vector<u8>& payload) -> std::vector<u8> {
+        std::vector<u8> out;
+        out.reserve(4 + 1 + 1 + 2 + 8 + payload.size());
+        out.insert(out.end(), {'S','D','C','1'});
+        out.push_back(static_cast<u8>(party & 1));
+        out.push_back(static_cast<u8>(in_bits));
+        append_u16_le(out, static_cast<uint16_t>(payload.size()));
+        auto a = proto::pack_u64_le(alpha);
+        out.insert(out.end(), a.begin(), a.end());
+        out.insert(out.end(), payload.begin(), payload.end());
+        return out;
+      };
+      DcfKeyPair kp;
+      kp.k0.bytes = build(/*party=*/0, payload_bytes);
+      kp.k1.bytes = build(/*party=*/1, std::vector<u8>(payload_bytes.size(), 0u));
+      return kp;
+    }
     Program p;
     p.in_bits = in_bits;
     p.alpha_bits = alpha_bits;
@@ -44,6 +127,25 @@ public:
   }
   std::vector<u8> eval_dcf(int in_bits, const FssKey& kb, const std::vector<u8>& x_bits) const override {
     if (static_cast<int>(x_bits.size()) != in_bits) throw std::runtime_error("SigmaFastBackend::eval_dcf size mismatch");
+    if (has_tag4(kb.bytes, "SDC1")) {
+      if (kb.bytes.size() < 4 + 1 + 1 + 2 + 8) throw std::runtime_error("SigmaFastBackend::eval_dcf key truncated");
+      const int party = static_cast<int>(kb.bytes[4] & 1u);
+      (void)party;
+      const int kb_bits = static_cast<int>(kb.bytes[5]);
+      if (kb_bits != in_bits) throw std::runtime_error("SigmaFastBackend::eval_dcf in_bits mismatch");
+      const uint16_t payload_len = read_u16_le(kb.bytes.data() + 6);
+      const size_t need = 4 + 1 + 1 + 2 + 8 + static_cast<size_t>(payload_len);
+      if (kb.bytes.size() < need) throw std::runtime_error("SigmaFastBackend::eval_dcf key truncated payload");
+      const u64 alpha = proto::unpack_u64_le(kb.bytes.data() + 8);
+      const u64 x = bits_to_u64_msb(x_bits, in_bits) & ((in_bits == 64) ? ~0ull : ((u64(1) << in_bits) - 1));
+      const u64 a = alpha & ((in_bits == 64) ? ~0ull : ((u64(1) << in_bits) - 1));
+      const bool lt = (x < a);
+      std::vector<u8> out(static_cast<size_t>(payload_len), 0u);
+      if (lt && payload_len) {
+        std::memcpy(out.data(), kb.bytes.data() + (4 + 1 + 1 + 2 + 8), payload_len);
+      }
+      return out;
+    }
     u64 kid = proto::unpack_u64_le(kb.bytes.data());
     u64 id = kid >> 1;
     int party = static_cast<int>(kid & 1ull);
@@ -69,6 +171,40 @@ public:
 
   // Packed multi-threshold compare (CDPF-style) with AES-CTR masks (party seeds).
   PackedLtKeyPair gen_packed_lt(int in_bits, const std::vector<u64>& thresholds) override {
+    if (embedded_keys_enabled()) {
+      if (in_bits <= 0 || in_bits > 64) throw std::runtime_error("SigmaFastBackend::gen_packed_lt in_bits out of range");
+      const u64 mask = (in_bits == 64) ? ~0ull : ((u64(1) << in_bits) - 1);
+      const uint32_t thr_n = static_cast<uint32_t>(thresholds.size());
+      const uint16_t out_words = static_cast<uint16_t>((thresholds.size() + 63) / 64);
+      const u64 nonce = next_id_++;
+      std::array<uint8_t, 16> seed{};
+      std::mt19937_64 rng(nonce * 0x9e3779b97f4a7c15ull + thresholds.size());
+      for (auto& b : seed) b = static_cast<uint8_t>(rng() & 0xFFu);
+      auto build = [&](int party) -> std::vector<u8> {
+        std::vector<u8> out;
+        out.reserve(4 + 1 + 1 + 2 + 4 + 1 + 1 + 8 + 16 + thresholds.size() * sizeof(u64));
+        out.insert(out.end(), {'S','P','L','1'});
+        out.push_back(static_cast<u8>(party & 1));
+        out.push_back(static_cast<u8>(in_bits));
+        append_u16_le(out, out_words);
+        append_u32_le(out, thr_n);
+        out.push_back(static_cast<u8>(params_.xor_bitmask ? 1u : 0u));
+        out.push_back(0u);  // reserved
+        auto nbytes = proto::pack_u64_le(nonce);
+        out.insert(out.end(), nbytes.begin(), nbytes.end());
+        out.insert(out.end(), seed.begin(), seed.end());
+        pad_to_align(out, 8);
+        for (u64 t : thresholds) {
+          auto tb = proto::pack_u64_le(t & mask);
+          out.insert(out.end(), tb.begin(), tb.end());
+        }
+        return out;
+      };
+      PackedLtKeyPair kp;
+      kp.k0.bytes = build(/*party=*/0);
+      kp.k1.bytes = build(/*party=*/1);
+      return kp;
+    }
     if (in_bits <= 0 || in_bits > 64) throw std::runtime_error("SigmaFastBackend: in_bits out of range");
     // Deterministic IDs; store thresholds + AES seeds (one per party).
     u64 id = next_id_++;
@@ -102,6 +238,64 @@ public:
                            int in_bits,
                            int out_words,
                            u64* outs_bitmask) const override {
+    if (key_bytes >= 4 && keys_flat && std::memcmp(keys_flat, "SPL1", 4) == 0) {
+      if (key_bytes < 4 + 1 + 1 + 2 + 4 + 1 + 1 + 8 + 16) {
+        throw std::runtime_error("SigmaFastBackend: packed_lt embedded key truncated");
+      }
+      const int party = static_cast<int>(keys_flat[4] & 1u);
+      const int kb_bits = static_cast<int>(keys_flat[5]);
+      if (kb_bits != in_bits) throw std::runtime_error("SigmaFastBackend: packed_lt in_bits mismatch");
+      const uint16_t kb_out_words = read_u16_le(keys_flat + 6);
+      if (kb_out_words != static_cast<uint16_t>(out_words)) {
+        throw std::runtime_error("SigmaFastBackend: packed_lt out_words mismatch");
+      }
+      const uint32_t thr_n = read_u32_le(keys_flat + 8);
+      const bool xor_bitmask = (keys_flat[12] != 0);
+      const u64 nonce = proto::unpack_u64_le(keys_flat + 14);
+      const uint8_t* seed = keys_flat + 22;
+      size_t off = 22 + 16;
+      size_t pad = (8 - (off % 8)) & 7;
+      off += pad;
+      const size_t thr_bytes = static_cast<size_t>(thr_n) * sizeof(u64);
+      if (key_bytes < off + thr_bytes) throw std::runtime_error("SigmaFastBackend: packed_lt thresholds truncated");
+      const u64* thr_ptr = reinterpret_cast<const u64*>(keys_flat + off);
+      std::vector<u64> thr(thr_n);
+      for (size_t i = 0; i < thr.size(); ++i) {
+        thr[i] = thr_ptr[i];
+      }
+      const u64 mask = (in_bits == 64) ? ~0ull : ((u64(1) << in_bits) - 1);
+      AES_KEY aes{};
+      AES_set_encrypt_key(seed, 128, &aes);
+      const size_t total = xs_u64.size();
+      const size_t block = 1024;
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+      for (long long bb = 0; bb < static_cast<long long>((total + block - 1) / block); bb++) {
+        size_t blk_start = static_cast<size_t>(bb) * block;
+        size_t blk_end = std::min(blk_start + block, total);
+        const size_t n_blk = blk_end - blk_start;
+        const size_t cmp_words = static_cast<size_t>(out_words) * n_blk;
+        static thread_local std::vector<u64> cmp_masks_tls;
+        cmp_masks_tls.resize(cmp_words);
+        build_mask_block_words(xs_u64, blk_start, blk_end, thr, mask,
+                               static_cast<size_t>(out_words), cmp_masks_tls.data());
+        static thread_local std::vector<u64> ks_tls;
+        ks_tls.resize(static_cast<size_t>(out_words));
+        for (size_t idx = blk_start; idx < blk_end; idx++) {
+          fill_keystream_words(aes, (nonce << 32) ^ static_cast<u64>(idx), ks_tls.data(), ks_tls.size());
+          for (int w = 0; w < out_words; w++) {
+            u64 cm = cmp_masks_tls[(idx - blk_start) * static_cast<size_t>(out_words) + static_cast<size_t>(w)];
+            u64 share = ks_tls[static_cast<size_t>(w)];
+            if (xor_bitmask && party == 1) share ^= cm;
+            if (!xor_bitmask && party == 1) share = cm;
+            if (!xor_bitmask && party == 0) share = 0ull;
+            outs_bitmask[idx * out_words + static_cast<size_t>(w)] = share;
+          }
+        }
+      }
+      return;
+    }
     if (key_bytes < 8) throw std::runtime_error("SigmaFastBackend: key size too small");
     if (in_bits <= 0 || in_bits > 64) throw std::runtime_error("SigmaFastBackend: in_bits out of range");
     u64 mask = (in_bits == 64) ? ~0ull : ((u64(1) << in_bits) - 1);
@@ -144,6 +338,67 @@ public:
 
   // Interval LUT (vector payload) API
   IntervalLutKeyPair gen_interval_lut(const IntervalLutDesc& desc) override {
+    if (embedded_keys_enabled()) {
+      if (desc.in_bits <= 0 || desc.in_bits > 64) throw std::runtime_error("SigmaFastBackend::gen_interval_lut in_bits out of range");
+      if (desc.out_words <= 0) throw std::runtime_error("SigmaFastBackend::gen_interval_lut out_words must be >0");
+      size_t intervals = desc.cutpoints.size() > 0 ? desc.cutpoints.size() - 1 : 0;
+      if (intervals == 0) throw std::runtime_error("SigmaFastBackend::gen_interval_lut requires >=2 cutpoints");
+      const u64 mask = (desc.in_bits == 64) ? ~0ull : ((u64(1) << desc.in_bits) - 1);
+      const u64 nonce = next_id_++;
+      std::array<uint8_t, 16> seed{};
+      std::mt19937_64 rng(nonce * 0xdeadbeefULL + desc.cutpoints.size());
+      for (auto& b : seed) b = static_cast<uint8_t>(rng() & 0xFFu);
+      AES_KEY aes{};
+      AES_set_encrypt_key(seed.data(), 128, &aes);
+      std::vector<u64> payload0(desc.payload_flat.size(), 0ull);
+      std::vector<u64> payload1(desc.payload_flat.size(), 0ull);
+      for (size_t iv = 0; iv < intervals; iv++) {
+        size_t base = iv * static_cast<size_t>(desc.out_words);
+        std::vector<u64> ks(static_cast<size_t>(desc.out_words), 0);
+        fill_keystream_words(aes, (nonce << 24) ^ static_cast<u64>(iv), ks.data(), ks.size());
+        for (int w = 0; w < desc.out_words; w++) {
+          size_t idx = base + static_cast<size_t>(w);
+          u64 payload = desc.payload_flat[idx];
+          payload0[idx] = ks[static_cast<size_t>(w)];
+          payload1[idx] = proto::sub_mod(payload, payload0[idx]);
+        }
+      }
+      std::vector<u64> boundaries;
+      if (desc.cutpoints.size() >= 2) {
+        for (size_t i = 1; i + 1 < desc.cutpoints.size(); i++) {
+          boundaries.push_back(desc.cutpoints[i] & mask);
+        }
+      }
+      const uint32_t bcount = static_cast<uint32_t>(boundaries.size());
+      const uint32_t icount = static_cast<uint32_t>(intervals);
+      auto build = [&](int party, const std::vector<u64>& share_payload) -> std::vector<u8> {
+        std::vector<u8> out;
+        out.reserve(4 + 1 + 1 + 2 + 4 + 4 + 8 +
+                    boundaries.size() * sizeof(u64) + share_payload.size() * sizeof(u64));
+        out.insert(out.end(), {'S','I','L','1'});
+        out.push_back(static_cast<u8>(party & 1));
+        out.push_back(static_cast<u8>(desc.in_bits));
+        append_u16_le(out, static_cast<uint16_t>(desc.out_words));
+        append_u32_le(out, icount);
+        append_u32_le(out, bcount);
+        auto nbytes = proto::pack_u64_le(nonce);
+        out.insert(out.end(), nbytes.begin(), nbytes.end());
+        pad_to_align(out, 8);
+        for (u64 b : boundaries) {
+          auto bb = proto::pack_u64_le(b);
+          out.insert(out.end(), bb.begin(), bb.end());
+        }
+        for (u64 w : share_payload) {
+          auto wb = proto::pack_u64_le(w);
+          out.insert(out.end(), wb.begin(), wb.end());
+        }
+        return out;
+      };
+      IntervalLutKeyPair kp;
+      kp.k0.bytes = build(/*party=*/0, payload0);
+      kp.k1.bytes = build(/*party=*/1, payload1);
+      return kp;
+    }
     u64 id = next_id_++;
     IntervalEntry ie;
     ie.desc = desc;
@@ -188,6 +443,66 @@ public:
                                   const std::vector<u64>& xs_u64,
                                   int out_words,
                                   u64* outs_flat) const override {
+    if (key_bytes >= 4 && keys_flat && std::memcmp(keys_flat, "SIL1", 4) == 0) {
+      if (key_bytes < 4 + 1 + 1 + 2 + 4 + 4 + 8) throw std::runtime_error("SigmaFastBackend: interval LUT key truncated");
+      const int party = static_cast<int>(keys_flat[4] & 1u);
+      (void)party;
+      const int in_bits = static_cast<int>(keys_flat[5]);
+      const uint16_t kb_out_words = read_u16_le(keys_flat + 6);
+      if (kb_out_words != static_cast<uint16_t>(out_words)) throw std::runtime_error("SigmaFastBackend: interval out_words mismatch");
+      const uint32_t intervals = read_u32_le(keys_flat + 8);
+      const uint32_t bcount = read_u32_le(keys_flat + 12);
+      if (intervals == 0) return;
+      size_t off = 4 + 1 + 1 + 2 + 4 + 4 + 8;
+      size_t pad = (8 - (off % 8)) & 7;
+      off += pad;
+      const size_t bounds_bytes = static_cast<size_t>(bcount) * sizeof(u64);
+      const size_t payload_words = static_cast<size_t>(intervals) * static_cast<size_t>(out_words);
+      const size_t payload_bytes = payload_words * sizeof(u64);
+      if (key_bytes < off + bounds_bytes + payload_bytes) {
+        throw std::runtime_error("SigmaFastBackend: interval key truncated payload");
+      }
+      const u64* bounds_ptr = reinterpret_cast<const u64*>(keys_flat + off);
+      const u64* payload_ptr = reinterpret_cast<const u64*>(keys_flat + off + bounds_bytes);
+      std::vector<u64> bounds(bcount);
+      for (size_t i = 0; i < bounds.size(); ++i) bounds[i] = bounds_ptr[i];
+      const u64 mask = (in_bits == 64) ? ~0ull : ((u64(1) << in_bits) - 1);
+      size_t total = xs_u64.size();
+      const size_t block = 1024;
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+      for (long long bb = 0; bb < static_cast<long long>((total + block - 1) / block); bb++) {
+        size_t blk_start = static_cast<size_t>(bb) * block;
+        size_t blk_end = std::min(blk_start + block, total);
+        size_t cut_words = bounds.empty() ? 0 : ((bounds.size() + 63) / 64);
+        static thread_local std::vector<u64> cmp_masks_tls;
+        cmp_masks_tls.resize(cut_words * (blk_end - blk_start));
+        if (cut_words > 0) {
+          build_mask_block_words(xs_u64, blk_start, blk_end, bounds, mask, cut_words, cmp_masks_tls.data());
+        }
+        for (size_t idx_i = blk_start; idx_i < blk_end; idx_i++) {
+          size_t local = idx_i - blk_start;
+          size_t interval_idx = (intervals > 0) ? (static_cast<size_t>(intervals) - 1) : 0;
+          if (cut_words > 0) {
+            const u64* base = cmp_masks_tls.data() + local * cut_words;
+            for (size_t b = 0; b < bounds.size(); b++) {
+              size_t w = b >> 6;
+              size_t bit = b & 63;
+              u64 word = base[w];
+              if ((word >> bit) & 1ull) { interval_idx = b; break; }
+            }
+          } else {
+            interval_idx = 0;
+          }
+          const u64* row = payload_ptr + interval_idx * static_cast<size_t>(out_words);
+          for (int j = 0; j < out_words; j++) {
+            outs_flat[idx_i * out_words + static_cast<size_t>(j)] = row[static_cast<size_t>(j)];
+          }
+        }
+      }
+      return;
+    }
     if (key_bytes < 8) throw std::runtime_error("SigmaFastBackend: key size too small");
     size_t total = xs_u64.size();
     const size_t block = 1024;
