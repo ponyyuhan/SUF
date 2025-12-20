@@ -111,6 +111,7 @@ Correctness note: trunc/ARS helper bits (`carry/sign/wrap`) are maintained as **
   - `SUF_MUL_GPU=1` (GPU fast-path for BeaverMul64-based elementwise mul, where wired)
   - `SUF_MATMUL_BEAVER_GPU=1` (GPU Beaver matmul tasks, where wired)
 - Benchmark toggles:
+  - `SUF_CAUSAL_PREFILL=0|1` enables full-matrix causal prefill when `init_len==0` and `seq_len>1` (default `1`)
   - `SUF_PER_ELEMENT_MASKS=0|1` disables/enables per-element trunc/ARS masks (benchmark sets `0` by default for batching)
   - `SUF_BENCH_DEVICE_PIPELINE=1` keeps PFSS outputs on GPU when downstream can consume device pointers
   - `SUF_BENCH_CACHE_MATERIAL=1` caches expensive dealer-generated materials (GeLU/SiLU/nExp/recip + trunc bundles)

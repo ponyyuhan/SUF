@@ -19,10 +19,12 @@
 #include "gates/reciprocal_composite.hpp"
 #include "gates/nexp_composite.hpp"
 #include "gates/softmax_composite.hpp"
+#include "gates/relu_gate.hpp"
 #include "nn/matmul_beaver.hpp"
 #include "nn/matmul_publicW.hpp"
 #include "nn/matmul_gpu.hpp"
 #include "nn/softmax_block_task.hpp"
+#include "nn/row_maxdiff_task.hpp"
 #include "runtime/pfss_phase_planner.hpp"
 #include "runtime/pfss_superbatch.hpp"
 #include "runtime/phase_tasks.hpp"
@@ -39,6 +41,38 @@ namespace {
 
 inline int64_t to_signed(uint64_t v) { return proto::to_signed(v); }
 inline uint64_t to_ring(int64_t v) { return proto::from_signed(v); }
+
+class SeqTwoTask final : public runtime::detail::PhaseTask {
+ public:
+  SeqTwoTask(std::unique_ptr<runtime::detail::PhaseTask> first,
+             std::unique_ptr<runtime::detail::PhaseTask> second)
+      : first_(std::move(first)), second_(std::move(second)) {}
+  bool done() const override { return st_ == St::Done; }
+  runtime::detail::Need step(runtime::PhaseResources& R) override {
+    switch (st_) {
+      case St::First: {
+        auto need = first_->step(R);
+        if (!first_->done()) return need;
+        st_ = St::Second;
+        return runtime::detail::Need::None;
+      }
+      case St::Second: {
+        auto need = second_->step(R);
+        if (!second_->done()) return need;
+        st_ = St::Done;
+        return runtime::detail::Need::None;
+      }
+      case St::Done:
+        return runtime::detail::Need::None;
+    }
+    return runtime::detail::Need::None;
+  }
+
+ private:
+  enum class St { First, Second, Done } st_ = St::First;
+  std::unique_ptr<runtime::detail::PhaseTask> first_;
+  std::unique_ptr<runtime::detail::PhaseTask> second_;
+};
 
 #ifdef SUF_HAVE_CUDA
 struct BeaverMatmulScratch {
@@ -150,7 +184,8 @@ void open_to_plain(int party,
     for (size_t i = 0; i < len; ++i) ch.send_u64(local[i]);
   }
   for (size_t i = 0; i < len; ++i) {
-    plain_out[i] = to_signed(local[i]) + to_signed(other[i]);
+    uint64_t sum = proto::add_mod(local[i], other[i]);
+    plain_out[i] = to_signed(sum);
   }
 }
 
@@ -170,6 +205,8 @@ static bool per_element_masks_enabled() {
 
 static bool causal_prefill_enabled() {
   const char* env = std::getenv("SUF_CAUSAL_PREFILL");
+  // Enabled by default: the fast full-matrix causal prefill path matches
+  // step-by-step decoding semantics and is critical for GPT-style performance.
   if (!env) return true;
   std::string v(env);
   std::transform(v.begin(), v.end(), v.begin(),
@@ -1310,6 +1347,73 @@ void attention_forward(const AttentionConfig& cfg,
     }
   }
 
+  struct ReluTaskMaterial {
+    suf::SUF<uint64_t> suf;
+    gates::CompositeKeyPair keys;
+  };
+
+  std::vector<std::shared_ptr<ReluTaskMaterial>> relu_tmp_;
+
+  auto get_cached_relu_bundle = [&](size_t max_diffs) -> runtime::ReluBundle {
+    if (!use_phase_softmax) throw std::runtime_error("relu bundle requested without phase softmax");
+    const bool is_gpu = ctx && ctx->uses_gpu_backend();
+    // Avoid zero-sized batches: Composite-FSS keygen expects a positive batch_N for triple sizing.
+    const size_t batch_N = std::max<size_t>(max_diffs, 1);
+    if (bench_cache_enabled()) {
+      static std::mutex mu;
+      static std::unordered_map<SoftmaxMatKey, std::shared_ptr<ReluTaskMaterial>, SoftmaxMatKeyHash> cache_map;
+      SoftmaxMatKey key{is_gpu, fb, batch_N, /*triple_need=*/batch_N, /*which=*/6, /*nr_iters=*/0, /*per_element_masks=*/false};
+      std::lock_guard<std::mutex> lk(mu);
+      auto it = cache_map.find(key);
+      if (it == cache_map.end()) {
+        std::mt19937_64 rng_relu(0x72656c75ull);  // "relu"
+        auto suf_gate = gates::make_relu_suf_u64();
+        std::vector<uint64_t> r_out(static_cast<size_t>(suf_gate.r_out), rng_relu());
+        auto kp = gates::composite_gen_backend_with_masks(
+            suf_gate,
+            ctx->trunc_backend(),
+            rng_relu,
+            rng_relu(),
+            r_out,
+            /*batch_N=*/batch_N,
+            /*gate_kind=*/compiler::GateKind::SiLUSpline);
+        auto mat = std::make_shared<ReluTaskMaterial>();
+        mat->suf = std::move(suf_gate);
+        mat->keys = std::move(kp);
+        it = cache_map.emplace(key, std::move(mat)).first;
+      } else if (party == 0) {
+        runtime::bench::charge_offline_bytes(runtime::bench::composite_keypair_cost(it->second->keys));
+      }
+      runtime::ReluBundle b;
+      b.suf = &it->second->suf;
+      b.key0 = &it->second->keys.k0;
+      b.key1 = &it->second->keys.k1;
+      return b;
+    }
+
+    std::mt19937_64 rng_relu(0x72656c75ull);  // "relu"
+    auto suf_gate = gates::make_relu_suf_u64();
+    std::vector<uint64_t> r_out(static_cast<size_t>(suf_gate.r_out), rng_relu());
+    auto kp = gates::composite_gen_backend_with_masks(
+        suf_gate,
+        ctx->trunc_backend(),
+        rng_relu,
+        rng_relu(),
+        r_out,
+        /*batch_N=*/batch_N,
+        /*gate_kind=*/compiler::GateKind::SiLUSpline);
+    auto mat = std::make_shared<ReluTaskMaterial>();
+    mat->suf = std::move(suf_gate);
+    mat->keys = std::move(kp);
+    // Non-cached path: keep the storage alive for the duration of attention_forward.
+    relu_tmp_.push_back(std::move(mat));
+    runtime::ReluBundle b;
+    b.suf = &relu_tmp_.back()->suf;
+    b.key0 = &relu_tmp_.back()->keys.k0;
+    b.key1 = &relu_tmp_.back()->keys.k1;
+    return b;
+  };
+
   int64_t inv_sqrt = static_cast<int64_t>(
       std::llround((1.0 / std::sqrt(static_cast<double>(Dh))) * std::ldexp(1.0, fb)));
   if (inv_sqrt == 0) inv_sqrt = 1;
@@ -1363,6 +1467,7 @@ void attention_forward(const AttentionConfig& cfg,
     std::vector<uint64_t> score_scaled_qf(rows_all * cols_all, 0);
 
     std::shared_ptr<compiler::TruncationLoweringResult> score_trunc_bundle;
+    compiler::AbsBound score_abs_bound{};
     {
       compiler::GateParams score_trunc_p;
       score_trunc_p.kind = compiler::GateKind::AutoTrunc;
@@ -1370,11 +1475,11 @@ void attention_forward(const AttentionConfig& cfg,
       score_trunc_p.range_hint = compiler::matmul_accum_range(q_range, q_range, Dh);
       score_trunc_p.per_element_masks = per_element_masks_enabled();
       compiler::AbsBound q_abs = have_qkv_abs ? qkv_abs_hint : compiler::abs_from_range(q_range, true);
-      compiler::AbsBound score_abs = compiler::matmul_accum_abs(q_abs, q_abs, Dh);
-      score_trunc_p.abs_hint = score_abs;
-      if (score_abs.kind == compiler::RangeKind::Proof) {
+      score_abs_bound = compiler::matmul_accum_abs(q_abs, q_abs, Dh);
+      score_trunc_p.abs_hint = score_abs_bound;
+      if (score_abs_bound.kind == compiler::RangeKind::Proof) {
         score_trunc_p.gap_hint =
-            compiler::gap_from_abs(score_abs, fb, compiler::default_mask_bound(fb));
+            compiler::gap_from_abs(score_abs_bound, fb, compiler::default_mask_bound(fb));
       }
       if (bench_cache_enabled()) {
         static std::mutex mu;
@@ -1513,7 +1618,7 @@ void attention_forward(const AttentionConfig& cfg,
           }
         }
       }
-      plan.input_is_max_diff = false;  // open scores to compute stable max-diff
+      plan.input_is_max_diff = true;  // input is delta = max(row) - score
       plan.nexp = nexp_bundle;
       plan.recip = recip_bundle;
       plan.prob_trunc = choice;
@@ -1522,10 +1627,28 @@ void attention_forward(const AttentionConfig& cfg,
 
       pe->begin_phase(runtime::PhaseExecutor::Phase::kSoftmax);
       enter_phase();
-      pe->add_task(std::make_unique<nn::SoftmaxBlockTask>(
-          plan,
+      size_t max_diffs = 0;
+      if (plan.valid_lens.empty()) {
+        max_diffs = (rows_all * cols_all) / 2;
+      } else {
+        for (int L : plan.valid_lens) max_diffs += static_cast<size_t>(std::max(0, L / 2));
+      }
+      auto relu_bundle = get_cached_relu_bundle(max_diffs);
+      nn::RowMaxDiffPlan md_plan;
+      md_plan.rows = plan.rows;
+      md_plan.cols = plan.cols;
+      md_plan.valid_lens = plan.valid_lens;
+      md_plan.relu = relu_bundle;
+      std::vector<uint64_t> delta_qf(score_scaled_qf.size(), 0);
+      auto max_task = std::make_unique<nn::RowMaxDiffTask>(
+          md_plan,
           std::span<const uint64_t>(score_scaled_qf.data(), score_scaled_qf.size()),
-          std::span<uint64_t>(prob_shares.data(), prob_shares.size())));
+          std::span<uint64_t>(delta_qf.data(), delta_qf.size()));
+      auto sm_task = std::make_unique<nn::SoftmaxBlockTask>(
+          plan,
+          std::span<const uint64_t>(delta_qf.data(), delta_qf.size()),
+          std::span<uint64_t>(prob_shares.data(), prob_shares.size()));
+      pe->add_task(std::make_unique<SeqTwoTask>(std::move(max_task), std::move(sm_task)));
       pe->run(phase_R);
       barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
                                                        .drain_pfss_coeff = true,
@@ -1756,11 +1879,13 @@ void attention_forward(const AttentionConfig& cfg,
       plan_valid_lens.resize(rows, static_cast<int>(cur_len));
     }
 
-    // Compute scores = (Q*K^T) / sqrt(Dh) on shares using MatmulTask.
+    // Compute scores = (Q*K^T) / sqrt(Dh) on shares using Matmul2DTask, folding the
+    // public inv_sqrt scaling into the same multiply so we only truncate once (matches
+    // the prefill path and reference implementation).
     // Shapes: Q [rows x Dh], K [rows x cur_len x Dh] stored as contiguous per head.
     std::vector<uint64_t> q_mat(rows * Dh, 0);
     std::vector<uint64_t> k_mat(rows * cur_len * Dh, 0);
-    std::vector<uint64_t> score_share(rows * cur_len, 0);
+    std::vector<uint64_t> score_scaled_q2f(rows * cur_len, 0);
     // Fill Q/K share matrices.
     for (size_t b = 0; b < B; ++b) {
       size_t q_base = (b * T + t) * 3 * D;
@@ -1780,24 +1905,36 @@ void attention_forward(const AttentionConfig& cfg,
       }
     }
 
-    // Need Dh * (rows*cur_len) triples for the matmul products.
-    static std::unordered_map<uint64_t, std::vector<proto::BeaverTriple64Share>> score_cache_p0;
-    static std::unordered_map<uint64_t, std::vector<proto::BeaverTriple64Share>> score_cache_p1;
-    auto& score_cache = (party == 0) ? score_cache_p0 : score_cache_p1;
-    auto& score_triples = ensure_cached_triples(score_cache, 0x73636f72u /*"scor"*/, rows * cur_len * Dh, party);
+    MatmulTripleKey tri_key;
+    tri_key.is_gpu = (ctx && ctx->uses_gpu_backend());
+    tri_key.frac_bits = fb;
+    tri_key.M = 1;
+    tri_key.K = static_cast<int>(Dh);
+    tri_key.N = static_cast<int>(cur_len);
+    tri_key.w_transposed = true;
+    tri_key.domain = 0x73636f7265ull;  // "score"
+    const auto& tri = get_cached_matmul_triple(tri_key, party);
 
-    // Phase: score matmul (unscaled Q2f).
+    // Phase: score matmul (scaled Q2f, truncation happens after).
     pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
     enter_phase();
     for (size_t row = 0; row < rows; ++row) {
       auto q_row = std::span<const uint64_t>(q_mat.data() + row * Dh, Dh);
       auto k_row = std::span<const uint64_t>(k_mat.data() + row * cur_len * Dh, cur_len * Dh);
-      auto out_row = std::span<uint64_t>(score_share.data() + row * cur_len, cur_len);
-      auto tri_row = std::span<const proto::BeaverTriple64Share>(
-          score_triples.data() + row * cur_len * Dh, cur_len * Dh);
-      auto score_task = std::make_unique<runtime::MatmulTask>(
-          /*M=*/1, static_cast<int>(Dh), static_cast<int>(cur_len), q_row, k_row, out_row, tri_row);
-      pe->add_task(std::move(score_task));
+      auto out_row = std::span<uint64_t>(score_scaled_q2f.data() + row * cur_len, cur_len);
+      pe->add_task(std::make_unique<Matmul2DTask>(
+          /*M=*/1,
+          static_cast<int>(Dh),
+          static_cast<int>(cur_len),
+          q_row,
+          k_row,
+          out_row,
+          std::span<const uint64_t>(tri.A_share.data(), tri.A_share.size()),
+          std::span<const uint64_t>(tri.B_share.data(), tri.B_share.size()),
+          std::span<const uint64_t>(tri.C_share.data(), tri.C_share.size()),
+          /*w_transposed=*/true,
+          std::optional<int64_t>(inv_sqrt),
+          /*mul_shift=*/fb));
     }
     pe->run(phase_R);
     barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
@@ -1805,8 +1942,8 @@ void attention_forward(const AttentionConfig& cfg,
                                                      .drain_pfss_trunc = true});
     record_phase_plan(phase_planner);
 
-    // Rescale scores Q2f -> Qf via truncation (no inline shift).
-    std::vector<uint64_t> score_qf(score_share.size(), 0);
+    // Truncate scaled scores Q2f -> Qf.
+    std::vector<uint64_t> score_scaled_qf(score_scaled_q2f.size(), 0);
     compiler::GateParams score_trunc_p;
     score_trunc_p.frac_bits = fb;
     compiler::RangeInterval score_acc_range =
@@ -1823,66 +1960,18 @@ void attention_forward(const AttentionConfig& cfg,
     }
     std::mt19937_64 rng_score(0x73636f72u);
     auto score_trunc_bundle =
-        compiler::lower_truncation_gate(ctx->trunc_backend(), rng_score, score_trunc_p, score_share.size());
-    {
-      pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
-      enter_phase();
-      auto trunc_task = std::make_unique<runtime::TruncTask>(
-          &score_trunc_bundle,
-          std::span<const uint64_t>(score_share.data(), score_share.size()),
-          std::span<uint64_t>(score_qf.data(), score_qf.size()));
-      pe->add_task(std::move(trunc_task));
-      pe->run(phase_R);
-      barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
-                                                       .drain_pfss_coeff = true,
-                                                       .drain_pfss_trunc = true});
-      record_phase_plan(phase_planner);
-    }
-
-    // Scale by inv_sqrt (public Qf): score_qf (Qf) * inv_sqrt (Qf) -> Q2f, then trunc to Qf.
-    std::vector<uint64_t> score_scaled_q2f(score_qf.size(), 0);
-    for (size_t i = 0; i < score_qf.size(); ++i) {
-      __int128 prod = static_cast<__int128>(to_signed(score_qf[i])) *
-                      static_cast<__int128>(inv_sqrt);
-      score_scaled_q2f[i] = to_ring(static_cast<int64_t>(prod));
-    }
-    std::vector<uint64_t> score_scaled_qf(score_qf.size(), 0);
-    {
-      pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
-      enter_phase();
-      auto trunc_task = std::make_unique<runtime::TruncTask>(
-          &score_trunc_bundle,
-          std::span<const uint64_t>(score_scaled_q2f.data(), score_scaled_q2f.size()),
-          std::span<uint64_t>(score_scaled_qf.data(), score_scaled_qf.size()));
-      pe->add_task(std::move(trunc_task));
-      pe->run(phase_R);
-      barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
-                                                       .drain_pfss_coeff = true,
-                                                       .drain_pfss_trunc = true});
-      record_phase_plan(phase_planner);
-    }
-
-    // Scale scores by inv_sqrt (public scalar) and prepare softmax inputs.
-    // Explicit Rescale is required; legacy inline shift is disallowed.
-    for (size_t row = 0; row < rows; ++row) {
-      uint64_t max_share = 0;
-      for (size_t s = 0; s < cur_len; ++s) {
-        size_t idx = row * cur_len + s;
-        uint64_t v = score_scaled_qf[idx];
-        score_share[idx] = v;
-        if (v > max_share) max_share = v;
-      }
-      if (use_phase_softmax) {
-        int64_t cap = static_cast<int64_t>(16ll << fb);
-        size_t base = row * cols;
-        for (size_t s = 0; s < cur_len; ++s) {
-          int64_t diff = to_signed(max_share) - to_signed(score_share[base + s]);
-          if (diff < 0) diff = 0;
-          if (diff > cap) diff = cap;
-          t_share[base + s] = (party == 0) ? to_ring(diff) : 0ull;
-        }
-      }
-    }
+        compiler::lower_truncation_gate(ctx->trunc_backend(), rng_score, score_trunc_p, score_scaled_q2f.size());
+    pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
+    enter_phase();
+    pe->add_task(std::make_unique<runtime::TruncTask>(
+        &score_trunc_bundle,
+        std::span<const uint64_t>(score_scaled_q2f.data(), score_scaled_q2f.size()),
+        std::span<uint64_t>(score_scaled_qf.data(), score_scaled_qf.size())));
+    pe->run(phase_R);
+    barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
+                                                     .drain_pfss_coeff = true,
+                                                     .drain_pfss_trunc = true});
+    record_phase_plan(phase_planner);
 
     std::vector<uint64_t> prob_shares;
     if (use_phase_softmax && rows > 0) {
@@ -1900,6 +1989,7 @@ void attention_forward(const AttentionConfig& cfg,
       plan.rows = static_cast<int>(rows);
       plan.cols = static_cast<int>(cols);
       plan.valid_lens = plan_valid_lens;
+      plan.input_is_max_diff = true;  // input is delta = max(row) - score
       plan.nexp = nexp_bundle;
       plan.recip = recip_bundle;
       plan.prob_trunc = choice;
@@ -2083,27 +2173,44 @@ void attention_forward(const AttentionConfig& cfg,
 
       pe->begin_phase(runtime::PhaseExecutor::Phase::kSoftmax);
       enter_phase();
+      size_t max_diffs = 0;
+      if (plan.valid_lens.empty()) {
+        max_diffs = (rows * cols) / 2;
+      } else {
+        for (int L : plan.valid_lens) max_diffs += static_cast<size_t>(std::max(0, L / 2));
+      }
+      auto relu_bundle = get_cached_relu_bundle(max_diffs);
+      nn::RowMaxDiffPlan md_plan;
+      md_plan.rows = plan.rows;
+      md_plan.cols = plan.cols;
+      md_plan.valid_lens = plan.valid_lens;
+      md_plan.relu = relu_bundle;
+      auto max_task = std::make_unique<nn::RowMaxDiffTask>(
+          md_plan,
+          std::span<const uint64_t>(score_scaled_qf.data(), score_scaled_qf.size()),
+          std::span<uint64_t>(t_share.data(), t_share.size()));
       auto sm_task = std::make_unique<nn::SoftmaxBlockTask>(
           plan,
           std::span<const uint64_t>(t_share.data(), t_share.size()),
           std::span<uint64_t>(prob_shares.data(), prob_shares.size()));
-      pe->add_task(std::make_unique<SoftmaxProbTask>(std::move(sm_task),
-                                                     prob_choice,
-                                                     prob_range,
-                                                     &ctx_trunc,
-                                                     rows,
-                                                     cols,
-                                                     Dh,
-                                                     cur_len,
-                                                     prob_shares,
-                                                     v_mats,
-                                                     ctx_shares,
-                                                     cache,
-                                                     static_cast<int>(H),
-                                                     T,
-                                                     t,
-                                                     party,
-                                                     fb));
+      auto prob_task = std::make_unique<SoftmaxProbTask>(std::move(sm_task),
+                                                         prob_choice,
+                                                         prob_range,
+                                                         &ctx_trunc,
+                                                         rows,
+                                                         cols,
+                                                         Dh,
+                                                         cur_len,
+                                                         prob_shares,
+                                                         v_mats,
+                                                         ctx_shares,
+                                                         cache,
+                                                         static_cast<int>(H),
+                                                         T,
+                                                         t,
+                                                         party,
+                                                         fb);
+      pe->add_task(std::make_unique<SeqTwoTask>(std::move(max_task), std::move(prob_task)));
       pe->run(phase_R);
       barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
                                                        .drain_pfss_coeff = true,

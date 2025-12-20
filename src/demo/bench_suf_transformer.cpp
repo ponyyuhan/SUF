@@ -760,9 +760,13 @@ int main(int argc, char** argv) {
         // Global performance default: do bit-packing on GPU to avoid saturating the
         // CPU on large opens (especially 50–51-bit rings).
         ::setenv("SUF_OPEN_PACK_DEVICE", "1", /*overwrite=*/0);
-        // Enable device packing even for smaller flushes; the per-flush overhead
-        // is amortized by avoiding host-side bitpacking loops.
-        ::setenv("SUF_OPEN_PACK_DEVICE_MIN_WORDS", "1", /*overwrite=*/0);
+        // Enable device packing for medium/large flushes; this avoids the host-side
+        // bitpacking loops while keeping small flushes on the CPU to reduce kernel
+        // launch + H2D/D2H overhead.
+        ::setenv("SUF_OPEN_PACK_DEVICE_MIN_WORDS", "65536", /*overwrite=*/0);
+        // Also compute the final opened value on GPU (unpack + add_mod + to_signed)
+        // so host-side scatter doesn't dominate large-model runs.
+        ::setenv("SUF_OPEN_PACK_DEVICE_SCATTER", "1", /*overwrite=*/0);
         // Larger net ring reduces backpressure for big models (bench harness only).
         ::setenv("SUF_BENCH_NET_RING_POW2", "24", /*overwrite=*/0);
 	    }

@@ -41,8 +41,8 @@ endif()
 
 option(SUF_USE_MYL7_FSS "Enable myl7/fss backend adapter" ON)
 option(SUF_FETCH_MYL7_FSS "Fetch myl7/fss from GitHub if not found" ON)
-option(SUF_USE_LIBDPF "Enable libdpf/grotto backend adapter" OFF)
-option(SUF_FETCH_LIBDPF "Fetch libdpf from GitHub if not found" OFF)
+option(SUF_USE_LIBDPF "Enable libdpf/grotto backend adapter" ON)
+option(SUF_FETCH_LIBDPF "Fetch libdpf from GitHub if not found" ON)
 option(SUF_ENABLE_CUDA "Build CUDA PFSS stubs/backends" OFF)
 set(HAVE_MYL7_FSS OFF)
 set(HAVE_LIBDPF OFF)
@@ -212,6 +212,21 @@ endif()
 
 if(HAVE_LIBDPF)
   add_compile_definitions(SUF_HAVE_LIBDPF=1)
+  # Build the libdpf-backed backend implementation in exactly one TU to avoid
+  # ODR violations from libdpf headers (some include non-inline definitions).
+  add_library(suf_libdpf_backend STATIC
+    src/proto/grotto_backend.cpp)
+  target_include_directories(suf_libdpf_backend PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${LIBDPF_INCLUDE_DIR})
+  if(LIBDPF_THIRDPARTY_DIR)
+    target_include_directories(suf_libdpf_backend PUBLIC ${LIBDPF_THIRDPARTY_DIR})
+  endif()
+  target_compile_definitions(suf_libdpf_backend PUBLIC SIMDE_ENABLE_NATIVE_ALIASES SUF_HAVE_LIBDPF=1)
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64|AMD64|i[3-6]86")
+    target_compile_options(suf_libdpf_backend PUBLIC -mavx -mavx2 -maes)
+  endif()
+  target_link_libraries(suf_fss INTERFACE suf_libdpf_backend)
 endif()
 
 add_executable(sim_harness src/demo/sim_harness.cpp)

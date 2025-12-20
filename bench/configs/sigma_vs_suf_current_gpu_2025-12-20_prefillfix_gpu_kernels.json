@@ -1,0 +1,27 @@
+{
+  "models": ["bert-tiny", "bert-base", "bert-large", "gpt2", "gpt-neo-1.3b"],
+  "seq_lens": [128],
+  "batch_sizes": [1],
+  "backends": ["gpu"],
+  "n_iters": 2,
+  "sigma_root": "external/sigma_ezpc/GPU-MPC/experiments/sigma",
+  "sigma_binary": "sigma",
+  "sigma_cpu_threads": 16,
+  "results_dir": "bench/results/current_compare/2025-12-20_prefillfix_gpu_kernels",
+  "suf_binary": "build_ninja/bench_suf_transformer",
+  "suf_extra_args": ["--open-pack", "1", "--per-element-masks", "0"],
+  "suf_env": {
+    "SUF_FORCE_PFSS": "1",
+    "SUF_BENCH_PROFILE": "1",
+    "SUF_BENCH_CPU_SAMPLER": "1",
+    "SUF_OPEN_PACK_MIN_SAVINGS_PCT": "10",
+    "SUF_BENCH_NET_RING_POW2": "25",
+    "SUF_BENCH_PFSS_RING_POW2": "27",
+    "SUF_CAUSAL_PREFILL": "1",
+    "SUF_MATMUL_BEAVER_GPU": "1",
+    "SUF_MATMUL_BEAVER_BATCHED": "1",
+    "SUF_MUL_GPU": "1"
+  },
+  "notes": "SUF GPU run with causal prefill enabled and GPU kernels enabled for Beaver matmul + row-broadcast mul; Sigma logs reused when available."
+}
+

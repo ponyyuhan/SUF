@@ -972,6 +972,113 @@ struct RecipTaskBundle {
   int nr_iters = 1;
 };
 
+struct ReluBundle {
+  const suf::SUF<uint64_t>* suf = nullptr;
+  const gates::CompositePartyKey* key0 = nullptr;
+  const gates::CompositePartyKey* key1 = nullptr;
+};
+
+// Generic composite-eval wrapper for ReLU (degree-1 piecewise). Runs the full
+// Composite-FSS pipeline and writes unmasked arithmetic output shares.
+class ReluTask final : public detail::PhaseTask {
+ public:
+  ReluTask(const ReluBundle& bundle,
+           std::span<const uint64_t> in_share,
+           std::span<uint64_t> out_share)
+      : bundle_(bundle), in_(in_share), out_(out_share) {
+    if (in_.size() != out_.size()) throw std::runtime_error("ReluTask: size mismatch");
+    if (!bundle_.suf) throw std::runtime_error("ReluTask: missing SUF");
+  }
+
+  bool done() const override { return st_ == St::Done; }
+
+  detail::Need step(PhaseResources& R) override {
+    if (!R.net_chan) throw std::runtime_error("ReluTask: net channel missing");
+    if (!R.pfss_backend || !R.pfss_chan) throw std::runtime_error("ReluTask: PFSS backend/channel missing");
+    if (!R.pfss_trunc && !R.pfss_coeff) throw std::runtime_error("ReluTask: PFSS batches missing");
+    if (!key_) {
+      key_ = (R.party == 0) ? bundle_.key0 : bundle_.key1;
+      if (!key_) throw std::runtime_error("ReluTask: missing party key");
+    }
+    auto* batch = R.pfss_trunc ? R.pfss_trunc : R.pfss_coeff;
+    switch (st_) {
+      case St::OpenXhat: {
+        if (R.opens) {
+          auto res = R.opens->reserve(in_.size(), OpenKind::kMask);
+          for (size_t i = 0; i < in_.size(); ++i) {
+            uint64_t rin = (key_->r_in_share_vec.size() > i) ? key_->r_in_share_vec[i] : key_->r_in_share;
+            res.diff[i] = proto::add_mod(in_[i], rin);
+          }
+          h_open_ = res.handle;
+          st_ = St::WaitOpen;
+          return detail::Need::None;
+        }
+        masked_.resize(in_.size());
+        for (size_t i = 0; i < in_.size(); ++i) {
+          uint64_t rin = (key_->r_in_share_vec.size() > i) ? key_->r_in_share_vec[i] : key_->r_in_share;
+          masked_[i] = proto::add_mod(in_[i], rin);
+        }
+        opened_.assign(masked_.size(), 0);
+        for (size_t i = 0; i < masked_.size(); ++i) {
+          if (R.party == 0) {
+            R.net_chan->send_u64(masked_[i]);
+            opened_[i] = static_cast<int64_t>(masked_[i] + R.net_chan->recv_u64());
+          } else {
+            opened_[i] = static_cast<int64_t>(masked_[i] + R.net_chan->recv_u64());
+            R.net_chan->send_u64(masked_[i]);
+          }
+        }
+        st_ = St::EnqueuePfss;
+        [[fallthrough]];
+      }
+      case St::WaitOpen: {
+        if (st_ == St::WaitOpen) {
+          if (!R.opens) throw std::runtime_error("ReluTask: no OpenCollector");
+          if (!R.opens->ready(h_open_)) return detail::Need::Open;
+          auto v = R.opens->view(h_open_);
+          opened_.assign(v.begin(), v.end());
+          st_ = St::EnqueuePfss;
+        }
+        [[fallthrough]];
+      }
+      case St::EnqueuePfss: {
+        PreparedCompositeJob job;
+        job.suf = bundle_.suf;
+        job.key = key_;
+        job.hook = nullptr;
+        job.hatx_public.resize(opened_.size());
+        for (size_t i = 0; i < opened_.size(); ++i) {
+          job.hatx_public[i] = static_cast<uint64_t>(opened_[i]);
+        }
+        job.out = nn::TensorView<uint64_t>(out_.data(), {out_.size()});
+        h_pfss_ = batch->enqueue_composite(std::move(job));
+        st_ = St::WaitPfss;
+        return detail::Need::None;
+      }
+      case St::WaitPfss: {
+        if (!batch->ready(h_pfss_)) return R.pfss_trunc ? detail::Need::PfssTrunc : detail::Need::PfssCoeff;
+        st_ = St::Done;
+        return detail::Need::None;
+      }
+      case St::Done:
+        return detail::Need::None;
+    }
+    return detail::Need::None;
+  }
+
+ private:
+  enum class St { OpenXhat, WaitOpen, EnqueuePfss, WaitPfss, Done } st_ = St::OpenXhat;
+  ReluBundle bundle_{};
+  std::span<const uint64_t> in_;
+  std::span<uint64_t> out_;
+  const gates::CompositePartyKey* key_ = nullptr;
+
+  std::vector<uint64_t> masked_;
+  std::vector<int64_t> opened_;
+  OpenHandle h_open_{};
+  PfssHandle h_pfss_{};
+};
+
 struct RsqrtTaskBundle {
   const suf::SUF<uint64_t>* suf = nullptr;  // affine init coeff program
   const gates::CompositePartyKey* key0 = nullptr;

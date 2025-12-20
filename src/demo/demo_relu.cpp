@@ -108,7 +108,7 @@ int main() {
   auto pp_pred = pred_backend.setup(128);
   auto pp_coeff = coeff_backend.setup(128);
 
-  auto F = gates::make_relu_suf_64();
+  auto F = gates::make_relu_suf_u64();
   std::mt19937_64 dealer_rng(42);
   auto keys = compiler::dealer_compile_suf_gate(pred_backend, coeff_backend, pp_pred, pp_coeff, F,
                                                 dealer_rng);

@@ -1680,14 +1680,30 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       k.bit_triples.empty() ? nullptr : k.bit_triples.data();
   if (dbg) std::cerr << "[party " << party << "] enter packed composite path\n";
   if (k.use_packed_pred && !pred_masks.empty() && k.packed_pred_words > 0) {
-    const size_t block_sz = 64;
+    auto read_block_sz = [&](size_t N) -> size_t {
+      size_t v = 1024;
+      if (const char* env = std::getenv("SUF_COMPOSITE_BLOCK")) {
+        long long x = std::atoll(env);
+        if (x > 0) v = static_cast<size_t>(x);
+      }
+      // Keep allocations bounded: selectors are pieces*block_sz words.
+      const size_t kMin = 64;
+      const size_t kMax = 8192;
+      v = std::max(v, kMin);
+      v = std::min(v, kMax);
+      v = std::min(v, std::max<size_t>(1, N));
+      return v;
+    };
+    const size_t block_sz = read_block_sz(N);
     size_t pieces = k.cut_pred_keys.size() + 1;
     size_t stride = compiled.degree + 1;
     std::vector<uint64_t> selectors_block(pieces * block_sz, 0);
     std::vector<uint64_t> bool_block;
+    std::vector<uint64_t> prod_vec;
+    std::vector<uint64_t> x_share_vec;
+    std::vector<uint64_t> acc_vec;
     for (size_t blk = 0; blk < N; blk += block_sz) {
       size_t bsize = std::min(block_sz, N - blk);
-      std::vector<uint64_t> prod_vec;
       if (compiled.ell > 0) {
         std::fill(selectors_block.begin(), selectors_block.end(), 0ull);
         if (dbg) std::cerr << "[party " << party << "] block " << blk << " size " << bsize << " selectors\n";
@@ -1722,13 +1738,13 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
         if (dbg) std::cerr << "[party " << party << "] block " << blk << " bools done mul_idx=" << mul_single.idx << "\n";
       }
       // Batched Horner over the block to amortize Beaver rounds.
-      std::vector<uint64_t> x_share_vec(bsize);
+      x_share_vec.resize(bsize);
       for (size_t off = 0; off < bsize; off++) {
         uint64_t rin = r_in_at(k, blk + off);
         x_share_vec[off] = (party == 0) ? proto::sub_mod(in.hatx[blk + off], rin)
                                         : proto::sub_mod(0ull, rin);
       }
-      std::vector<uint64_t> acc_vec(bsize);
+      acc_vec.resize(bsize);
       for (int j = 0; j < compiled.r; j++) {
         size_t base = static_cast<size_t>(j * stride);
         for (size_t off = 0; off < bsize; off++) {
@@ -1756,7 +1772,20 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
 
   // Fallback scalar path (no packed predicates). We still batch selector-weighted
   // bool/coeff selection over blocks to amortize Beaver rounds.
-  const size_t block_sz = 64;
+  auto read_block_sz = [&](size_t N) -> size_t {
+    size_t v = 1024;
+    if (const char* env = std::getenv("SUF_COMPOSITE_BLOCK")) {
+      long long x = std::atoll(env);
+      if (x > 0) v = static_cast<size_t>(x);
+    }
+    const size_t kMin = 64;
+    const size_t kMax = 8192;
+    v = std::max(v, kMin);
+    v = std::min(v, kMax);
+    v = std::min(v, std::max<size_t>(1, N));
+    return v;
+  };
+  const size_t block_sz = read_block_sz(N);
   size_t pieces = k.cut_pred_keys.size() + 1;
   size_t stride = compiled.degree + 1;
   std::vector<uint64_t> preds_i(compiled.pred.queries.size(), 0);

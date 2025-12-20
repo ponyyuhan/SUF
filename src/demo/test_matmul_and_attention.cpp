@@ -500,6 +500,24 @@ static void test_attention_step_vs_batch() {
             << " coeff_flushes=" << st1.pfss_coeff_flushes
             << " trunc_flushes=" << st1.pfss_trunc_flushes << "\n";
 
+  // Reference: step mode and batch mode must both match plaintext semantics.
+  auto plain = attention_ref(cfg, X, Wqkv, Wout);
+  if (plain.size() != batch_out.size() || plain.size() != step_out.size()) {
+    throw std::runtime_error("attention_step_vs_batch: size mismatch");
+  }
+  for (size_t i = 0; i < plain.size(); ++i) {
+    if (batch_out[i] != plain[i]) {
+      std::cerr << "attention_ref mismatch (batch) idx=" << i
+                << " got=" << batch_out[i] << " expected=" << plain[i] << "\n";
+      throw std::runtime_error("attention_ref mismatch (batch)");
+    }
+    if (step_out[i] != plain[i]) {
+      std::cerr << "attention_ref mismatch (step) idx=" << i
+                << " got=" << step_out[i] << " expected=" << plain[i] << "\n";
+      throw std::runtime_error("attention_ref mismatch (step)");
+    }
+  }
+
   assert(batch_out.size() == step_out.size());
   for (size_t i = 0; i < batch_out.size(); ++i) {
     if (batch_out[i] != step_out[i]) {

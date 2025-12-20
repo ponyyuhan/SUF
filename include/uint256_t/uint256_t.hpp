@@ -9,6 +9,46 @@
 // We provide a minimal, trivially-copyable 256-bit unsigned integer that is
 // sufficient to compile libdpf in this repo's build (used by grotto adapter).
 //
+// libdpf also expects a `uint128_t` POD type that supports:
+// - brace-init from two 64-bit limbs: `uint128_t{lo, hi}`
+// - basic +,-,* (used by its SIMD helpers)
+// We implement it as a thin wrapper around `unsigned __int128` so it remains
+// trivially copyable and `memcpy`-compatible with 16-byte vectors.
+struct uint128_t {
+  unsigned __int128 v = 0;
+
+  constexpr uint128_t() = default;
+  // Allow implicit construction from small integer literals (libdpf's
+  // numeric_limits specializations return `0` in several places).
+  constexpr uint128_t(uint64_t x) : v(static_cast<unsigned __int128>(x)) {}
+  constexpr explicit uint128_t(unsigned __int128 x) : v(x) {}
+  constexpr uint128_t(uint64_t lo, uint64_t hi)
+      : v((static_cast<unsigned __int128>(hi) << 64) | static_cast<unsigned __int128>(lo)) {}
+
+  constexpr uint64_t lo() const { return static_cast<uint64_t>(v); }
+  constexpr uint64_t hi() const { return static_cast<uint64_t>(v >> 64); }
+
+  constexpr uint128_t& operator+=(uint128_t o) {
+    v += o.v;
+    return *this;
+  }
+  constexpr uint128_t& operator-=(uint128_t o) {
+    v -= o.v;
+    return *this;
+  }
+  constexpr uint128_t& operator*=(uint128_t o) {
+    v *= o.v;
+    return *this;
+  }
+
+  friend constexpr uint128_t operator+(uint128_t a, uint128_t b) { return uint128_t(a.v + b.v); }
+  friend constexpr uint128_t operator-(uint128_t a, uint128_t b) { return uint128_t(a.v - b.v); }
+  friend constexpr uint128_t operator*(uint128_t a, uint128_t b) { return uint128_t(a.v * b.v); }
+  friend constexpr uint128_t operator~(uint128_t a) { return uint128_t(~a.v); }
+  friend constexpr bool operator==(uint128_t a, uint128_t b) { return a.v == b.v; }
+  friend constexpr bool operator!=(uint128_t a, uint128_t b) { return a.v != b.v; }
+};
+
 // Representation: 4x64-bit limbs, little-endian (w0 is least significant).
 struct uint256_t {
   uint64_t w[4]{0, 0, 0, 0};

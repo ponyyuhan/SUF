@@ -8,9 +8,8 @@ namespace gates {
 
 // ReLU(x) = max(x,0) in two’s complement.
 // Exposes arithmetic output y and helper bit w = 1[x>=0].
-inline suf::SUF<core::Z2n<64>> make_relu_suf_64() {
-  using R = core::Z2n<64>;
-  suf::SUF<R> F;
+inline suf::SUF<uint64_t> make_relu_suf_u64() {
+  suf::SUF<uint64_t> F;
   F.n_bits = 64;
   F.r_out = 1;
   F.l_out = 1;
@@ -22,12 +21,12 @@ inline suf::SUF<core::Z2n<64>> make_relu_suf_64() {
   // Primitive preds: MSB(x)
   F.primitive_preds.push_back(suf::Pred_MSB_x{});
 
-  suf::SufPiece<R> nonneg;
-  nonneg.polys = {suf::Poly<R>{{R(0), R(1)}}};  // 0 + 1*x
+  suf::SufPiece<uint64_t> nonneg;
+  nonneg.polys = {suf::Poly<uint64_t>{{0ull, 1ull}}};  // 0 + 1*x
   nonneg.bool_outs = {suf::BoolExpr{suf::BConst{true}}};
 
-  suf::SufPiece<R> neg;
-  neg.polys = {suf::Poly<R>{{R(0)}}};
+  suf::SufPiece<uint64_t> neg;
+  neg.polys = {suf::Poly<uint64_t>{{0ull}}};
   neg.bool_outs = {suf::BoolExpr{suf::BConst{false}}};
 
   F.pieces = {nonneg, neg};
