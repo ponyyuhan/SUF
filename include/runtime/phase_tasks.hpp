@@ -387,6 +387,10 @@ class TruncTask final : public detail::PhaseTask {
     row_lengths_hint_ = row_lengths;
     eff_bits_hint_ = eff_bits_hint;
   }
+  // In device-pipeline mode, TruncTask can either keep results device-only
+  // (skip D2H) or also materialize to the provided host `out_` span.
+  // Default is to materialize so CPU-side consumers remain correct.
+  void set_materialize_host(bool enable) { materialize_host_ = enable; }
   // Optional device input for device-pipeline callers (non-owning).
   void set_device_input(const uint64_t* d_ptr, size_t elems) {
 #ifdef SUF_HAVE_CUDA
@@ -495,10 +499,12 @@ class TruncTask final : public detail::PhaseTask {
 #ifdef SUF_HAVE_CUDA
           // Device-only hatx is only safe/beneficial in device-pipeline mode, where
           // downstream consumers can keep data on GPU and avoid host staging.
-          const bool want_device_hatx =
-              env_flag_enabled_default("SUF_TRUNC_DEVICE_HATX", false) &&
+          const bool backend_supports_device_hatx =
               R.device_pipeline && R.pfss_backend &&
               dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr;
+          const bool want_device_hatx =
+              backend_supports_device_hatx &&
+              env_flag_enabled_default("SUF_TRUNC_DEVICE_HATX", backend_supports_device_hatx);
           if (want_device_hatx) {
             const uint64_t* d_hatx_src = R.opens->view_device_u64(h_open_);
             if (d_hatx_src) {
@@ -514,14 +520,12 @@ class TruncTask final : public detail::PhaseTask {
                 }
                 d_hatx_words_ = elems;
               }
-              cudaStream_t stream = nullptr;
-              if (auto* staged = dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend)) {
-                stream = reinterpret_cast<cudaStream_t>(staged->device_stream());
-              }
-              cudaError_t st = cudaMemcpyAsync(d_hatx_public_, d_hatx_src,
-                                               elems * sizeof(uint64_t),
-                                               cudaMemcpyDeviceToDevice,
-                                               stream);
+              // Use a synchronous D2D copy: PhaseExecutor can overlap PFSS flushing
+              // on a background thread, so enqueuing async copies on the backend
+              // stream here can race with backend kernels.
+              cudaError_t st = cudaMemcpy(d_hatx_public_, d_hatx_src,
+                                          elems * sizeof(uint64_t),
+                                          cudaMemcpyDeviceToDevice);
               if (st != cudaSuccess) {
                 throw std::runtime_error(std::string("TruncTask cudaMemcpyAsync hatx D2D failed: ") +
                                          cudaGetErrorString(st));
@@ -617,13 +621,22 @@ class TruncTask final : public detail::PhaseTask {
           } else
 #endif
           {
-            job.hatx_public.resize(opened_.size());
-            if (!opened_.empty()) {
-              std::memcpy(job.hatx_public.data(), opened_.data(), opened_.size() * sizeof(uint64_t));
+            // In device-pipeline mode, TruncTask may need `hatx_public` for GPU
+            // post-processing after the PFSS batch has been flushed/cleared. Keep
+            // a stable host copy in the task to avoid dangling pointers.
+            if (R.device_pipeline) {
+              job.hatx_public = opened_;  // stable copy (device-hatx fast path avoids this)
+            } else {
+              // Avoid an extra per-job memcpy: `opened_` already owns the hat{x} buffer.
+              // We move it into the PFSS job and keep a non-owning pointer for postproc.
+              hatx_moved_ptr_ = opened_.data();
+              hatx_moved_elems_ = opened_.size();
+              job.hatx_public = std::move(opened_);
+              opened_.clear();
             }
             if (R.device_pipeline && d_in_device_) {
               job.hatx_device = d_in_device_;
-              job.hatx_device_words = std::min(d_in_elems_, opened_.size());
+              job.hatx_device_words = std::min(d_in_elems_, job.hatx_public.size());
             }
           }
           if (!R.device_pipeline) {
@@ -672,8 +685,17 @@ class TruncTask final : public detail::PhaseTask {
         }
         auto v = R.pfss_trunc->view(h_pfss_);
         size_t elems = in_.size();
-        if (v.arith_words < elems * v.r) {
+        // In device-pipeline mode we may disable `store_results` to avoid host copies.
+        // In that case, PfssSuperBatch populates only device views via `PfssResultSlot`.
+        size_t have_arith_words = v.arith_words;
+        if (have_arith_words == 0 && v.arith_device) have_arith_words = v.arith_device_words;
+        if (have_arith_words < elems * v.r) {
           throw std::runtime_error("TruncTask: PFSS arith slice too small");
+        }
+        size_t have_bool_words = v.bool_words;
+        if (have_bool_words == 0 && v.bools_device) have_bool_words = v.bools_device_words;
+        if (v.ell > 0 && have_bool_words < elems * v.ell) {
+          throw std::runtime_error("TruncTask: PFSS bool slice too small");
         }
         bool gpu_direct = false;
         uint64_t* d_tmp_out = nullptr;
@@ -738,9 +760,9 @@ class TruncTask final : public detail::PhaseTask {
               uint64_t* d_bools = nullptr;
               if (v.bools_device) {
                 d_bools = const_cast<uint64_t*>(v.bools_device);
-              } else if (v.bool_words >= elems * v.ell && v.ell > 0) {
-                do_malloc(&d_bools, v.bool_words * sizeof(uint64_t));
-                cudaMemcpyAsync(d_bools, v.bools, v.bool_words * sizeof(uint64_t),
+              } else if (v.bools && have_bool_words >= elems * v.ell && v.ell > 0) {
+                do_malloc(&d_bools, have_bool_words * sizeof(uint64_t));
+                cudaMemcpyAsync(d_bools, v.bools, have_bool_words * sizeof(uint64_t),
                                 cudaMemcpyHostToDevice, trunc_stream);
               }
               // IMPORTANT: d_tmp_out may escape the task in device-pipeline mode (via
@@ -794,18 +816,50 @@ class TruncTask final : public detail::PhaseTask {
                                            d_tmp_out,
                                            elems,
                                            trunc_stream);
-              if (!R.device_pipeline) {
+              if (materialize_host_) {
                 cudaMemcpyAsync(out_.data(), d_tmp_out, elems * sizeof(uint64_t),
                                 cudaMemcpyDeviceToHost, trunc_stream);
                 cudaStreamSynchronize(trunc_stream);
-                cudaFree(d_tmp_out);
-                d_tmp_out = nullptr;
-                d_out_elems_ = 0;
-              } else {
+              }
+              if (std::getenv("SOFTMAX_TRUNC_VALIDATE_DEVICE") && materialize_host_) {
+                if (!hook_) throw std::runtime_error("TruncTask: validate requested but hook missing");
+                // Truncation hooks do not require Beaver muls; use an empty triple set.
+                static const std::vector<proto::BeaverTriple64Share> kEmptyTriples;
+                proto::BeaverMul64 mul{R.party, *R.pfss_chan, kEmptyTriples, 0};
+                std::vector<uint64_t> hook_out(elems * v.r, 0);
+                hook_->configure(key_ ? key_->compiled.layout : bundle_->keys.k0.compiled.layout);
+                // Validation requires a host hatx buffer; disable device-only hatx for this mode.
+                const uint64_t* hx = job_hatx();
+                hook_->run_batch(R.party,
+                                 *R.pfss_chan,
+                                 mul,
+                                 hx,
+                                 v.arith,
+                                 v.r,
+                                 v.bools,
+                                 v.ell,
+                                 elems,
+                                 hook_out.data());
+                for (size_t i = 0; i < elems; ++i) {
+                  uint64_t expect = hook_out[i * v.r];
+                  if (out_[i] != expect) {
+                    std::cerr << "[TruncTask p" << R.party << "] device postproc mismatch i=" << i
+                              << " gpu=" << out_[i] << " hook=" << expect
+                              << " r=" << v.r << " ell=" << v.ell << " f=" << f_bits
+                              << " kind_gapars=" << kind_gapars << "\n";
+                    break;
+                  }
+                }
+              }
+              if (R.device_pipeline) {
                 // Device-pipeline mode: keep the device buffer for downstream kernels.
                 d_out_device_ = d_tmp_out;
                 d_out_elems_ = elems;
                 d_tmp_out = nullptr;  // keep ownership; freed after downstream use.
+              } else {
+                cudaFree(d_tmp_out);
+                d_tmp_out = nullptr;
+                d_out_elems_ = 0;
               }
               if (std::getenv("SOFTMAX_TRUNC_VALIDATE") && !R.device_pipeline) {
                 // Run the host hook on the CPU view for comparison (does not overwrite unless mismatch).
@@ -1014,15 +1068,17 @@ class TruncTask final : public detail::PhaseTask {
   size_t d_hatx_words_ = 0;
 #endif
 
-	  const uint64_t* job_hatx() {
-	    if (hatx_public_.empty()) {
-	      hatx_public_.resize(opened_.size());
-	      for (size_t i = 0; i < opened_.size(); ++i) hatx_public_[i] = opened_[i];
-	    }
-	    return hatx_public_.data();
-	  }
+		  const uint64_t* job_hatx() {
+		    if (!opened_.empty()) return opened_.data();
+		    if (hatx_moved_ptr_ && hatx_moved_elems_ == in_.size()) return hatx_moved_ptr_;
+		    if (!hatx_public_.empty()) return hatx_public_.data();
+		    throw std::runtime_error("TruncTask: missing hatx_public data");
+		  }
 
   std::vector<uint64_t> hatx_public_;
+  const uint64_t* hatx_moved_ptr_ = nullptr;
+  size_t hatx_moved_elems_ = 0;
+  bool materialize_host_ = true;
 };
 
 struct TruncChoice {
@@ -1146,10 +1202,8 @@ class ReluTask final : public detail::PhaseTask {
         job.suf = bundle_.suf;
         job.key = key_;
         job.hook = nullptr;
-        job.hatx_public.resize(opened_.size());
-        if (!opened_.empty()) {
-          std::memcpy(job.hatx_public.data(), opened_.data(), opened_.size() * sizeof(uint64_t));
-        }
+        job.hatx_public = std::move(opened_);
+        opened_.clear();
         job.out = nn::TensorView<uint64_t>(out_.data(), {out_.size()});
         h_pfss_ = batch->enqueue_composite(std::move(job));
         st_ = St::WaitPfss;
@@ -1248,10 +1302,8 @@ class RsqrtTask final : public detail::PhaseTask {
         job.suf = bundle_.suf;
         job.key = key_;
         job.hook = nullptr;
-        job.hatx_public.resize(opened_.size());
-        if (!opened_.empty()) {
-          std::memcpy(job.hatx_public.data(), opened_.data(), opened_.size() * sizeof(uint64_t));
-        }
+        // RsqrtTask needs `opened_` later (x_plain for init), so keep it and copy once.
+        job.hatx_public = opened_;
         const size_t elems = x_.size();
         const size_t r = static_cast<size_t>(std::max(0, key_->compiled.r));
         if (r == 0) throw std::runtime_error("RsqrtTask: compiled coeff gate has r=0");
@@ -2354,9 +2406,16 @@ class CubicPolyTask final : public detail::PhaseTask {
         job.suf = bundle_.suf;
         job.key = key_;
         job.hook = nullptr;
-        job.hatx_public.resize(opened_.size());
-        if (!opened_.empty()) {
-          std::memcpy(job.hatx_public.data(), opened_.data(), opened_.size() * sizeof(uint64_t));
+        // Keep `opened_` only when the ReferenceBackend may later use it to evaluate directly.
+        const bool keep_opened_for_ref =
+            (R.pfss_backend &&
+             dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) != nullptr &&
+             !std::getenv("SUF_FORCE_PFSS"));
+        if (keep_opened_for_ref) {
+          job.hatx_public = opened_;
+        } else {
+          job.hatx_public = std::move(opened_);
+          opened_.clear();
         }
         const size_t elems = x_.size();
         const size_t r = static_cast<size_t>(std::max(0, key_->compiled.r));
@@ -2732,13 +2791,13 @@ class RecipTask final : public detail::PhaseTask {
         if (st_ == St::WaitXhatOpen) {
           if (!R.opens) throw std::runtime_error("RecipTask: no OpenCollector");
           if (!R.opens->ready(h_open_)) return detail::Need::Open;
-          auto v = R.opens->view_u64(h_open_);
-          opened_.assign(v.begin(), v.end());
           if (!force_ref_full_ &&
               R.pfss_backend &&
               dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) != nullptr &&
               bundle_.init_spec &&
               !std::getenv("SUF_FORCE_PFSS")) {
+            auto v = R.opens->view_u64(h_open_);
+            opened_.assign(v.begin(), v.end());
             y_.assign(opened_.size(), 0);
             for (size_t i = 0; i < opened_.size(); ++i) {
               uint64_t x_plain_ring = proto::sub_mod(opened_[i], key_->compiled.r_in);
@@ -2753,6 +2812,10 @@ class RecipTask final : public detail::PhaseTask {
             st_ = St::Done;
             return detail::Need::None;
           }
+          {
+            auto v = R.opens->view_u64(h_open_);
+            opened_.assign(v.begin(), v.end());
+          }
           st_ = St::EnqueueCoeff;
         }
         [[fallthrough]];
@@ -2762,10 +2825,8 @@ class RecipTask final : public detail::PhaseTask {
         job.suf = bundle_.suf;
         job.key = key_;
         job.hook = nullptr;
-        job.hatx_public.resize(opened_.size());
-        if (!opened_.empty()) {
-          std::memcpy(job.hatx_public.data(), opened_.data(), opened_.size() * sizeof(uint64_t));
-        }
+        job.hatx_public = std::move(opened_);
+        opened_.clear();
         const size_t elems = x_.size();
         const size_t r = static_cast<size_t>(std::max(0, key_->compiled.r));
         if (r == 0) throw std::runtime_error("RecipTask: compiled coeff gate has r=0");

@@ -1836,7 +1836,9 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
   thread_local std::vector<uint64_t> sel_mul_x;
   thread_local std::vector<uint64_t> sel_mul_y;
   thread_local std::vector<uint64_t> sel_mul_prod;
-  thread_local std::vector<uint64_t> horner_acc;
+  // NOTE: this buffer is written from OpenMP-parallel loops (when enabled), so
+  // it must be shared across threads (not thread_local).
+  std::vector<uint64_t> horner_acc;
   const proto::BeaverTripleBitShare* bit_ptr =
       k.bit_triples.empty() ? nullptr : k.bit_triples.data();
   if (dbg) std::cerr << "[party " << party << "] enter packed composite path\n";
@@ -1884,14 +1886,20 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     for (size_t blk = 0; blk < N; blk += block_sz) {
       const size_t bsize = std::min(block_sz, N - blk);
       hatx_vec.resize(bsize);
+#ifdef _OPENMP
+#pragma omp parallel for if (bsize >= (1ull << 12)) schedule(static)
+#endif
       for (size_t off = 0; off < bsize; ++off) {
         hatx_vec[off] = proto::norm_mod(in.hatx[blk + off]);
       }
       if (degree <= 0) {
+#ifdef _OPENMP
+#pragma omp parallel for collapse(2) if (bsize * r_words >= (1ull << 15)) schedule(static)
+#endif
         for (size_t j = 0; j < r_words; ++j) {
-          const size_t base = j * stride;
-          const uint64_t rout = (j < k.r_out_share.size()) ? k.r_out_share[j] : 0ull;
           for (size_t off = 0; off < bsize; ++off) {
+            const size_t base = j * stride;
+            const uint64_t rout = (j < k.r_out_share.size()) ? k.r_out_share[j] : 0ull;
             const uint64_t c0 = coeff_selected_soa[base * N + (blk + off)];
             out.haty_share[(blk + off) * r_words + j] = proto::add_mod(c0, rout);
           }
@@ -1899,17 +1907,23 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       } else {
         const size_t horner_n = r_words * bsize;
         horner_acc.resize(horner_n);
+#ifdef _OPENMP
+#pragma omp parallel for collapse(2) if (bsize * r_words >= (1ull << 15)) schedule(static)
+#endif
         for (size_t j = 0; j < r_words; ++j) {
-          const size_t base = j * stride;
           for (size_t off = 0; off < bsize; ++off) {
+            const size_t base = j * stride;
             horner_acc[j * bsize + off] =
                 coeff_selected_soa[(base + static_cast<size_t>(degree)) * N + (blk + off)];
           }
         }
         for (int d = degree - 1; d >= 0; --d) {
+#ifdef _OPENMP
+#pragma omp parallel for collapse(2) if (bsize * r_words >= (1ull << 15)) schedule(static)
+#endif
           for (size_t j = 0; j < r_words; ++j) {
-            const size_t base = j * stride;
             for (size_t off = 0; off < bsize; ++off) {
+              const size_t base = j * stride;
               const uint64_t acc = horner_acc[j * bsize + off];
               const uint64_t h = hatx_vec[off];
               const uint64_t c = coeff_selected_soa[(base + static_cast<size_t>(d)) * N + (blk + off)];
@@ -1917,9 +1931,12 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
             }
           }
         }
+#ifdef _OPENMP
+#pragma omp parallel for collapse(2) if (bsize * r_words >= (1ull << 15)) schedule(static)
+#endif
         for (size_t j = 0; j < r_words; ++j) {
-          const uint64_t rout = (j < k.r_out_share.size()) ? k.r_out_share[j] : 0ull;
           for (size_t off = 0; off < bsize; ++off) {
+            const uint64_t rout = (j < k.r_out_share.size()) ? k.r_out_share[j] : 0ull;
             out.haty_share[(blk + off) * r_words + j] =
                 proto::add_mod(horner_acc[j * bsize + off], rout);
           }
@@ -2164,15 +2181,21 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
 
     // Batched Horner over the block (Beaver-free; polynomials are in public hatx).
     std::vector<uint64_t> hatx_vec(bsize);
+#ifdef _OPENMP
+#pragma omp parallel for if (bsize >= (1ull << 12)) schedule(static)
+#endif
     for (size_t off = 0; off < bsize; off++) {
       hatx_vec[off] = proto::norm_mod(in.hatx[blk + off]);
     }
     const size_t r_words = static_cast<size_t>(compiled.r);
     if (compiled.degree <= 0) {
+#ifdef _OPENMP
+#pragma omp parallel for collapse(2) if (bsize * r_words >= (1ull << 15)) schedule(static)
+#endif
       for (size_t j = 0; j < r_words; ++j) {
-        const size_t base = j * stride;
-        const uint64_t rout = (j < k.r_out_share.size()) ? k.r_out_share[j] : 0ull;
         for (size_t off = 0; off < bsize; ++off) {
+          const size_t base = j * stride;
+          const uint64_t rout = (j < k.r_out_share.size()) ? k.r_out_share[j] : 0ull;
           size_t i = blk + off;
           out.haty_share[i * r_words + j] = proto::add_mod(coeff_selected_soa[base * N + i], rout);
         }
@@ -2181,17 +2204,23 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       const int degree = compiled.degree;
       const size_t horner_n = r_words * bsize;
       horner_acc.resize(horner_n);
+#ifdef _OPENMP
+#pragma omp parallel for collapse(2) if (bsize * r_words >= (1ull << 15)) schedule(static)
+#endif
       for (size_t j = 0; j < r_words; ++j) {
-        const size_t base = j * stride;
         for (size_t off = 0; off < bsize; ++off) {
+          const size_t base = j * stride;
           horner_acc[j * bsize + off] =
               coeff_selected_soa[(base + static_cast<size_t>(degree)) * N + (blk + off)];
         }
       }
       for (int d = degree - 1; d >= 0; --d) {
+#ifdef _OPENMP
+#pragma omp parallel for collapse(2) if (bsize * r_words >= (1ull << 15)) schedule(static)
+#endif
         for (size_t j = 0; j < r_words; ++j) {
-          const size_t base = j * stride;
           for (size_t off = 0; off < bsize; ++off) {
+            const size_t base = j * stride;
             const uint64_t acc = horner_acc[j * bsize + off];
             const uint64_t h = hatx_vec[off];
             const uint64_t c = coeff_selected_soa[(base + static_cast<size_t>(d)) * N + (blk + off)];
@@ -2199,9 +2228,12 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
           }
         }
       }
+#ifdef _OPENMP
+#pragma omp parallel for collapse(2) if (bsize * r_words >= (1ull << 15)) schedule(static)
+#endif
       for (size_t j = 0; j < r_words; ++j) {
-        const uint64_t rout = (j < k.r_out_share.size()) ? k.r_out_share[j] : 0ull;
         for (size_t off = 0; off < bsize; ++off) {
+          const uint64_t rout = (j < k.r_out_share.size()) ? k.r_out_share[j] : 0ull;
           size_t i = blk + off;
           out.haty_share[i * r_words + j] = proto::add_mod(horner_acc[j * bsize + off], rout);
         }

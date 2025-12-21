@@ -367,7 +367,12 @@ void OpenCollector::flush(int party, net::Chan& ch) {
   const bool want_pack = env_flag_enabled("SUF_OPEN_PACK_EFFBITS");
   const bool signed_pack = env_flag_enabled("SUF_OPEN_PACK_SIGNED");
   const bool auto_pack = env_flag_enabled("SUF_OPEN_PACK_AUTO");
-  const bool no_negotiate = env_flag_enabled("SUF_OPEN_PACK_NO_NEGOTIATE");
+  // Default: avoid per-flush negotiation when the packing decision is fully
+  // determined by global settings (ring bits + env flags). This removes an
+  // extra tiny round-trip per flush and materially reduces end-to-end time in
+  // transformer runs with thousands of opens.
+  const char* env_no_negotiate = std::getenv("SUF_OPEN_PACK_NO_NEGOTIATE");
+  bool no_negotiate = env_no_negotiate ? env_flag_enabled("SUF_OPEN_PACK_NO_NEGOTIATE") : false;
   enum class PackFormat : uint8_t { Bits = 0, Bytes = 1 };
   // Default to bit-packing (Sigma-style) to avoid per-byte memcpy overhead.
   PackFormat pack_format = PackFormat::Bits;
@@ -394,6 +399,7 @@ void OpenCollector::flush(int party, net::Chan& ch) {
     if (v <= 0 || v > 64) return 56;
     return v;
   }();
+  const bool dynamic_pack = env_flag_enabled_default("SUF_OPEN_PACK_DYNAMIC", false);
   const bool have_cuda_stream = (cuda_stream_ != nullptr);
   const bool device_pack = env_flag_enabled_default("SUF_OPEN_PACK_DEVICE", have_cuda_stream);
   const bool device_scatter = env_flag_enabled_default("SUF_OPEN_PACK_DEVICE_SCATTER", have_cuda_stream);
@@ -426,7 +432,6 @@ void OpenCollector::flush(int party, net::Chan& ch) {
   opened_u64_flat_buf_.clear();
   opened_host_materialized_ = false;  // signed view
   opened_u64_materialized_ = false;   // u64 view
-  const bool dynamic_pack = env_flag_enabled_default("SUF_OPEN_PACK_DYNAMIC", false);
   const int ring_bits = proto::ring_bits();
   const int n_bits = ring_bits;
   const bool calc_max_bits = dynamic_pack && want_pack && ring_bits > 0 && ring_bits <= 64;
@@ -464,6 +469,14 @@ void OpenCollector::flush(int party, net::Chan& ch) {
 
   const auto t_comm0 = std::chrono::steady_clock::now();
   uint64_t wire_bytes_sent = 0;
+  if (!env_no_negotiate) {
+    // Safe default: if both parties must pack (fixed ring bits, no dynamic sizing),
+    // skip negotiating the pack/effective-bit choice each flush.
+    const bool deterministic_pack =
+        want_pack && !auto_pack && !dynamic_pack &&
+        (ring_bits > 0 && ring_bits < 64 && ring_bits <= max_pack_bits);
+    no_negotiate = deterministic_pack;
+  }
   auto decide_pack_local = [&]() -> bool {
     uint64_t local = want_pack ? 1ull : 0ull;
     int eff_candidate = 64;

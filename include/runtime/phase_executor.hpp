@@ -3,6 +3,9 @@
 #include <stdexcept>
 #include <thread>
 #include <exception>
+#include <algorithm>
+#include <cctype>
+#include <string>
 
 #include "runtime/pfss_superbatch.hpp"
 #include "runtime/open_collector.hpp"
@@ -155,10 +158,12 @@ class PhaseExecutor {
   void finalize_pfss_once(int party, proto::PfssBackendBatch& backend, PfssChanT& pfss_ch) {
     auto flush_once = [&](PfssSuperBatch& b) {
       if (b.has_pending()) b.flush_eval(party, backend, pfss_ch);
-      if (b.has_flushed() && (!device_pipeline_ || device_pipeline_materialize_)) {
+      if (b.has_flushed() &&
+          (!device_pipeline_ || device_pipeline_materialize_ ||
+           (device_pipeline_ && b.needs_host_materialize()))) {
         b.materialize_host(party, pfss_ch);
       }
-      if (!device_pipeline_ || device_pipeline_materialize_) b.clear();
+      if (b.has_flushed()) b.clear();
     };
     flush_once(pfss_coeff_);
     if (&pfss_trunc_ != &pfss_coeff_) flush_once(pfss_trunc_);
@@ -166,6 +171,7 @@ class PhaseExecutor {
 
   void run(PhaseResources& R) {
     R.device_pipeline = device_pipeline_;
+    const bool allow_planner = (!device_pipeline_ || device_pipeline_materialize_);
     if (lazy_mode_) {
       run_lazy(R);
       return;
@@ -226,7 +232,13 @@ class PhaseExecutor {
         };
         const bool want_device_pack =
             env_flag_enabled_default_local("SUF_OPEN_PACK_DEVICE", have_cuda_stream);
-        open_uses_gpu = have_cuda_stream && want_device_pack;
+        // OpenCollector's device pack path defaults to an internal non-blocking CUDA
+        // stream (`cuda_pack_stream_`) unless `SUF_OPEN_PACK_USE_CALLER_STREAM=1`.
+        // When it uses the internal stream, we can safely overlap PFSS flushing with
+        // open packing/comm without serializing on the PFSS compute stream.
+        const bool open_uses_caller_stream =
+            env_flag_enabled_default_local("SUF_OPEN_PACK_USE_CALLER_STREAM", false);
+        open_uses_gpu = have_cuda_stream && want_device_pack && open_uses_caller_stream;
 #endif
         if (!open_uses_gpu &&
             R.overlap_pfss_open && R.pfss_backend && R.pfss_chan &&
@@ -241,10 +253,11 @@ class PhaseExecutor {
                 }
                 if (b.has_pending()) b.flush_eval(R.party, *R.pfss_backend, *R.pfss_chan);
                 if (b.has_flushed()) {
-                  if (!device_pipeline_ || device_pipeline_materialize_) {
+                  if (!device_pipeline_ || device_pipeline_materialize_ ||
+                      (device_pipeline_ && b.needs_host_materialize())) {
                     b.materialize_host(R.party, *R.pfss_chan);
                   }
-                  if (!device_pipeline_ || device_pipeline_materialize_) b.clear();
+                  b.clear();
                 }
               };
               flush_one(pfss_coeff_);
@@ -277,10 +290,11 @@ class PhaseExecutor {
           if (flush_guard + 1 > max_flushes_) {
             throw std::runtime_error("PhaseExecutor: PFSS finalize budget exceeded");
           }
-          if (!device_pipeline_ || device_pipeline_materialize_) {
+          if (!device_pipeline_ || device_pipeline_materialize_ ||
+              (device_pipeline_ && b->needs_host_materialize())) {
             b->materialize_host(R.party, *R.pfss_chan);
           }
-          if (!device_pipeline_ || device_pipeline_materialize_) b->clear();
+          b->clear();
           flush_guard++;
           did = true;
         }
@@ -318,7 +332,7 @@ class PhaseExecutor {
         std::exception_ptr pfss_exc;
         std::thread pfss_thread([&]() {
           try {
-            if (R.pfss_planner && (want_pfss_coeff || want_pfss_trunc) && !planner_flushed) {
+            if (allow_planner && R.pfss_planner && (want_pfss_coeff || want_pfss_trunc) && !planner_flushed) {
               if (!R.pfss_backend || !R.pfss_chan) {
                 throw std::runtime_error("PhaseExecutor: PFSS planner missing backend/channel");
               }
@@ -330,10 +344,11 @@ class PhaseExecutor {
                 }
                 if (b.has_pending()) b.flush_eval(R.party, *R.pfss_backend, *R.pfss_chan);
                 if (b.has_flushed()) {
-                  if (!device_pipeline_ || device_pipeline_materialize_) {
+                  if (!device_pipeline_ || device_pipeline_materialize_ ||
+                      (device_pipeline_ && b.needs_host_materialize())) {
                     b.materialize_host(R.party, *R.pfss_chan);
                   }
-                  if (!device_pipeline_ || device_pipeline_materialize_) b.clear();
+                  b.clear();
                 }
               };
               if (want_pfss_coeff) flush_one(pfss_coeff_);
@@ -346,14 +361,14 @@ class PhaseExecutor {
         do_flush_open();
         if (pfss_thread.joinable()) pfss_thread.join();
         // Mark planner flushed so we don't run it twice in this phase wave.
-        if (R.pfss_planner && (want_pfss_coeff || want_pfss_trunc) && !planner_flushed) {
+        if (allow_planner && R.pfss_planner && (want_pfss_coeff || want_pfss_trunc) && !planner_flushed) {
           planner_flushed = true;
         }
         if (pfss_exc) std::rethrow_exception(pfss_exc);
         continue;
       }
       if (want_open && do_flush_open()) continue;
-      if (R.pfss_planner && (want_pfss_coeff || want_pfss_trunc) && !planner_flushed) {
+      if (allow_planner && R.pfss_planner && (want_pfss_coeff || want_pfss_trunc) && !planner_flushed) {
         if (!R.pfss_backend || !R.pfss_chan) {
           throw std::runtime_error("PhaseExecutor: PFSS planner missing backend/channel");
         }
@@ -423,6 +438,7 @@ class PhaseExecutor {
   void run_lazy(PhaseResources& R) {
     size_t flush_guard = 0;
     bool planner_flushed = false;
+    const bool allow_planner = (!device_pipeline_ || device_pipeline_materialize_);
     for (;;) {
       bool any_not_done = false;
       bool want_open = false;
@@ -455,7 +471,67 @@ class PhaseExecutor {
           R.opens->set_cuda_stream(R.cuda_stream);
         }
 #endif
-        R.opens->flush(R.party, *R.net_chan);
+        // Opportunistically overlap a pending PFSS flush with the open flush when
+        // the caller provided a dedicated PFSS channel (overlap_pfss_open=true).
+        // This reduces effective round barriers in end-to-end transformer runs.
+        bool allow_overlap = R.overlap_pfss_open;
+        bool open_uses_gpu = false;
+#ifdef SUF_HAVE_CUDA
+        auto env_flag_enabled_default_local = [](const char* name, bool defv) -> bool {
+          const char* env = std::getenv(name);
+          if (!env) return defv;
+          std::string v(env);
+          std::transform(v.begin(), v.end(), v.begin(),
+                         [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+          return !(v == "0" || v == "false" || v == "off" || v == "no");
+        };
+        allow_overlap = allow_overlap && env_flag_enabled_default_local("SUF_OVERLAP_PFSS_OPEN", true);
+        const bool have_cuda_stream =
+            (R.cuda_stream != nullptr) ||
+            (R.pfss_backend && dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr);
+        const bool want_device_pack =
+            env_flag_enabled_default_local("SUF_OPEN_PACK_DEVICE", have_cuda_stream);
+        const bool open_uses_caller_stream =
+            env_flag_enabled_default_local("SUF_OPEN_PACK_USE_CALLER_STREAM", false);
+        open_uses_gpu = have_cuda_stream && want_device_pack && open_uses_caller_stream;
+        if (open_uses_gpu && !env_flag_enabled_default_local("SUF_OVERLAP_PFSS_OPEN_GPU", true)) {
+          allow_overlap = false;
+        }
+#else
+        (void)open_uses_gpu;
+#endif
+        if (allow_overlap &&
+            R.pfss_backend && R.pfss_chan &&
+            ((pfss_coeff_.has_pending() || pfss_coeff_.has_flushed()) ||
+             (pfss_trunc_.has_pending() || pfss_trunc_.has_flushed()))) {
+          std::exception_ptr pfss_exc;
+          std::thread pfss_thread([&]() {
+            try {
+              auto flush_one = [&](PfssSuperBatch& b) {
+                if (!R.pfss_backend || !R.pfss_chan) {
+                  throw std::runtime_error("PhaseExecutor: PFSS flush missing backend/channel");
+                }
+                if (b.has_pending()) b.flush_eval(R.party, *R.pfss_backend, *R.pfss_chan);
+                if (b.has_flushed()) {
+                  if (!device_pipeline_ || device_pipeline_materialize_ ||
+                      (device_pipeline_ && b.needs_host_materialize())) {
+                    b.materialize_host(R.party, *R.pfss_chan);
+                  }
+                  b.clear();
+                }
+              };
+              flush_one(pfss_coeff_);
+              if (&pfss_trunc_ != &pfss_coeff_) flush_one(pfss_trunc_);
+            } catch (...) {
+              pfss_exc = std::current_exception();
+            }
+          });
+          R.opens->flush(R.party, *R.net_chan);
+          if (pfss_thread.joinable()) pfss_thread.join();
+          if (pfss_exc) std::rethrow_exception(pfss_exc);
+        } else {
+          R.opens->flush(R.party, *R.net_chan);
+        }
         flush_guard++;
         return true;
       };
@@ -474,7 +550,11 @@ class PhaseExecutor {
           if (flush_guard + 1 > max_flushes_) {
             throw std::runtime_error("PhaseExecutor: PFSS finalize budget exceeded");
           }
-          b->finalize_all(R.party, *R.pfss_chan);
+          if (!device_pipeline_ || device_pipeline_materialize_ ||
+              (device_pipeline_ && b->needs_host_materialize())) {
+            b->materialize_host(R.party, *R.pfss_chan);
+          }
+          b->clear();
           flush_guard++;
           did = true;
         }
@@ -511,7 +591,7 @@ class PhaseExecutor {
         std::exception_ptr pfss_exc;
         std::thread pfss_thread([&]() {
           try {
-            if (R.pfss_planner && (want_pfss_coeff || want_pfss_trunc) && !planner_flushed) {
+            if (allow_planner && R.pfss_planner && (want_pfss_coeff || want_pfss_trunc) && !planner_flushed) {
               if (!R.pfss_backend || !R.pfss_chan) {
                 throw std::runtime_error("PhaseExecutor: PFSS planner missing backend/channel");
               }
@@ -522,7 +602,13 @@ class PhaseExecutor {
                   throw std::runtime_error("PhaseExecutor: PFSS flush missing backend/channel");
                 }
                 if (b.has_pending()) b.flush_eval(R.party, *R.pfss_backend, *R.pfss_chan);
-                if (b.has_flushed()) b.finalize_all(R.party, *R.pfss_chan);
+                if (b.has_flushed()) {
+                  if (!device_pipeline_ || device_pipeline_materialize_ ||
+                      (device_pipeline_ && b.needs_host_materialize())) {
+                    b.materialize_host(R.party, *R.pfss_chan);
+                  }
+                  b.clear();
+                }
               };
               if (want_pfss_coeff) flush_one(pfss_coeff_);
               if (want_pfss_trunc && &pfss_trunc_ != &pfss_coeff_) flush_one(pfss_trunc_);
@@ -533,14 +619,14 @@ class PhaseExecutor {
         });
         do_flush_open();
         if (pfss_thread.joinable()) pfss_thread.join();
-        if (R.pfss_planner && (want_pfss_coeff || want_pfss_trunc) && !planner_flushed) {
+        if (allow_planner && R.pfss_planner && (want_pfss_coeff || want_pfss_trunc) && !planner_flushed) {
           planner_flushed = true;
         }
         if (pfss_exc) std::rethrow_exception(pfss_exc);
         continue;
       }
       if (want_open && do_flush_open()) continue;
-      if (R.pfss_planner && (want_pfss_coeff || want_pfss_trunc) && !planner_flushed) {
+      if (allow_planner && R.pfss_planner && (want_pfss_coeff || want_pfss_trunc) && !planner_flushed) {
         if (!R.pfss_backend || !R.pfss_chan) {
           throw std::runtime_error("PhaseExecutor: PFSS planner missing backend/channel");
         }
@@ -597,10 +683,14 @@ class PhaseExecutor {
     stats_.pfss_trunc_hatx_words = pts.hatx_words;
     stats_.pfss_trunc_hatx_bytes = pts.hatx_bytes;
 
-    if (device_pipeline_ && device_pipeline_materialize_) {
-      if (R.pfss_chan) {
-        if (pfss_coeff_.has_flushed()) pfss_coeff_.materialize_host(R.party, *R.pfss_chan);
-        if (pfss_trunc_.has_flushed()) pfss_trunc_.materialize_host(R.party, *R.pfss_chan);
+    if (device_pipeline_ && R.pfss_chan) {
+      if (pfss_coeff_.has_flushed() &&
+          (device_pipeline_materialize_ || pfss_coeff_.needs_host_materialize())) {
+        pfss_coeff_.materialize_host(R.party, *R.pfss_chan);
+      }
+      if (pfss_trunc_.has_flushed() &&
+          (device_pipeline_materialize_ || pfss_trunc_.needs_host_materialize())) {
+        pfss_trunc_.materialize_host(R.party, *R.pfss_chan);
       }
     }
     if (!keep_batches_) {

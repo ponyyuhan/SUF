@@ -194,6 +194,9 @@ class PfssSuperBatch {
   bool empty() const { return jobs_.empty(); }
   bool has_pending() const { return !jobs_.empty() && !flushed_; }
   bool has_flushed() const { return flushed_; }
+  // True if any enqueued job requests host materialization into `job.out`.
+  // In device-pipeline mode we still need this for tasks that consume outputs on host.
+  bool needs_host_materialize() const;
   // Ready check for callers using multi-wave task scheduling.
   bool ready(const PfssHandle& h) const;
 

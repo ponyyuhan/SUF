@@ -1,6 +1,6 @@
 # Sigma vs SUF benchmark report
 
-Generated: `2025-12-20` (updated)
+Generated: `2025-12-21` (updated)
 
 This report follows the benchmarking/protocol accounting design in `paper.md`.
 
@@ -23,17 +23,17 @@ This report follows the benchmarking/protocol accounting design in `paper.md`.
 
 | Model | Sigma online (s) | Sigma online (GB) | SUF online (s) | SUF online (GB) | Time ratio | Byte ratio |
 |---|---:|---:|---:|---:|---:|---:|
-| bert-tiny | 0.173 | 0.022 | 0.117 | 0.016 | 0.68x | 0.75x |
-| bert-base | 2.867 | 1.062 | 2.913 | 0.930 | 1.02x | 0.88x |
-| bert-large | 7.127 | 2.833 | 9.014 | 2.479 | 1.26x | 0.88x |
-| gpt2 | 2.426 | 0.885 | 2.600 | 1.095 | 1.07x | 1.24x |
+| bert-tiny | 0.173 | 0.022 | 0.107 | 0.016 | 0.62x | 0.75x |
+| bert-base | 2.867 | 1.062 | 3.218 | 0.930 | 1.12x | 0.88x |
+| bert-large | 7.127 | 2.833 | 8.958 | 2.479 | 1.26x | 0.88x |
+| gpt2 | 2.426 | 0.885 | 3.010 | 1.095 | 1.24x | 1.24x |
 
 ## Bottlenecks (SUF)
 
 Enable `SUF_BENCH_PROFILE=1` to populate `online_profile.*` in the SUF JSON logs, then inspect:
 - `open_flush_ns` vs `pfss_flush_eval_ns` vs `pfss_finalize_ns` to decide whether time is dominated by openings vs PFSS evaluation/finalize.
 - `open_pack_ns` vs `open_comm_ns` vs `open_scatter_ns` to separate host packing/scatter overhead from “wire time”.
-- `pfss.open_flushes`, `pfss.num_jobs` (from the SUF JSON) to see whether the runtime is round/flush-limited.
+- `pfss.open_flushes`, `pfss.num_jobs`, `pfss.num_flushes` (from the SUF JSON, and now also in `bench/results/summary.csv`) to see whether the runtime is round/flush-limited.
 
 ## Implementation changes in this snapshot (performance + accounting)
 
@@ -45,5 +45,5 @@ Enable `SUF_BENCH_PROFILE=1` to populate `online_profile.*` in the SUF JSON logs
 
 ## Notes / known gaps
 
-- SUF now beats Sigma on `bert-tiny` (time+bytes) and matches Sigma’s bytes on `bert-base`/`bert-large` while remaining close on time.
-- Remaining gap: `gpt2` still trails Sigma on time and has higher online bytes, indicating the dominant bottleneck is still the number of Beaver openings (not PFSS bytes, which remain 0 for SUF by design).
+- SUF beats Sigma on `bert-tiny` (time+bytes) and remains byte-competitive on `bert-base`/`bert-large`.
+- Remaining gap: `bert-base`/`bert-large`/`gpt2` still trail Sigma on online time; `gpt2` also has higher online bytes, indicating the dominant bottleneck is still the number of Beaver openings (not PFSS bytes, which remain 0 for SUF by design).

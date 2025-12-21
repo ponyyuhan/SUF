@@ -13,6 +13,7 @@
 #ifdef SUF_HAVE_CUDA
 #include <cuda_runtime.h>
 #include "runtime/cuda_primitives.hpp"
+#include "proto/backend_gpu.hpp"
 #endif
 #include "runtime/bench_online_profile.hpp"
 
@@ -40,6 +41,15 @@ inline size_t packed_words_host(size_t elems, int eff_bits) {
   if (eff_bits == 64) return elems;
   uint64_t bits = static_cast<uint64_t>(elems) * static_cast<uint64_t>(eff_bits);
   return static_cast<size_t>((bits + 63) >> 6);
+}
+
+inline bool env_flag_enabled_default_local(const char* name, bool defv) {
+  const char* env = std::getenv(name);
+  if (!env) return defv;
+  std::string v(env);
+  std::transform(v.begin(), v.end(), v.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return !(v == "0" || v == "false" || v == "off" || v == "no");
 }
 
 inline size_t beaver_u64_mul_per_elem(const ::gates::CompositePartyKey& k) {
@@ -231,6 +241,13 @@ bool PfssSuperBatch::ready(const PfssHandle& h) const {
   return h.token < completed_.size() && !completed_[h.token].arith.empty();
 }
 
+bool PfssSuperBatch::needs_host_materialize() const {
+  for (const auto& job : jobs_) {
+    if (job.out.data && job.out.numel() > 0) return true;
+  }
+  return false;
+}
+
 void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, proto::IChannel& ch) {
   const bool prof = runtime::bench::online_profiling_enabled();
   const auto prof_now = [] { return std::chrono::steady_clock::now(); };
@@ -289,6 +306,20 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
 
     const bool dev_capable =
         gpu_stager_ && (dynamic_cast<runtime::CpuPassthroughStager*>(gpu_stager_) == nullptr);
+    // Prefer device-resident `hatx` when possible: Composite-FSS has fast GPU
+    // broadcast-key paths that avoid per-element key replication on host.
+    const bool use_device_hatx_input = [&]() -> bool {
+      bool gpu_backend = false;
+#ifdef SUF_HAVE_CUDA
+      gpu_backend = (dynamic_cast<proto::PfssGpuStagedEval*>(&backend) != nullptr);
+#endif
+      const bool caller_provided = (job.hatx_device != nullptr);
+      // Default-on for the GPU backend because it removes a major host-side
+      // bottleneck (key replication + H2D copies). Can be disabled via env.
+      const bool want =
+          env_flag_enabled_default_local("SUF_PFSS_USE_DEVICE_HATX", gpu_backend || caller_provided);
+      return want;
+    }();
     DeviceBufferRef dev_hatx;
     bool own_dev_hatx = false;
     auto free_dev_hatx = [&]() {
@@ -301,7 +332,7 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
     };
 
     try {
-      if (gpu_stager_ && dev_capable && !job.hatx_device && !job.hatx_public.empty()) {
+      if (use_device_hatx_input && gpu_stager_ && dev_capable && !job.hatx_device && !job.hatx_public.empty()) {
         const auto t_stage0 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
         HostBufferRef host{job.hatx_public.data(), job.hatx_public.size() * sizeof(uint64_t)};
         dev_hatx = gpu_stager_->stage_to_device(host);
@@ -312,9 +343,11 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
       gates::CompositeBatchInput in{
           job.hatx_public.empty() ? nullptr : job.hatx_public.data(),
           N,
-          job.hatx_device
-              ? job.hatx_device
-              : (dev_capable && dev_hatx.ptr ? reinterpret_cast<const uint64_t*>(dev_hatx.ptr) : nullptr),
+          use_device_hatx_input
+              ? (job.hatx_device
+                     ? job.hatx_device
+                     : (dev_capable && dev_hatx.ptr ? reinterpret_cast<const uint64_t*>(dev_hatx.ptr) : nullptr))
+              : nullptr,
           device_outputs_};
       // We stage raw PFSS outputs ourselves (via PfssGpuStager) so device pointers
       // remain stable across flushes/finalize boundaries.
@@ -415,6 +448,20 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
         runtime::bench::add_online_ns(runtime::bench::OnlineTimeKind::PfssFlushEvalStageOut, ns_stage_out);
         runtime::bench::add_online_ns(runtime::bench::OnlineTimeKind::PfssFlushEvalTotal,
                                       prof_ns(t_total0, prof_now()));
+      }
+
+      // Publish per-handle views for consumers waiting on `ready()` / `view()`.
+      // The general multi-job path does this at the end of flush_eval; the
+      // single-job fast path must mirror it to avoid deadlocks.
+      if (store_results_) {
+        populate_completed_();
+      } else {
+        populate_device_views_();
+        for (const auto& j : jobs_) {
+          if (j.token < slots_.size() && slots_[j.token]) {
+            slots_[j.token]->ready.store(true);
+          }
+        }
       }
       return;
     } catch (...) {
@@ -669,7 +716,14 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
       };
 
       try {
-        if (gpu_stager_ && dev_capable && !b.dev_hatx.ptr) {
+        const bool use_device_hatx_input = [&]() -> bool {
+          bool gpu_backend = false;
+#ifdef SUF_HAVE_CUDA
+          gpu_backend = (dynamic_cast<proto::PfssGpuStagedEval*>(&backend) != nullptr);
+#endif
+          return env_flag_enabled_default_local("SUF_PFSS_USE_DEVICE_HATX", gpu_backend);
+        }();
+        if (use_device_hatx_input && gpu_stager_ && dev_capable && !b.dev_hatx.ptr) {
           const auto t_stage0 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
 #ifdef SUF_HAVE_CUDA
           int eff_bits = static_cast<int>(b.eff_bits);
@@ -716,7 +770,7 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
         }
 
         gates::CompositeBatchInput in{b.hatx.data(), b.hatx.size(),
-                                      (dev_capable && b.dev_hatx.ptr)
+                                      (use_device_hatx_input && dev_capable && b.dev_hatx.ptr)
                                           ? reinterpret_cast<const uint64_t*>(b.dev_hatx.ptr)
                                           : nullptr};
         // We stage raw PFSS outputs ourselves (via PfssGpuStager) so device pointers
@@ -1083,6 +1137,8 @@ void PfssSuperBatch::finalize_all(int party, proto::IChannel& ch) {
   const auto t0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   populate_device_views_();
   if (!store_results_) {
+    // Scratch buffer for hook outputs to avoid per-job allocations/zeroing.
+    std::vector<uint64_t> arith_hooked;
     for (size_t idx = 0; idx < jobs_.size(); ++idx) {
       const auto& job = jobs_[idx];
       if (idx >= slices_.size()) continue;
@@ -1100,10 +1156,10 @@ void PfssSuperBatch::finalize_all(int party, proto::IChannel& ch) {
           (ell > 0 && !gr.bools.empty()) ? (gr.bools.data() + sl.start * ell) : nullptr;
 
       const uint64_t* arith_in = arith_base;
-      std::vector<uint64_t> arith_hooked;
       if (job.hook && job.out.data) {
         job.hook->configure(job.key->compiled.layout);
-        arith_hooked.assign(arith_words, 0);
+        // Hooks write all arithmetic outputs; no need to memset the buffer.
+        arith_hooked.resize(arith_words);
 
         const bool hook_needs_mul =
             !(dynamic_cast<const gates::FaithfulTruncPostProc*>(job.hook) ||
@@ -1168,6 +1224,8 @@ void PfssSuperBatch::finalize_all(int party, proto::IChannel& ch) {
   }
 
   if (completed_.empty()) populate_completed_();
+  // Scratch buffer for hook outputs to avoid per-job allocations/zeroing.
+  std::vector<uint64_t> arith_hooked;
   for (size_t idx = 0; idx < jobs_.size(); ++idx) {
     const auto& job = jobs_[idx];
     if (job.token >= completed_.size()) continue;
@@ -1186,10 +1244,10 @@ void PfssSuperBatch::finalize_all(int party, proto::IChannel& ch) {
         (ell > 0 && !gr.bools.empty()) ? (gr.bools.data() + sl.start * ell) : nullptr;
 
     const uint64_t* arith_in = arith_base;
-    std::vector<uint64_t> arith_hooked;
     if (job.hook) {
       job.hook->configure(job.key->compiled.layout);
-      arith_hooked.assign(arith_words, 0);
+      // Hooks write all arithmetic outputs; no need to memset the buffer.
+      arith_hooked.resize(arith_words);
 
       const bool hook_needs_mul =
           !(dynamic_cast<const gates::FaithfulTruncPostProc*>(job.hook) ||

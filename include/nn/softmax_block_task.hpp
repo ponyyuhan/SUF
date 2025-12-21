@@ -407,6 +407,11 @@ class SoftmaxBlockTask : public runtime::detail::PhaseTask {
         if (!plan_.valid_lens.empty()) {
           trunc_task_->set_shape_hint(&row_offsets_, &plan_.valid_lens);
         }
+        // In device-pipeline mode, callers may opt out of host materialization
+        // (e.g., device-only benches that consume `device_prob()`).
+        if (R.device_pipeline && !plan_.materialize_host) {
+          trunc_task_->set_materialize_host(false);
+        }
         st_ = St::TruncRun;
         return runtime::detail::Need::None;
       }

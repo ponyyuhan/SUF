@@ -126,8 +126,10 @@ Correctness note: trunc/ARS helper bits (`carry/sign/wrap`) are maintained as **
   - `SUF_OPEN_PACK_MIN_SAVINGS_PCT` sets the minimum savings to keep packing (default 25)
   - `SUF_OPEN_PACK_DYNAMIC=1` uses per-flush max bitwidth to shrink packing width (off by default)
   - `SUF_OPEN_PACK_DEVICE=1` enables GPU pack/unpack when CUDA is available
-  - `SUF_OPEN_PACK_DEVICE_MIN_WORDS` minimum words to use GPU packing (default `2^18`)
-  - `SUF_OPEN_PACK_DEVICE_SCATTER=1` computes opened values on GPU during device-pack (off by default; can increase contention when both parties share one GPU)
+  - `SUF_OPEN_PACK_DEVICE_MIN_WORDS` minimum words to use GPU packing (default `2^12` when a CUDA stream is present; otherwise `2^18`)
+  - `SUF_OPEN_PACK_DEVICE_SCATTER=1` computes opened values on GPU during device-pack (default on when a CUDA stream is present)
+  - `SUF_OPEN_PACK_USE_CALLER_STREAM=1` forces OpenCollector device pack/unpack onto the caller-provided CUDA stream (default uses an internal non-blocking stream)
+  - `SUF_OVERLAP_PFSS_OPEN=0|1` enables/disables PhaseExecutor overlap of PFSS flush with open flush (default on)
 
 Latest end-to-end numbers (Sigma vs SUF, plus per-phase breakdowns) live in `benchmark_report.md` and the harness outputs under `bench/results/` (notably `bench/results/summary.csv`).
 
@@ -158,6 +160,7 @@ Recent concrete optimizations (keeps `paper.md` semantics unchanged):
 - **Beaver scratch reuse:** `include/proto/beaver_mul64.hpp` uses thread-local scratch buffers inside `BeaverMul64::mul_batch` so short-lived `BeaverMul64` instances (common inside composite evaluation) don’t repeatedly allocate/resize large `(e,f)` buffers.
 - **PFSS GPU key upload fast-path:** `cuda/pfss_backend_gpu.cu` removes hash-based “cache” checks for device key uploads (they scanned O(bytes) on the CPU); inputs are now copied directly via `cudaMemcpyAsync`.
 - **GPU DCF compare fast-path:** `cuda/pfss_backend_gpu.cu` packs `alpha` into a u64 in the DCF key header so the GPU DCF kernels can do `x < alpha` directly instead of per-bit comparisons.
+- **Overlap PFSS flush with open flush:** `include/runtime/phase_executor.hpp` overlaps PFSS flushing in a background thread during `OpenCollector::flush()` when the OpenCollector uses its internal CUDA pack stream (default), reducing effective round barriers.
 
 Practical strategies to push SUF toward Sigma-like performance (without changing `paper.md` semantics):
 - **Reduce PFSS jobs (`pfss.num_jobs`):** fewer Composite-FSS invocations means fewer hatx opens and fewer Composite-FSS “flush” boundaries. Targets include rescale/truncation hoisting, folding public scaling into existing phases, and avoiding per-head fragmentation in attention.
