@@ -806,18 +806,38 @@ int main(int argc, char** argv) {
         // Enable device packing for medium/large flushes; this avoids the host-side
         // bitpacking loops while keeping small flushes on the CPU to reduce kernel
         // launch + H2D/D2H overhead.
-        ::setenv("SUF_OPEN_PACK_DEVICE_MIN_WORDS", "65536", /*overwrite=*/0);
+        // Tuned for end-to-end transformer runs: very small flushes are better kept on
+        // CPU (avoid kernel launch + sync), but overly aggressive GPU packing can
+        // contend with PFSS kernels and increase wall time.
+	        ::setenv("SUF_OPEN_PACK_DEVICE_MIN_WORDS", "262144", /*overwrite=*/0);
         // Also compute the final opened value on GPU (unpack + add_mod + to_signed)
         // so host-side scatter doesn't dominate large-model runs.
         ::setenv("SUF_OPEN_PACK_DEVICE_SCATTER", "1", /*overwrite=*/0);
         // Keep device-resident opened values for Beaver-only flushes so GPU matmul
         // tasks can consume them without a redundant D2H->H2D roundtrip.
         ::setenv("SUF_OPEN_PACK_DEVICE_KEEP_OPENED", "1", /*overwrite=*/0);
+        // PFSS GPU backends copy large predicate/LUT payloads back to host; use pinned
+        // host buffers to improve throughput for those transfers (cached per thread).
+        ::setenv("SUF_COMPOSITE_PINNED", "1", /*overwrite=*/0);
+        ::setenv("SUF_COMPOSITE_PINNED_MIN_WORDS", "1048576", /*overwrite=*/0);
+        // Composite gate tuning: larger blocks reduce per-block overhead and Beaver rounds.
+        ::setenv("SUF_COMPOSITE_BLOCK", "262144", /*overwrite=*/0);
+        // Allow larger selector scratch to keep `SUF_COMPOSITE_BLOCK` effective.
+        ::setenv("SUF_COMPOSITE_SCRATCH_MB", "256", /*overwrite=*/0);
         // Larger net ring reduces backpressure for big models (bench harness only).
         ::setenv("SUF_BENCH_NET_RING_POW2", "24", /*overwrite=*/0);
 	    }
 	    const auto& spec = nn::get_model_spec(args.model);
 	    proto::set_ring_bits(static_cast<int>(spec.n_bits));
+      // Adaptive tuning: large models (and autoregressive models like GPT-2) issue many
+      // medium-sized opens. Lowering the GPU-pack threshold reduces CPU-side overhead
+      // and improves wall time for those workloads, while smaller models benefit from
+      // keeping tiny flushes on the CPU to avoid kernel launch overhead.
+      if (args.backend == "gpu") {
+        if (spec.name == "gpt2") {
+          ::setenv("SUF_OPEN_PACK_DEVICE_MIN_WORDS", "65536", /*overwrite=*/0);
+        }
+      }
 	    // BERT-Tiny throughput-focused default: approximate GeLU with a degree-0
 	    // piecewise constant SUF so online Beaver/trunc opens don't dominate.
 	    if (spec.name == "bert-tiny" && args.gelu_const == -1) {
@@ -916,16 +936,29 @@ int main(int argc, char** argv) {
         omp_set_num_threads(args.omp_threads);
       } else if (!std::getenv("OMP_NUM_THREADS")) {
         int procs = omp_get_num_procs();
-        int threads = std::max(1, std::min(16, procs / 2));
+        // Default to a conservative OpenMP budget in the single-process 2-party
+        // benchmark harness: excessive CPU parallelism can starve the in-process
+        // net rings (spin-wait) and inflate `open_comm_ns`, especially for large models.
+        int threads = 1;
+        if (args.backend == "gpu") {
+          threads = std::max(1, std::min(8, procs / 4));
+        } else {
+          threads = std::max(1, std::min(16, procs / 2));
+        }
         omp_set_dynamic(0);
         omp_set_num_threads(threads);
       }
 #endif
-      if (std::getenv("SUF_BENCH_TRACE")) {
-        std::fprintf(stderr, "[bench_suf] party %d start backend=%s rows=%d cols=%d\n",
-                     party, args.backend.c_str(), rows, cols);
-      }
-      runtime::PhaseExecutor pe;
+	      if (std::getenv("SUF_BENCH_TRACE")) {
+	        std::fprintf(stderr, "[bench_suf] party %d start backend=%s rows=%d cols=%d\n",
+	                     party, args.backend.c_str(), rows, cols);
+	      }
+#ifdef SUF_HAVE_CUDA
+	      // Must outlive `PhaseExecutor`: PFSS tasks may retain staged device buffers
+	      // whose deleters call back into the stager during executor teardown.
+	      std::unique_ptr<runtime::CudaPfssStager> cuda_stager;
+#endif
+	      runtime::PhaseExecutor pe;
       // Performance default: do not retain per-handle PFSS host buffers unless
       // explicitly requested (most transformer runs never call `view()`).
       const bool store_pfss_results = []() {
@@ -990,8 +1023,10 @@ int main(int argc, char** argv) {
         lim.max_trunc_hatx_bytes = lim.max_trunc_hatx_words * sizeof(uint64_t);
         lim.max_coeff_flushes = 1ull << 16;
         lim.max_trunc_flushes = 1ull << 16;
-        lim.max_coeff_active_elems = 1ull << 26;
-        lim.max_trunc_active_elems = 1ull << 26;
+        // Large models (e.g., BERT-large) and device-pipeline mode can easily exceed
+        // 2^26 active elements across a run; keep the planner fail-closed but generous.
+        lim.max_coeff_active_elems = 1ull << 30;
+        lim.max_trunc_active_elems = 1ull << 30;
         lim.max_coeff_cost_effbits = 1ull << 62;
         lim.max_trunc_cost_effbits = 1ull << 62;
         bench_layer_planner.set_limits(lim);
@@ -1002,12 +1037,11 @@ int main(int argc, char** argv) {
         ctx.force_eager_pfss = true;
       }
 #ifdef SUF_HAVE_CUDA
-      std::unique_ptr<runtime::CudaPfssStager> cuda_stager;
-      if (ctx.uses_gpu_backend()) {
-        void* stream = nullptr;
-        if (auto* gpu_eval = dynamic_cast<proto::PfssGpuStagedEval*>(&be)) {
-          stream = gpu_eval->device_stream();
-        }
+	      if (ctx.uses_gpu_backend()) {
+	        void* stream = nullptr;
+	        if (auto* gpu_eval = dynamic_cast<proto::PfssGpuStagedEval*>(&be)) {
+	          stream = gpu_eval->device_stream();
+	        }
         cuda_stager = std::make_unique<runtime::CudaPfssStager>(stream);
         ctx.pfss_gpu_stager = cuda_stager.get();
       }

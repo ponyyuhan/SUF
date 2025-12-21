@@ -349,8 +349,9 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
                      : (dev_capable && dev_hatx.ptr ? reinterpret_cast<const uint64_t*>(dev_hatx.ptr) : nullptr))
               : nullptr,
           device_outputs_};
-      // We stage raw PFSS outputs ourselves (via PfssGpuStager) so device pointers
-      // remain stable across flushes/finalize boundaries.
+      // We stage PFSS outputs ourselves (via PfssGpuStager) so device pointers remain
+      // stable across flush/finalize boundaries. Backend-provided device pointers may
+      // alias transient scratch buffers.
       in.device_outputs = false;
       const auto t_eval0 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
       auto out = gates::composite_eval_batch_backend(party, backend, ch, *job.key, *job.suf, in);
@@ -369,54 +370,54 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
       gr.dev_bools_words = out.bool_device_words;
 
       if (device_outputs_ && dev_capable && gpu_stager_) {
+        const auto t_stage0 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
         if (!gr.arith.empty()) {
-          const auto t_stage0 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
           HostBufferRef host_arith{gr.arith.data(), gr.arith.size() * sizeof(uint64_t)};
           gr.dev_arith = gpu_stager_->stage_to_device(host_arith);
-          if (prof) ns_stage_out += prof_ns(t_stage0, prof_now());
-          if (gr.dev_arith.ptr) {
-            void* ptr = gr.dev_arith.ptr;
-            size_t bytes = gr.dev_arith.bytes;
+	          if (gr.dev_arith.ptr) {
+	            void* ptr = gr.dev_arith.ptr;
+	            size_t bytes = gr.dev_arith.bytes;
 #ifdef SUF_HAVE_CUDA
-            gr.dev_arith_owner = std::shared_ptr<void>(ptr, [bytes](void* p) {
-              (void)bytes;
-              if (!p) return;
-              cudaFree(p);
-            });
+	            // The returned shared_ptr can outlive `gpu_stager_` (e.g., callers that scope
+	            // the stager inside a helper). Use a stager-independent CUDA free to avoid UAF.
+	            gr.dev_arith_owner = std::shared_ptr<void>(ptr, [bytes](void* p) {
+	              (void)bytes;
+	              if (!p) return;
+	              cudaFree(p);
+	            });
 #else
-            PfssGpuStager* stager = gpu_stager_;
-            gr.dev_arith_owner = std::shared_ptr<void>(ptr, [stager, bytes](void* p) {
-              if (!p) return;
-              if (!stager) return;
-              stager->free_bytes(DeviceBufferRef{p, bytes});
-            });
+	            PfssGpuStager* stager = gpu_stager_;
+	            gr.dev_arith_owner = std::shared_ptr<void>(ptr, [stager, bytes](void* p) {
+	              if (!p) return;
+	              if (!stager) return;
+	              stager->free_bytes(DeviceBufferRef{p, bytes});
+	            });
 #endif
-          }
-        }
+	          }
+	        }
         if (!gr.bools.empty()) {
-          const auto t_stage0 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
           HostBufferRef host_bools{gr.bools.data(), gr.bools.size() * sizeof(uint64_t)};
           gr.dev_bools = gpu_stager_->stage_to_device(host_bools);
-          if (prof) ns_stage_out += prof_ns(t_stage0, prof_now());
-          if (gr.dev_bools.ptr) {
-            void* ptr = gr.dev_bools.ptr;
-            size_t bytes = gr.dev_bools.bytes;
+	          if (gr.dev_bools.ptr) {
+	            void* ptr = gr.dev_bools.ptr;
+	            size_t bytes = gr.dev_bools.bytes;
 #ifdef SUF_HAVE_CUDA
-            gr.dev_bools_owner = std::shared_ptr<void>(ptr, [bytes](void* p) {
-              (void)bytes;
-              if (!p) return;
-              cudaFree(p);
-            });
+	            gr.dev_bools_owner = std::shared_ptr<void>(ptr, [bytes](void* p) {
+	              (void)bytes;
+	              if (!p) return;
+	              cudaFree(p);
+	            });
 #else
-            PfssGpuStager* stager = gpu_stager_;
-            gr.dev_bools_owner = std::shared_ptr<void>(ptr, [stager, bytes](void* p) {
-              if (!p) return;
-              if (!stager) return;
-              stager->free_bytes(DeviceBufferRef{p, bytes});
-            });
+	            PfssGpuStager* stager = gpu_stager_;
+	            gr.dev_bools_owner = std::shared_ptr<void>(ptr, [stager, bytes](void* p) {
+	              if (!p) return;
+	              if (!stager) return;
+	              stager->free_bytes(DeviceBufferRef{p, bytes});
+	            });
 #endif
-          }
-        }
+	          }
+	        }
+        if (prof) ns_stage_out += prof_ns(t_stage0, prof_now());
       }
 
       const size_t total_arith_words = gr.arith.size();
@@ -472,9 +473,19 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
 
   size_t total_hatx_words = 0;
   for (const auto& job : jobs_) {
+    // Multi-job batching can operate without host hatx when using the GPU PFSS backend,
+    // by concatenating per-job device hatx into a bucket buffer.
     if (job.hatx_public.empty() && job.hatx_device && hatx_words_for_job(job) > 0) {
+#ifdef SUF_HAVE_CUDA
+      const bool gpu_backend = (dynamic_cast<proto::PfssGpuStagedEval*>(&backend) != nullptr);
+      if (!gpu_backend) {
+        throw std::runtime_error(
+            "PfssSuperBatch: device-only hatx batching requires a GPU PFSS backend");
+      }
+#else
       throw std::runtime_error(
-          "PfssSuperBatch: device-only hatx requires single-job flush (batch grouping needs host hatx)");
+          "PfssSuperBatch: device-only hatx batching requires CUDA support");
+#endif
     }
   }
   struct GroupKey {
@@ -525,6 +536,11 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
     const suf::SUF<uint64_t>* suf = nullptr;
     std::vector<BucketJob> jobs;
     std::vector<uint64_t> hatx;
+    // Total hatx words in this bucket (includes device-only jobs with no host hatx vector).
+    size_t hatx_words = 0;
+    // Device-only sources to be concatenated into `dev_hatx` at staging time.
+    std::vector<const uint64_t*> dev_sources;
+    std::vector<size_t> dev_source_words;
     std::vector<int> row_offsets;
     std::vector<int> row_lengths;
     DeviceBufferRef dev_hatx;
@@ -672,18 +688,31 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
       }
       BucketJob bj;
       bj.job_idx = job_idx;
-      bj.start = b.hatx.size();
-      bj.len = job.hatx_public.size();
-      b.hatx.insert(b.hatx.end(), job.hatx_public.begin(), job.hatx_public.end());
-      total_hatx_words += job.hatx_public.size();
+      bj.start = b.hatx_words;
+      const size_t job_words = hatx_words_for_job(job);
+      bj.len = job_words;
+      if (!job.hatx_public.empty()) {
+        // Host hatx available: append into bucket's host buffer (used by CPU backends and as fallback).
+        b.hatx.insert(b.hatx.end(), job.hatx_public.begin(), job.hatx_public.end());
+      } else if (job.hatx_device && job_words > 0) {
+        // Device-only hatx: defer concatenation until we stage/copy into `b.dev_hatx`.
+        b.dev_sources.push_back(job.hatx_device);
+        b.dev_source_words.push_back(job_words);
+      }
+      b.hatx_words += job_words;
+      total_hatx_words += job_words;
       b.jobs.push_back(bj);
       // If caller provided a device hatx buffer and this bucket currently
       // only holds this job, reuse the device pointer to skip staging.
-      if (job.hatx_device && job.hatx_device_words == job.hatx_public.size() &&
-          b.jobs.size() == 1) {
+      if (job.hatx_device && job_words > 0 &&
+          b.jobs.size() == 1 &&
+          job.hatx_device_words == job_words &&
+          job.hatx_public.empty()) {
         b.dev_hatx.ptr = const_cast<uint64_t*>(job.hatx_device);
-        b.dev_hatx.bytes = job.hatx_device_words * sizeof(uint64_t);
+        b.dev_hatx.bytes = job_words * sizeof(uint64_t);
         b.own_dev_hatx = false;
+        b.dev_sources.clear();
+        b.dev_source_words.clear();
       }
       if (!job.row_offsets.empty()) {
         int base = b.row_offsets.empty() ? 0 : b.row_offsets.back();
@@ -692,14 +721,14 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
         }
         b.row_lengths.insert(b.row_lengths.end(), job.row_lengths.begin(), job.row_lengths.end());
         if (b.row_offsets.empty()) b.row_offsets.push_back(0);
-        b.row_offsets.push_back(base + static_cast<int>(job.hatx_public.size()));
+        b.row_offsets.push_back(base + static_cast<int>(job_words));
       }
     }
 
     for (auto& b : buckets) {
-      stats_.max_bucket_hatx = std::max(stats_.max_bucket_hatx, b.hatx.size());
+      stats_.max_bucket_hatx = std::max(stats_.max_bucket_hatx, b.hatx_words);
       stats_.max_bucket_jobs = std::max(stats_.max_bucket_jobs, b.jobs.size());
-      total_stats_.max_bucket_hatx = std::max(total_stats_.max_bucket_hatx, b.hatx.size());
+      total_stats_.max_bucket_hatx = std::max(total_stats_.max_bucket_hatx, b.hatx_words);
       total_stats_.max_bucket_jobs = std::max(total_stats_.max_bucket_jobs, b.jobs.size());
       bool dev_capable = gpu_stager_ && (dynamic_cast<runtime::CpuPassthroughStager*>(gpu_stager_) == nullptr);
       auto free_bucket_hatx = [&]() {
@@ -716,14 +745,17 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
       };
 
       try {
-        const bool use_device_hatx_input = [&]() -> bool {
+        bool use_device_hatx_input = [&]() -> bool {
           bool gpu_backend = false;
 #ifdef SUF_HAVE_CUDA
           gpu_backend = (dynamic_cast<proto::PfssGpuStagedEval*>(&backend) != nullptr);
 #endif
           return env_flag_enabled_default_local("SUF_PFSS_USE_DEVICE_HATX", gpu_backend);
         }();
-        if (use_device_hatx_input && gpu_stager_ && dev_capable && !b.dev_hatx.ptr) {
+        const bool bucket_has_device_only = (!b.dev_sources.empty()) || (b.hatx.size() != b.hatx_words);
+        // If this bucket cannot be represented faithfully with host hatx alone, force device hatx.
+        if (bucket_has_device_only && b.hatx_words > 0) use_device_hatx_input = true;
+        if (use_device_hatx_input && gpu_stager_ && dev_capable && !b.dev_hatx.ptr && b.hatx_words > 0) {
           const auto t_stage0 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
 #ifdef SUF_HAVE_CUDA
           int eff_bits = static_cast<int>(b.eff_bits);
@@ -759,17 +791,67 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
             cudaStreamSynchronize(reinterpret_cast<cudaStream_t>(st_stream));
             gpu_stager_->free_bytes(b.dev_hatx_packed);
             b.dev_hatx_packed = DeviceBufferRef{};
+          } else if (bucket_has_device_only) {
+            // Concatenate a mixed host/device hatx bucket directly into device memory.
+            // This path is required when some jobs provide only device hatx.
+#ifdef SUF_HAVE_CUDA
+            b.dev_hatx = gpu_stager_->alloc_bytes(b.hatx_words * sizeof(uint64_t));
+            b.own_dev_hatx = true;
+            cudaStream_t s = st_stream ? reinterpret_cast<cudaStream_t>(st_stream) : nullptr;
+            for (const auto& bj : b.jobs) {
+              if (bj.job_idx >= jobs_.size()) continue;
+              const auto& src_job = jobs_[bj.job_idx];
+              const size_t len = bj.len;
+              if (len == 0) continue;
+              uint64_t* dst = reinterpret_cast<uint64_t*>(b.dev_hatx.ptr) + bj.start;
+              cudaError_t st = cudaSuccess;
+              if (!src_job.hatx_public.empty()) {
+                if (src_job.hatx_public.size() < len) {
+                  throw std::runtime_error("PfssSuperBatch: hatx_public shorter than expected in mixed bucket");
+                }
+                if (s) {
+                  st = cudaMemcpyAsync(dst, src_job.hatx_public.data(), len * sizeof(uint64_t),
+                                       cudaMemcpyHostToDevice, s);
+                } else {
+                  st = cudaMemcpy(dst, src_job.hatx_public.data(), len * sizeof(uint64_t),
+                                  cudaMemcpyHostToDevice);
+                }
+              } else if (src_job.hatx_device && src_job.hatx_device_words >= len) {
+                if (s) {
+                  st = cudaMemcpyAsync(dst, src_job.hatx_device, len * sizeof(uint64_t),
+                                       cudaMemcpyDeviceToDevice, s);
+                } else {
+                  st = cudaMemcpy(dst, src_job.hatx_device, len * sizeof(uint64_t),
+                                  cudaMemcpyDeviceToDevice);
+                }
+              } else {
+                throw std::runtime_error("PfssSuperBatch: missing hatx source for mixed bucket");
+              }
+              if (st != cudaSuccess) {
+                throw std::runtime_error(std::string("PfssSuperBatch: cudaMemcpy hatx failed: ") +
+                                         cudaGetErrorString(st));
+              }
+            }
+            if (s) cudaStreamSynchronize(s);
+#else
+            throw std::runtime_error("PfssSuperBatch: mixed hatx bucket requires CUDA");
+#endif
           } else
 #endif
           {
-            HostBufferRef host{b.hatx.data(), b.hatx.size() * sizeof(uint64_t)};
-            b.dev_hatx = gpu_stager_->stage_to_device(host);
-            b.own_dev_hatx = true;
+            if (!b.hatx.empty()) {
+              HostBufferRef host{b.hatx.data(), b.hatx.size() * sizeof(uint64_t)};
+              b.dev_hatx = gpu_stager_->stage_to_device(host);
+              b.own_dev_hatx = true;
+            } else {
+              throw std::runtime_error("PfssSuperBatch: missing hatx for bucket staging");
+            }
           }
           if (prof) ns_stage_hatx += prof_ns(t_stage0, prof_now());
         }
 
-        gates::CompositeBatchInput in{b.hatx.data(), b.hatx.size(),
+        gates::CompositeBatchInput in{bucket_has_device_only ? nullptr : (b.hatx.empty() ? nullptr : b.hatx.data()),
+                                      b.hatx_words,
                                       (use_device_hatx_input && dev_capable && b.dev_hatx.ptr)
                                           ? reinterpret_cast<const uint64_t*>(b.dev_hatx.ptr)
                                           : nullptr};

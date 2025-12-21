@@ -494,7 +494,11 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   pfss_lim.max_pending_jobs = 1ull << 13;
   pfss_lim.max_pending_hatx_words = 1ull << 21;
   pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
-  pfss_lim.max_flushes = 1ull << 10;
+  // Performance+stability: allow many PFSS flushes in long-running transformer
+  // executions. Per-phase stats are reset regularly, but device-pipeline mode
+  // can defer those resets; a low flush cap causes spurious failures on large
+  // models (e.g., BERT-large).
+  pfss_lim.max_flushes = 1ull << 16;
   if (ctx && ctx->uses_gpu_backend()) {
     pfss_lim.max_pending_jobs = 1ull << 16;
     pfss_lim.max_pending_hatx_words = 1ull << 23;

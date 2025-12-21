@@ -26,3 +26,6 @@ __pycache__/
 /build_ninja/
 /build_probe/
 /bench/hardware_*.json
+/build_dbgpipe/
+/build_debug/
+/build_release/

@@ -91,6 +91,12 @@ class CpuPassthroughStager final : public PfssGpuStager {
     void* ready = nullptr;  // cudaEvent_t (opaque), recorded on stream_ at free time
   };
 
+  struct CachedPinnedHost {
+    void* ptr = nullptr;    // cudaMallocHost buffer
+    size_t cap = 0;
+    void* ready = nullptr;  // cudaEvent_t (opaque), recorded after H2D copy
+  };
+
   void* stream_ = nullptr;
   bool own_stream_ = false;
   bool cache_enabled_ = false;
@@ -98,6 +104,14 @@ class CpuPassthroughStager final : public PfssGpuStager {
   size_t max_single_cached_bytes_ = 0;
   size_t cached_bytes_ = 0;
   std::vector<CachedBuf> cache_;
+
+  // Optional pinned-host staging cache to avoid pageable-host blocking in large H2D copies.
+  bool pinned_host_enabled_ = false;
+  size_t pinned_host_min_bytes_ = 0;
+  size_t max_pinned_host_bytes_ = 0;
+  size_t max_single_pinned_host_bytes_ = 0;
+  size_t pinned_host_bytes_ = 0;
+  std::vector<CachedPinnedHost> pinned_host_cache_;
 };
 #endif
 

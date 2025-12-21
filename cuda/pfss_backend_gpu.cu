@@ -17,6 +17,7 @@
 #include <random>
 #include <unordered_map>
 #include <mutex>
+#include <atomic>
 #include <cstdlib>
 #include <openssl/aes.h>
 #include "proto/pfss_backend.hpp"
@@ -36,6 +37,11 @@ extern "C" __global__ void packed_cmp_kernel_keyed_broadcast(const uint8_t* key_
                                                              const uint64_t* xs,
                                                              uint64_t* out_masks,
                                                              size_t N);
+extern "C" __global__ void packed_cmp_kernel_keyed_broadcast_cached(const uint8_t* key_blob,
+                                                                    size_t key_bytes,
+                                                                    const uint64_t* xs,
+                                                                    uint64_t* out_masks,
+                                                                    size_t N);
 extern "C" __global__ void vector_lut_kernel_keyed(const uint8_t* keys_flat,
                                                    size_t key_bytes,
                                                    const uint64_t* xs,
@@ -46,6 +52,11 @@ extern "C" __global__ void vector_lut_kernel_keyed_broadcast(const uint8_t* key_
                                                              const uint64_t* xs,
                                                              uint64_t* out,
                                                              size_t N);
+extern "C" __global__ void vector_lut_kernel_keyed_broadcast_cached(const uint8_t* key_blob,
+                                                                    size_t key_bytes,
+                                                                    const uint64_t* xs,
+                                                                    uint64_t* out,
+                                                                    size_t N);
 extern "C" __global__ void unpack_eff_bits_kernel(const uint64_t* packed,
                                                   int eff_bits,
                                                   uint64_t* out,
@@ -1038,9 +1049,35 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
     if (profile) {
       check_cuda(cudaEventRecord(ev_start, stream_), "record profile start packed_bcast");
     }
-    packed_cmp_kernel_keyed_broadcast<<<grid, kBlock, 0, stream_>>>(
-        d_key, key_bytes, xs_device,
-        reinterpret_cast<uint64_t*>(bool_buf_.ptr), N);
+    constexpr int kThrCacheMax = 256;
+    bool use_cached = false;
+    if (key_bytes >= sizeof(PackedCmpKeyHeader)) {
+      const auto* hdr = reinterpret_cast<const PackedCmpKeyHeader*>(key_blob);
+      use_cached = (static_cast<int>(hdr->num_thr) > 0) &&
+                   (static_cast<int>(hdr->num_thr) <= kThrCacheMax);
+      if (std::getenv("SUF_PFSS_GPU_CACHE_TRACE")) {
+        static std::atomic<bool> logged{false};
+        bool expect = false;
+        if (logged.compare_exchange_strong(expect, true)) {
+          std::fprintf(stderr,
+                       "[pfss_gpu] packed_bcast cache=%d num_thr=%d key_bytes=%zu N=%zu out_words=%d\n",
+                       use_cached ? 1 : 0,
+                       static_cast<int>(hdr->num_thr),
+                       key_bytes,
+                       N,
+                       out_words);
+        }
+      }
+    }
+    if (use_cached) {
+      packed_cmp_kernel_keyed_broadcast_cached<<<grid, kBlock, 0, stream_>>>(
+          d_key, key_bytes, xs_device,
+          reinterpret_cast<uint64_t*>(bool_buf_.ptr), N);
+    } else {
+      packed_cmp_kernel_keyed_broadcast<<<grid, kBlock, 0, stream_>>>(
+          d_key, key_bytes, xs_device,
+          reinterpret_cast<uint64_t*>(bool_buf_.ptr), N);
+    }
     check_cuda(cudaGetLastError(), "packed_cmp_kernel_keyed_broadcast");
     check_cuda(cudaEventRecord(compute_done_, stream_), "event record compute packed_bcast");
     if (profile) {
@@ -1127,9 +1164,36 @@ class GpuPfssBackend final : public PfssIntervalLutExt, public PackedLtBackend, 
     int grid = static_cast<int>((N + kBlock - 1) / kBlock);
     // Clear any sticky error so the post-launch check reflects this kernel.
     (void)cudaGetLastError();
-    vector_lut_kernel_keyed_broadcast<<<grid, kBlock, 0, stream_>>>(
-        d_key, key_bytes, xs_device,
-        reinterpret_cast<uint64_t*>(out_buf_.ptr), N);
+    constexpr int kCutsCacheMax = 256;
+    bool use_cached = false;
+    if (key_bytes >= sizeof(IntervalKeyHeader)) {
+      const auto* hdr = reinterpret_cast<const IntervalKeyHeader*>(key_blob);
+      int cuts_len = static_cast<int>(hdr->intervals) + 1;
+      use_cached = (cuts_len > 0) && (cuts_len <= kCutsCacheMax);
+      if (std::getenv("SUF_PFSS_GPU_CACHE_TRACE")) {
+        static std::atomic<bool> logged{false};
+        bool expect = false;
+        if (logged.compare_exchange_strong(expect, true)) {
+          std::fprintf(stderr,
+                       "[pfss_gpu] interval_bcast cache=%d intervals=%u cuts=%d key_bytes=%zu N=%zu out_words=%d\n",
+                       use_cached ? 1 : 0,
+                       static_cast<unsigned>(hdr->intervals),
+                       cuts_len,
+                       key_bytes,
+                       N,
+                       out_words);
+        }
+      }
+    }
+    if (use_cached) {
+      vector_lut_kernel_keyed_broadcast_cached<<<grid, kBlock, 0, stream_>>>(
+          d_key, key_bytes, xs_device,
+          reinterpret_cast<uint64_t*>(out_buf_.ptr), N);
+    } else {
+      vector_lut_kernel_keyed_broadcast<<<grid, kBlock, 0, stream_>>>(
+          d_key, key_bytes, xs_device,
+          reinterpret_cast<uint64_t*>(out_buf_.ptr), N);
+    }
     check_cuda(cudaGetLastError(), "vector_lut_kernel_keyed_broadcast");
     check_cuda(cudaEventRecord(compute_done_, stream_), "event record compute interval_bcast");
     if (profile) {

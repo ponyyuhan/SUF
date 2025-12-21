@@ -1146,6 +1146,16 @@ class ReluTask final : public detail::PhaseTask {
     if (!bundle_.suf) throw std::runtime_error("ReluTask: missing SUF");
   }
 
+  ~ReluTask() override {
+#ifdef SUF_HAVE_CUDA
+    if (d_hatx_public_) {
+      cudaFree(d_hatx_public_);
+      d_hatx_public_ = nullptr;
+      d_hatx_words_ = 0;
+    }
+#endif
+  }
+
   bool done() const override { return st_ == St::Done; }
 
   detail::Need step(PhaseResources& R) override {
@@ -1191,8 +1201,47 @@ class ReluTask final : public detail::PhaseTask {
         if (st_ == St::WaitOpen) {
           if (!R.opens) throw std::runtime_error("ReluTask: no OpenCollector");
           if (!R.opens->ready(h_open_)) return detail::Need::Open;
+#ifdef SUF_HAVE_CUDA
+          // Only enable device-only hatx in device-pipeline mode: some Composite-FSS
+          // code paths still fall back to host hatx for unsupported predicates.
+          const bool backend_supports_device_hatx =
+              R.device_pipeline &&
+              R.pfss_backend && dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr;
+          const bool want_device_hatx =
+              backend_supports_device_hatx &&
+              env_flag_enabled_default("SUF_RELU_DEVICE_HATX", backend_supports_device_hatx);
+          if (want_device_hatx) {
+            const uint64_t* d_hatx_src = R.opens->view_device_u64(h_open_);
+            if (d_hatx_src) {
+              const size_t elems = in_.size();
+              if (!d_hatx_public_ || d_hatx_words_ < elems) {
+                if (d_hatx_public_) cudaFree(d_hatx_public_);
+                d_hatx_public_ = nullptr;
+                d_hatx_words_ = 0;
+                cudaError_t st = cudaMalloc(reinterpret_cast<void**>(&d_hatx_public_), elems * sizeof(uint64_t));
+                if (st != cudaSuccess) {
+                  throw std::runtime_error(std::string("ReluTask cudaMalloc(d_hatx_public_) failed: ") +
+                                           cudaGetErrorString(st));
+                }
+                d_hatx_words_ = elems;
+              }
+              cudaError_t st = cudaMemcpy(d_hatx_public_, d_hatx_src,
+                                          elems * sizeof(uint64_t),
+                                          cudaMemcpyDeviceToDevice);
+              if (st != cudaSuccess) {
+                throw std::runtime_error(std::string("ReluTask cudaMemcpy hatx D2D failed: ") +
+                                         cudaGetErrorString(st));
+              }
+              device_hatx_only_ = true;
+              opened_.clear();
+              st_ = St::EnqueuePfss;
+              break;
+            }
+          }
+#endif
           auto v = R.opens->view_u64(h_open_);
           opened_.assign(v.begin(), v.end());
+          device_hatx_only_ = false;
           st_ = St::EnqueuePfss;
         }
         [[fallthrough]];
@@ -1202,8 +1251,16 @@ class ReluTask final : public detail::PhaseTask {
         job.suf = bundle_.suf;
         job.key = key_;
         job.hook = nullptr;
-        job.hatx_public = std::move(opened_);
-        opened_.clear();
+        if (device_hatx_only_) {
+          job.hatx_public.clear();
+#ifdef SUF_HAVE_CUDA
+          job.hatx_device = d_hatx_public_;
+          job.hatx_device_words = std::min(d_hatx_words_, in_.size());
+#endif
+        } else {
+          job.hatx_public = std::move(opened_);
+          opened_.clear();
+        }
         job.out = nn::TensorView<uint64_t>(out_.data(), {out_.size()});
         h_pfss_ = batch->enqueue_composite(std::move(job));
         st_ = St::WaitPfss;
@@ -1231,6 +1288,12 @@ class ReluTask final : public detail::PhaseTask {
   std::vector<uint64_t> opened_;
   OpenHandle h_open_{};
   PfssHandle h_pfss_{};
+
+  bool device_hatx_only_ = false;
+#ifdef SUF_HAVE_CUDA
+  uint64_t* d_hatx_public_ = nullptr;
+  size_t d_hatx_words_ = 0;
+#endif
 };
 
 struct RsqrtTaskBundle {
@@ -1619,24 +1682,25 @@ class MulRowBroadcastTask final : public detail::PhaseTask {
           throw std::runtime_error("MulRowBroadcastTask: triple too small");
         }
         if (!R.opens) throw std::runtime_error("MulRowBroadcastTask: no OpenCollector");
-        const size_t total_words = mat_.size() + static_cast<size_t>(rows_);
+        build_active_();
+        const size_t total_words = (ragged_ ? active_elems_ : mat_.size()) + static_cast<size_t>(rows_);
         auto res = R.opens->reserve(total_words, OpenKind::kBeaver);
-        // D matrix
-        for (int r = 0; r < rows_; ++r) {
-          int L = (valid_lens_.size() == 0) ? cols_ : valid_lens_[r];
-          for (int c = 0; c < cols_; ++c) {
-            size_t idx = static_cast<size_t>(r * cols_ + c);
-            if (c < L) {
-              res.diff[idx] = proto::sub_mod(mat_[idx], triple_.A[idx]);
-            } else {
-              res.diff[idx] = 0;
-            }
+        const size_t off_e = (ragged_ ? active_elems_ : mat_.size());
+        if (!ragged_) {
+          // Dense: open all D entries.
+          for (size_t i = 0; i < mat_.size(); ++i) {
+            res.diff[i] = proto::sub_mod(mat_[i], triple_.A[i]);
+          }
+        } else {
+          // Ragged: only open active D entries (columns < valid_lens[r]).
+          for (size_t i = 0; i < active_elems_; ++i) {
+            const size_t idx = active_idx_[i];
+            res.diff[i] = proto::sub_mod(mat_[idx], triple_.A[idx]);
           }
         }
-        // e vector
-        size_t off_e = mat_.size();
+        // e vector (always open all rows).
         for (int r = 0; r < rows_; ++r) {
-          res.diff[off_e + static_cast<size_t>(r)] = proto::sub_mod(vec_[r], triple_.B[r]);
+          res.diff[off_e + static_cast<size_t>(r)] = proto::sub_mod(vec_[static_cast<size_t>(r)], triple_.B[static_cast<size_t>(r)]);
         }
         h_open_ = res.handle;
         st_ = St::WaitOpen;
@@ -1645,9 +1709,42 @@ class MulRowBroadcastTask final : public detail::PhaseTask {
       }
       case St::WaitOpen: {
         if (!R.opens->ready(h_open_)) return detail::Need::Open;
-        size_t off_e = mat_.size();
-        if (h_open_.len != mat_.size() + static_cast<size_t>(rows_)) {
+        const size_t off_e = (ragged_ ? active_elems_ : mat_.size());
+        if (h_open_.len != off_e + static_cast<size_t>(rows_)) {
           throw std::runtime_error("MulRowBroadcastTask: opened mismatch");
+        }
+        if (ragged_) {
+          // Ragged path: we only opened active D entries (packed) + all e entries.
+          // Compute output shares only for active positions and leave inactive positions as 0.
+          auto opened = R.opens->view_u64(h_open_);
+          if (opened.size() != off_e + static_cast<size_t>(rows_)) {
+            throw std::runtime_error("MulRowBroadcastTask: opened mismatch");
+          }
+          for (size_t i = 0; i < active_elems_; ++i) {
+            const size_t idx = active_idx_[i];
+            const int r = active_row_[i];
+            const uint64_t d = opened[i];
+            const uint64_t e = opened[off_e + static_cast<size_t>(r)];
+            uint64_t z = triple_.C[idx];
+            z = proto::add_mod(z, proto::mul_mod(d, triple_.B[static_cast<size_t>(r)]));
+            z = proto::add_mod(z, proto::mul_mod(e, triple_.A[idx]));
+            if (R.party == 0) {
+              z = proto::add_mod(z, proto::mul_mod(d, e));
+            }
+            out_[idx] = z;
+          }
+          // Ensure inactive entries are 0 shares for correctness if callers inspect the dense output.
+          // We avoid a full memset and only zero suffixes per row when valid_lens is provided.
+          for (int r = 0; r < rows_; ++r) {
+            int L = valid_lens_[static_cast<size_t>(r)];
+            if (L < 0) L = 0;
+            if (L > cols_) L = cols_;
+            for (int c = L; c < cols_; ++c) {
+              out_[static_cast<size_t>(r * cols_ + c)] = 0;
+            }
+          }
+          st_ = St::Done;
+          return detail::Need::None;
         }
         bool gpu_mul = false;
 #ifdef SUF_HAVE_CUDA
@@ -1782,6 +1879,37 @@ class MulRowBroadcastTask final : public detail::PhaseTask {
   }
 
  private:
+  void build_active_() {
+    if (active_built_) return;
+    active_built_ = true;
+    ragged_ = (valid_lens_.size() != 0);
+    if (!ragged_) return;
+    if (static_cast<int>(valid_lens_.size()) != rows_) {
+      throw std::runtime_error("MulRowBroadcastTask: valid_lens size mismatch");
+    }
+    size_t total = 0;
+    for (int r = 0; r < rows_; ++r) {
+      int L = valid_lens_[static_cast<size_t>(r)];
+      if (L < 0) L = 0;
+      if (L > cols_) L = cols_;
+      total += static_cast<size_t>(L);
+    }
+    active_elems_ = total;
+    active_idx_.resize(active_elems_);
+    active_row_.resize(active_elems_);
+    size_t off = 0;
+    for (int r = 0; r < rows_; ++r) {
+      int L = valid_lens_[static_cast<size_t>(r)];
+      if (L < 0) L = 0;
+      if (L > cols_) L = cols_;
+      for (int c = 0; c < L; ++c) {
+        active_idx_[off] = static_cast<size_t>(r * cols_ + c);
+        active_row_[off] = r;
+        ++off;
+      }
+    }
+  }
+
   enum class St { Init, WaitOpen, Done } st_ = St::Init;
   std::span<const uint64_t> mat_;
   std::span<const uint64_t> vec_;
@@ -1797,6 +1925,12 @@ class MulRowBroadcastTask final : public detail::PhaseTask {
   uint64_t* d_out_device_ = nullptr;
   size_t d_out_elems_ = 0;
   bool device_only_ = false;
+
+  bool active_built_ = false;
+  bool ragged_ = false;
+  size_t active_elems_ = 0;
+  std::vector<size_t> active_idx_;
+  std::vector<int> active_row_;
 };
 
 struct LayerNormTaskBundle {
@@ -2303,6 +2437,11 @@ class CubicPolyTask final : public detail::PhaseTask {
       d_out_device_ = nullptr;
       d_out_elems_ = 0;
     }
+    if (d_hatx_public_) {
+      cudaFree(d_hatx_public_);
+      d_hatx_public_ = nullptr;
+      d_hatx_words_ = 0;
+    }
 #endif
   }
 
@@ -2395,8 +2534,50 @@ class CubicPolyTask final : public detail::PhaseTask {
         if (st_ == St::WaitXhatOpen) {
           if (!R.opens) throw std::runtime_error("CubicPolyTask: no OpenCollector");
           if (!R.opens->ready(h_open_)) return detail::Need::Open;
+#ifdef SUF_HAVE_CUDA
+          const bool keep_opened_for_ref =
+              (R.pfss_backend &&
+               dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) != nullptr &&
+               !std::getenv("SUF_FORCE_PFSS"));
+          const bool backend_supports_device_hatx =
+              R.device_pipeline &&
+              (!keep_opened_for_ref) &&
+              R.pfss_backend && dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr;
+          const bool want_device_hatx =
+              backend_supports_device_hatx &&
+              env_flag_enabled_default("SUF_CUBIC_DEVICE_HATX", backend_supports_device_hatx);
+          if (want_device_hatx) {
+            const uint64_t* d_hatx_src = R.opens->view_device_u64(h_open_);
+            if (d_hatx_src) {
+              const size_t elems = x_.size();
+              if (!d_hatx_public_ || d_hatx_words_ < elems) {
+                if (d_hatx_public_) cudaFree(d_hatx_public_);
+                d_hatx_public_ = nullptr;
+                d_hatx_words_ = 0;
+                cudaError_t st = cudaMalloc(reinterpret_cast<void**>(&d_hatx_public_), elems * sizeof(uint64_t));
+                if (st != cudaSuccess) {
+                  throw std::runtime_error(std::string("CubicPolyTask cudaMalloc(d_hatx_public_) failed: ") +
+                                           cudaGetErrorString(st));
+                }
+                d_hatx_words_ = elems;
+              }
+              cudaError_t st = cudaMemcpy(d_hatx_public_, d_hatx_src,
+                                          elems * sizeof(uint64_t),
+                                          cudaMemcpyDeviceToDevice);
+              if (st != cudaSuccess) {
+                throw std::runtime_error(std::string("CubicPolyTask cudaMemcpy hatx D2D failed: ") +
+                                         cudaGetErrorString(st));
+              }
+              device_hatx_only_ = true;
+              opened_.clear();
+              st_ = St::EnqueueCoeff;
+              break;
+            }
+          }
+#endif
           auto v = R.opens->view_u64(h_open_);
           opened_.assign(v.begin(), v.end());
+          device_hatx_only_ = false;
           st_ = St::EnqueueCoeff;
         }
         [[fallthrough]];
@@ -2411,7 +2592,13 @@ class CubicPolyTask final : public detail::PhaseTask {
             (R.pfss_backend &&
              dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) != nullptr &&
              !std::getenv("SUF_FORCE_PFSS"));
-        if (keep_opened_for_ref) {
+        if (device_hatx_only_) {
+          job.hatx_public.clear();
+#ifdef SUF_HAVE_CUDA
+          job.hatx_device = d_hatx_public_;
+          job.hatx_device_words = std::min(d_hatx_words_, x_.size());
+#endif
+        } else if (keep_opened_for_ref) {
           job.hatx_public = opened_;
         } else {
           job.hatx_public = std::move(opened_);
@@ -2683,7 +2870,10 @@ class CubicPolyTask final : public detail::PhaseTask {
 #ifdef SUF_HAVE_CUDA
   uint64_t* d_out_device_ = nullptr;
   size_t d_out_elems_ = 0;
+  uint64_t* d_hatx_public_ = nullptr;
+  size_t d_hatx_words_ = 0;
 #endif
+  bool device_hatx_only_ = false;
 
   std::span<const proto::BeaverTriple64Share> next_triples(size_t n) {
     if (triple_cursor_ + n > triple_span_.size()) {

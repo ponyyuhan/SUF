@@ -87,6 +87,63 @@ inline void maybe_record_keygen(const CompositeKeyPair& kp) {
   auto fn = g_keygen_hook.load(std::memory_order_relaxed);
   if (fn) fn(kp);
 }
+
+#ifdef SUF_HAVE_CUDA
+// Thread-local pinned host staging buffers. Large GPU->host copies into pageable
+// memory are significantly slower; pinned staging improves throughput, but
+// per-call cudaMallocHost/cudaFreeHost is extremely expensive. Reuse a small
+// set of pinned buffers per thread instead.
+struct PinnedU64Scratch {
+  uint64_t* ptr = nullptr;
+  size_t cap_words = 0;
+  ~PinnedU64Scratch() {
+    if (ptr) cudaFreeHost(ptr);
+    ptr = nullptr;
+    cap_words = 0;
+  }
+  uint64_t* ensure(size_t words) {
+    if (words == 0) return nullptr;
+    if (words <= cap_words && ptr) return ptr;
+    if (ptr) cudaFreeHost(ptr);
+    ptr = nullptr;
+    cap_words = 0;
+    cudaError_t st = cudaMallocHost(reinterpret_cast<void**>(&ptr), words * sizeof(uint64_t));
+    if (st != cudaSuccess) {
+      ptr = nullptr;
+      cap_words = 0;
+      throw std::runtime_error(std::string("cudaMallocHost failed: ") + cudaGetErrorString(st));
+    }
+    cap_words = words;
+    return ptr;
+  }
+};
+
+inline PinnedU64Scratch& pinned_u64_scratch() {
+  static thread_local PinnedU64Scratch scratch;
+  return scratch;
+}
+
+inline bool env_flag_enabled_default(const char* name, bool defv) {
+  const char* env = std::getenv(name);
+  if (!env) return defv;
+  std::string v(env);
+  std::transform(v.begin(), v.end(), v.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return !(v == "0" || v == "false" || v == "off" || v == "no");
+}
+
+inline size_t env_size_t_default(const char* name, size_t defv) {
+  const char* env = std::getenv(name);
+  if (!env) return defv;
+  try {
+    long long v = std::stoll(std::string(env));
+    if (v <= 0) return defv;
+    return static_cast<size_t>(v);
+  } catch (...) {
+    return defv;
+  }
+}
+#endif
 }  // namespace detail
 
 inline void set_composite_keygen_hook(detail::KeygenHookFn fn) {
@@ -1187,8 +1244,14 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     return out;
     }
   }
+  // Fast path: interval-LUT coefficient program with no boolean outputs.
+  //
+  // This is the dominant case for spline-style gates (GeLU/SiLU/nExp) in
+  // end-to-end transformer runs: the backend returns a per-input coefficient
+  // tuple (r words) directly, and post-processing happens in higher-level tasks.
   if (compiled.coeff.mode == compiler::CoeffMode::kIntervalLut &&
-      compiled.degree == 0 && compiled.ell == 0) {
+      compiled.ell == 0 &&
+      compiled.coeff.out_words == compiled.r) {
     auto* lut_backend = dynamic_cast<proto::PfssIntervalLutExt*>(&backend);
     if (!lut_backend) {
       throw std::runtime_error("composite_eval_batch_backend: interval LUT selected but backend lacks PfssIntervalLutExt");
@@ -1196,11 +1259,26 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     if (k.coeff_keys.empty() || k.coeff_keys[0].bytes.empty()) {
       throw std::runtime_error("composite_eval_batch_backend: interval LUT key missing");
     }
-    if (compiled.coeff.out_words != compiled.r) {
-      throw std::runtime_error("composite_eval_batch_backend: interval LUT out_words must equal r when degree=0");
-    }
     const size_t out_words = static_cast<size_t>(compiled.coeff.out_words);
-    std::vector<uint64_t> coeff_flat(N * out_words, 0);
+    const size_t coeff_words = N * out_words;
+    std::vector<uint64_t> coeff_flat;
+    uint64_t* coeff_ptr = nullptr;
+#ifdef SUF_HAVE_CUDA
+    const bool can_pin = (staged != nullptr) && (in.hatx_device != nullptr);
+    const bool use_pinned =
+        can_pin &&
+        detail::env_flag_enabled_default("SUF_COMPOSITE_PINNED", true) &&
+        (coeff_words >= detail::env_size_t_default("SUF_COMPOSITE_PINNED_MIN_WORDS", 1ull << 20));
+    if (use_pinned) {
+      coeff_ptr = detail::pinned_u64_scratch().ensure(coeff_words);
+    } else {
+      coeff_flat.assign(coeff_words, 0ull);
+      coeff_ptr = coeff_flat.data();
+    }
+#else
+    coeff_flat.assign(coeff_words, 0ull);
+    coeff_ptr = coeff_flat.data();
+#endif
     const bool prof = ::runtime::bench::online_profiling_enabled();
     const auto t_eval0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (staged && in.hatx_device) {
@@ -1210,7 +1288,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
           reinterpret_cast<const uint64_t*>(in.hatx_device),
           N,
           static_cast<int>(out_words),
-          coeff_flat.data());
+          coeff_ptr);
     } else {
       if (!in.hatx) throw std::runtime_error("composite_eval_batch_backend: missing host hatx for interval LUT");
       std::vector<uint64_t> xs_vec(in.hatx, in.hatx + N);
@@ -1219,7 +1297,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       for (size_t i = 0; i < N; ++i) {
         std::memcpy(keys_flat.data() + i * key_bytes, k.coeff_keys[0].bytes.data(), key_bytes);
       }
-      lut_backend->eval_interval_lut_many_u64(key_bytes, keys_flat.data(), xs_vec, static_cast<int>(out_words), coeff_flat.data());
+      lut_backend->eval_interval_lut_many_u64(key_bytes, keys_flat.data(), xs_vec, static_cast<int>(out_words), coeff_ptr);
     }
     if (prof) {
       const auto t_eval1 = std::chrono::steady_clock::now();
@@ -1228,13 +1306,18 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
           static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t_eval1 - t_eval0).count()));
     }
     // Apply per-output mask shares (to match step-DCF semantics); caller later subtracts r_out.
+    const size_t rout_words = k.r_out_share.size();
+#ifdef _OPENMP
+#pragma omp parallel for if (N >= (1ull << 16)) schedule(static)
+#endif
     for (size_t i = 0; i < N; ++i) {
+      const size_t base = i * out_words;
       for (size_t j = 0; j < out_words; ++j) {
-        uint64_t v = coeff_flat[i * out_words + j];
-        if (j < k.r_out_share.size()) {
+        uint64_t v = coeff_ptr[base + j];
+        if (j < rout_words) {
           v = proto::add_mod(v, k.r_out_share[j]);
         }
-        out.haty_share[i * out_words + j] = v;
+        out.haty_share[base + j] = v;
       }
     }
     if (want_device_out && staged && in.hatx_device) {
@@ -1529,12 +1612,30 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     for (const auto& grp : k.packed_pred_groups) {
       const bool prof = ::runtime::bench::online_profiling_enabled();
       size_t key_bytes = grp.key.bytes.size();
-      std::vector<uint64_t> masks(N * static_cast<size_t>(grp.out_words), 0);
+      const size_t mask_words = N * static_cast<size_t>(grp.out_words);
+      std::vector<uint64_t> masks;
+      uint64_t* masks_ptr = nullptr;
+#ifdef SUF_HAVE_CUDA
+      const bool can_pin = (staged != nullptr) && (in.hatx_device != nullptr);
+      const bool use_pinned =
+          can_pin &&
+          detail::env_flag_enabled_default("SUF_COMPOSITE_PINNED", true) &&
+          (mask_words >= detail::env_size_t_default("SUF_COMPOSITE_PINNED_MIN_WORDS", 1ull << 20));
+      if (use_pinned) {
+        masks_ptr = detail::pinned_u64_scratch().ensure(mask_words);
+      } else {
+        masks.assign(mask_words, 0ull);
+        masks_ptr = masks.data();
+      }
+#else
+      masks.assign(mask_words, 0ull);
+      masks_ptr = masks.data();
+#endif
       const auto t_eval0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
       if (staged && in.hatx_device) {
         staged->eval_packed_lt_many_device_broadcast(key_bytes, grp.key.bytes.data(),
                                            reinterpret_cast<const uint64_t*>(in.hatx_device),
-                                           N, grp.in_bits, grp.out_words, masks.data());
+                                           N, grp.in_bits, grp.out_words, masks_ptr);
       } else {
         const auto& xs = ensure_xs_vec();
         std::vector<uint8_t> keys_flat(N * key_bytes);
@@ -1542,7 +1643,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
           std::memcpy(keys_flat.data() + i * key_bytes, grp.key.bytes.data(), key_bytes);
         }
         packed->eval_packed_lt_many(key_bytes, keys_flat.data(), xs,
-                                    grp.in_bits, grp.out_words, masks.data());
+                                    grp.in_bits, grp.out_words, masks_ptr);
       }
       if (prof) {
         const auto t_eval1 = std::chrono::steady_clock::now();
@@ -1552,7 +1653,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       }
       for (size_t i = 0; i < N; i++) {
         uint64_t* dst = pred_masks.data() + i * static_cast<size_t>(k.packed_pred_words);
-        const uint64_t* src = masks.data() + i * static_cast<size_t>(grp.out_words);
+        const uint64_t* src = masks_ptr + i * static_cast<size_t>(grp.out_words);
         for (size_t b = 0; b < grp.num_bits; b++) {
           size_t global = grp.bit_base + b;
           if (global >= compiled.pred.queries.size()) break;
@@ -1839,6 +1940,39 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
   // NOTE: this buffer is written from OpenMP-parallel loops (when enabled), so
   // it must be shared across threads (not thread_local).
   std::vector<uint64_t> horner_acc;
+  // Public hatx scratch (host). When callers provide device-only hatx, we
+  // materialize blockwise for the Beaver-free Horner post-processing paths.
+  std::vector<uint64_t> hatx_vec;
+  auto load_hatx_block = [&](size_t blk, size_t bsize) {
+    hatx_vec.resize(bsize);
+    if (in.hatx) {
+#ifdef _OPENMP
+#pragma omp parallel for if (bsize >= (1ull << 12)) schedule(static)
+#endif
+      for (size_t off = 0; off < bsize; ++off) {
+        hatx_vec[off] = proto::norm_mod(in.hatx[blk + off]);
+      }
+      return;
+    }
+    if (!(staged && in.hatx_device)) {
+      throw std::runtime_error("composite_eval_batch_backend: missing hatx for Horner postproc");
+    }
+    // Copy device-only hatx into the shared hatx_vec buffer, then normalize in-place.
+    cudaError_t st = cudaMemcpy(hatx_vec.data(),
+                                reinterpret_cast<const uint64_t*>(in.hatx_device) + blk,
+                                bsize * sizeof(uint64_t),
+                                cudaMemcpyDeviceToHost);
+    if (st != cudaSuccess) {
+      throw std::runtime_error(std::string("composite_eval_batch_backend cudaMemcpy hatx D2H failed: ") +
+                               cudaGetErrorString(st));
+    }
+#ifdef _OPENMP
+#pragma omp parallel for if (bsize >= (1ull << 12)) schedule(static)
+#endif
+    for (size_t off = 0; off < bsize; ++off) {
+      hatx_vec[off] = proto::norm_mod(hatx_vec[off]);
+    }
+  };
   const proto::BeaverTripleBitShare* bit_ptr =
       k.bit_triples.empty() ? nullptr : k.bit_triples.data();
   if (dbg) std::cerr << "[party " << party << "] enter packed composite path\n";
@@ -1882,16 +2016,9 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     const int degree = compiled.degree;
     const size_t r_words = static_cast<size_t>(compiled.r);
     const size_t stride = static_cast<size_t>(degree + 1);
-    std::vector<uint64_t> hatx_vec;
     for (size_t blk = 0; blk < N; blk += block_sz) {
       const size_t bsize = std::min(block_sz, N - blk);
-      hatx_vec.resize(bsize);
-#ifdef _OPENMP
-#pragma omp parallel for if (bsize >= (1ull << 12)) schedule(static)
-#endif
-      for (size_t off = 0; off < bsize; ++off) {
-        hatx_vec[off] = proto::norm_mod(in.hatx[blk + off]);
-      }
+      load_hatx_block(blk, bsize);
       if (degree <= 0) {
 #ifdef _OPENMP
 #pragma omp parallel for collapse(2) if (bsize * r_words >= (1ull << 15)) schedule(static)
@@ -1959,7 +2086,6 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
     size_t stride = compiled.degree + 1;
     std::vector<uint64_t> selectors_block(pieces * block_sz, 0);
     std::vector<uint64_t> bool_block;
-    std::vector<uint64_t> hatx_vec;
     for (size_t blk = 0; blk < N; blk += block_sz) {
       size_t bsize = std::min(block_sz, N - blk);
       if (compiled.ell > 0) {
@@ -2002,10 +2128,7 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
         if (dbg) std::cerr << "[party " << party << "] block " << blk << " bools done mul_idx=" << mul_single.idx << "\n";
       }
       // Batched Horner over the block (Beaver-free; polynomials are in public hatx).
-      hatx_vec.resize(bsize);
-      for (size_t off = 0; off < bsize; off++) {
-        hatx_vec[off] = proto::norm_mod(in.hatx[blk + off]);
-      }
+      load_hatx_block(blk, bsize);
       const size_t r_words = static_cast<size_t>(compiled.r);
       if (compiled.degree <= 0) {
         for (size_t j = 0; j < r_words; ++j) {

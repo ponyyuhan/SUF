@@ -126,7 +126,7 @@ Correctness note: trunc/ARS helper bits (`carry/sign/wrap`) are maintained as **
   - `SUF_OPEN_PACK_MIN_SAVINGS_PCT` sets the minimum savings to keep packing (default 25)
   - `SUF_OPEN_PACK_DYNAMIC=1` uses per-flush max bitwidth to shrink packing width (off by default)
   - `SUF_OPEN_PACK_DEVICE=1` enables GPU pack/unpack when CUDA is available
-  - `SUF_OPEN_PACK_DEVICE_MIN_WORDS` minimum words to use GPU packing (default `2^12` when a CUDA stream is present; otherwise `2^18`)
+  - `SUF_OPEN_PACK_DEVICE_MIN_WORDS` minimum words to use GPU packing (OpenCollector default `2^12` when a CUDA stream is present; `bench_suf_transformer` overrides to `2^18` to reduce GPU contention with PFSS kernels)
   - `SUF_OPEN_PACK_DEVICE_SCATTER=1` computes opened values on GPU during device-pack (default on when a CUDA stream is present)
   - `SUF_OPEN_PACK_USE_CALLER_STREAM=1` forces OpenCollector device pack/unpack onto the caller-provided CUDA stream (default uses an internal non-blocking stream)
   - `SUF_OVERLAP_PFSS_OPEN=0|1` enables/disables PhaseExecutor overlap of PFSS flush with open flush (default on)
@@ -159,8 +159,11 @@ Recent concrete optimizations (keeps `paper.md` semantics unchanged):
 - **Horner fusion across outputs:** `include/gates/composite_fss.hpp` fuses Horner’s rule multiplications across all arithmetic outputs, reducing Beaver rounds from `r * degree` to `degree` per block.
 - **Beaver scratch reuse:** `include/proto/beaver_mul64.hpp` uses thread-local scratch buffers inside `BeaverMul64::mul_batch` so short-lived `BeaverMul64` instances (common inside composite evaluation) don’t repeatedly allocate/resize large `(e,f)` buffers.
 - **PFSS GPU key upload fast-path:** `cuda/pfss_backend_gpu.cu` removes hash-based “cache” checks for device key uploads (they scanned O(bytes) on the CPU); inputs are now copied directly via `cudaMemcpyAsync`.
+- **PFSS GPU broadcast-key caching:** `cuda/pfss_kernels.cu` adds shared-memory cached broadcast kernels (used when cutpoint/threshold tables fit) to reduce repeated global loads of key material in the hot interval-LUT / packed-compare paths.
 - **GPU DCF compare fast-path:** `cuda/pfss_backend_gpu.cu` packs `alpha` into a u64 in the DCF key header so the GPU DCF kernels can do `x < alpha` directly instead of per-bit comparisons.
 - **Overlap PFSS flush with open flush:** `include/runtime/phase_executor.hpp` overlaps PFSS flushing in a background thread during `OpenCollector::flush()` when the OpenCollector uses its internal CUDA pack stream (default), reducing effective round barriers.
+- **Pinned host staging for large PFSS payloads:** `include/gates/composite_fss.hpp` can use cached, thread-local pinned host buffers for large GPU→host copies in packed-compare and interval-LUT paths (`SUF_COMPOSITE_PINNED=1`). This targets the `pfss_flush_eval_eval_ns` component when PFSS outputs must be materialized on host.
+- **OpenMP for LUT masking:** `include/gates/composite_fss.hpp` parallelizes the per-element `+ r_out_share` masking step for large interval-LUT batches to reduce host overhead and party skew (which otherwise inflates `open_comm_ns` in the single-process harness).
 
 Practical strategies to push SUF toward Sigma-like performance (without changing `paper.md` semantics):
 - **Reduce PFSS jobs (`pfss.num_jobs`):** fewer Composite-FSS invocations means fewer hatx opens and fewer Composite-FSS “flush” boundaries. Targets include rescale/truncation hoisting, folding public scaling into existing phases, and avoiding per-head fragmentation in attention.
@@ -168,7 +171,9 @@ Practical strategies to push SUF toward Sigma-like performance (without changing
 - **Reduce PFSS bytes:** enable PFSS-channel Beaver packing (`SUF_BEAVER_PACK_EFFBITS=1`, default-on) so opened `(e,f)` words are sent in `ceil(n_bits/8)` bytes rather than 8 bytes.
 - **Reduce packing/scatter overhead:** prefer `SUF_OPEN_PACK_DEVICE=1` + `SUF_OPEN_PACK_DEVICE_KEEP_OPENED=1` (GPU runs) so large Beaver opens do not bottleneck on host bitpacking and redundant D2H/H2D for opened values.
 - **Use the profiler:** `SUF_BENCH_PROFILE=1` should make it obvious whether the next win is in `open_*` vs `pfss_*` counters; `resources.cpu_util_avg` helps distinguish CPU-bound orchestration vs GPU kernels.
+- **Avoid CPU oversubscription (bench harness):** in the single-process 2-party harness, too many OpenMP threads can starve the in-process net rings and inflate `open_comm_ns`; override with `--omp-threads` or `OMP_NUM_THREADS` if needed.
 - **Composite block size:** `SUF_COMPOSITE_BLOCK` controls the Composite‑FSS block size.
+- **Composite scratch budget:** `SUF_COMPOSITE_SCRATCH_MB` caps selector scratch (pieces×block_size) so larger `SUF_COMPOSITE_BLOCK` values don’t explode transient allocations.
 
 ### Notes on libdpf / grotto backend
 
@@ -235,6 +240,9 @@ python3 bench/run_sigma_vs_suf.py --config bench/configs/sigma_vs_suf_quick_gpu.
 - `SUF_PER_ELEMENT_MASKS=0` (avoid per-element trunc/ARS masks that prevent batching)
 - GPU runs: `SUF_FORCE_PFSS=1` (stable PFSS accounting); CPU runs keep the deterministic reference fast-path unless you export `SUF_FORCE_PFSS=1`
 - GPU runs: `SUF_BENCH_NET_RING_POW2=24` (larger net ring to reduce backpressure)
+- OpenMP (2-party single-process harness): if `OMP_NUM_THREADS` is unset and `--omp-threads` is not provided, GPU runs default to `min(8, procs/4)` threads per party to reduce contention with the in-process net rings.
+- GPU runs: `SUF_COMPOSITE_BLOCK=262144` and `SUF_COMPOSITE_SCRATCH_MB=256` (reduce Composite-FSS per-block overhead; see `SUF_COMPOSITE_*` in this README)
+- GPU runs: `SUF_COMPOSITE_PINNED=1` with `SUF_COMPOSITE_PINNED_MIN_WORDS=1048576` (cached pinned staging for large PFSS GPU→host copies)
 - BERT-Tiny: `SUF_GELU_CONST=1` and `SUF_GELU_CONST_SEGMENTS=256`
 
 ### Sigma (EzPC GPU-MPC) + SEAL Setup

@@ -213,10 +213,15 @@ int main(int argc, char** argv) {
                            proto::PfssBackendBatch& be,
                            CountingChan& pfss_ch,
                            CountingNetChan& net_ch,
-                           compiler::TruncationPassContext& trunc_ctx,
-                           std::vector<uint64_t>& Xshare,
-                           PartyBreakdown& bout) {
-        runtime::PhaseExecutor pe;
+	                           compiler::TruncationPassContext& trunc_ctx,
+	                           std::vector<uint64_t>& Xshare,
+	                           PartyBreakdown& bout) {
+#ifdef SUF_HAVE_CUDA
+	        // Must outlive `PhaseExecutor`: PFSS tasks may retain staged device buffers
+	        // whose deleters call back into the stager during executor teardown.
+	        std::unique_ptr<runtime::CudaPfssStager> cuda_stager;
+#endif
+	        runtime::PhaseExecutor pe;
 
         nn::LayerContext ctx;
         ctx.trunc_ctx = &trunc_ctx;
@@ -228,12 +233,11 @@ int main(int argc, char** argv) {
         runtime::PfssLayerPlanner layer_planner;
         ctx.pfss_layer_planner = &layer_planner;
 #ifdef SUF_HAVE_CUDA
-        std::unique_ptr<runtime::CudaPfssStager> cuda_stager;
-        if (ctx.uses_gpu_backend()) {
-          void* stream = nullptr;
-          if (auto* gpu_eval = dynamic_cast<proto::PfssGpuStagedEval*>(&be)) {
-            stream = gpu_eval->device_stream();
-          }
+	        if (ctx.uses_gpu_backend()) {
+	          void* stream = nullptr;
+	          if (auto* gpu_eval = dynamic_cast<proto::PfssGpuStagedEval*>(&be)) {
+	            stream = gpu_eval->device_stream();
+	          }
           cuda_stager = std::make_unique<runtime::CudaPfssStager>(stream);
           ctx.pfss_gpu_stager = cuda_stager.get();
         }

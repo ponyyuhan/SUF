@@ -1171,7 +1171,9 @@ void attention_forward(const AttentionConfig& cfg,
     pfss_lim.max_pending_jobs = 1ull << 13;
     pfss_lim.max_pending_hatx_words = 1ull << 21;
     pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
-    pfss_lim.max_flushes = 1ull << 9;
+    // Long runs (esp. large models) can accumulate many PFSS flush waves; do not
+    // artificially cap flushes in a way that breaks device-pipeline benchmarking.
+    pfss_lim.max_flushes = 1ull << 16;
     if (ctx && ctx->uses_gpu_backend()) {
       pfss_lim.max_pending_jobs = 1ull << 16;
       pfss_lim.max_pending_hatx_words = 1ull << 23;
@@ -1238,7 +1240,8 @@ void attention_forward(const AttentionConfig& cfg,
     pfss_lim.max_pending_jobs = 1ull << 13;
     pfss_lim.max_pending_hatx_words = 1ull << 21;
     pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
-    pfss_lim.max_flushes = 1ull << 9;
+    // See earlier: large flush budget avoids spurious failures on large models.
+    pfss_lim.max_flushes = 1ull << 16;
     if (ctx && ctx->uses_gpu_backend()) {
       pfss_lim.max_pending_jobs = 1ull << 16;
       pfss_lim.max_pending_hatx_words = 1ull << 23;

@@ -401,7 +401,9 @@ void mlp_forward(const MLPConfig& cfg,
     pfss_lim.max_pending_jobs = 1ull << 13;
     pfss_lim.max_pending_hatx_words = 1ull << 21;
     pfss_lim.max_pending_hatx_bytes = pfss_lim.max_pending_hatx_words * sizeof(uint64_t);
-    pfss_lim.max_flushes = 1ull << 9;
+    // See transformer_layer.cpp: keep a very large flush budget so long runs do
+    // not fail spuriously when PFSS flushing is fragmented.
+    pfss_lim.max_flushes = 1ull << 16;
     if (ctx && ctx->uses_gpu_backend()) {
       pfss_lim.max_pending_jobs = 1ull << 16;
       pfss_lim.max_pending_hatx_words = 1ull << 23;

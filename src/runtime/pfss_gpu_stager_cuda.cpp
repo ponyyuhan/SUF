@@ -3,6 +3,7 @@
 #ifdef SUF_HAVE_CUDA
 #include <cuda_runtime.h>
 #include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -42,6 +43,16 @@ CudaPfssStager::CudaPfssStager(void* stream) {
   max_cached_bytes_ = env_mb("SUF_CUDA_STAGER_CACHE_MB", external ? 64 : 0) * 1024 * 1024;
   max_single_cached_bytes_ = env_mb("SUF_CUDA_STAGER_CACHE_MAX_SINGLE_MB", 16) * 1024 * 1024;
   cache_enabled_ = (max_cached_bytes_ > 0);
+
+  // Optional pinned-host staging for large H2D copies. `cudaMemcpyAsync` from pageable
+  // memory may internally block; staging through a pinned cache can reduce host-side
+  // overhead when we enqueue many large copies (PFSS device pipeline).
+  // Default OFF: pinned staging adds an extra memcpy and only helps when pageable
+  // `cudaMemcpyAsync` exhibits significant host-side blocking on a given system.
+  max_pinned_host_bytes_ = env_mb("SUF_CUDA_STAGER_PINNED_MB", 0) * 1024 * 1024;
+  max_single_pinned_host_bytes_ = env_mb("SUF_CUDA_STAGER_PINNED_MAX_SINGLE_MB", 16) * 1024 * 1024;
+  pinned_host_enabled_ = (max_pinned_host_bytes_ > 0);
+  pinned_host_min_bytes_ = env_mb("SUF_CUDA_STAGER_PINNED_MIN_MB", 1) * 1024 * 1024;
 }
 
 CudaPfssStager::~CudaPfssStager() {
@@ -56,6 +67,12 @@ CudaPfssStager::~CudaPfssStager() {
   }
   cache_.clear();
   cached_bytes_ = 0;
+  for (auto& e : pinned_host_cache_) {
+    if (e.ready) cudaEventDestroy(reinterpret_cast<cudaEvent_t>(e.ready));
+    if (e.ptr) cudaFreeHost(e.ptr);
+  }
+  pinned_host_cache_.clear();
+  pinned_host_bytes_ = 0;
   if (own_stream_ && stream_) {
     cudaStreamDestroy(reinterpret_cast<cudaStream_t>(stream_));
   }
@@ -112,9 +129,54 @@ void CudaPfssStager::free_bytes(DeviceBufferRef buf) {
 DeviceBufferRef CudaPfssStager::stage_to_device(const HostBufferRef& host) {
   auto dev = alloc_bytes(host.bytes);
   if (host.ptr && host.bytes) {
-    check(cudaMemcpyAsync(dev.ptr, host.ptr, host.bytes, cudaMemcpyHostToDevice,
+    const bool want_pinned =
+        pinned_host_enabled_ &&
+        pinned_host_min_bytes_ > 0 &&
+        host.bytes >= pinned_host_min_bytes_ &&
+        (max_single_pinned_host_bytes_ == 0 || host.bytes <= max_single_pinned_host_bytes_);
+    const void* src = host.ptr;
+    void* pinned = nullptr;
+    if (want_pinned) {
+      size_t best = static_cast<size_t>(-1);
+      size_t best_cap = static_cast<size_t>(-1);
+      for (size_t i = 0; i < pinned_host_cache_.size(); ++i) {
+        auto& e = pinned_host_cache_[i];
+        if (!e.ptr || e.cap < host.bytes) continue;
+        if (!e.ready) continue;
+        auto st = cudaEventQuery(reinterpret_cast<cudaEvent_t>(e.ready));
+        if (st == cudaErrorNotReady) continue;
+        check(st, "cudaEventQuery (pinned_host)");
+        if (e.cap < best_cap) {
+          best = i;
+          best_cap = e.cap;
+        }
+      }
+      if (best != static_cast<size_t>(-1)) {
+        auto e = pinned_host_cache_[best];
+        pinned_host_cache_.erase(pinned_host_cache_.begin() + static_cast<std::ptrdiff_t>(best));
+        pinned_host_bytes_ -= e.cap;
+        cudaEventDestroy(reinterpret_cast<cudaEvent_t>(e.ready));
+        e.ready = nullptr;
+        pinned = e.ptr;
+      } else if (max_pinned_host_bytes_ > 0 && pinned_host_bytes_ + host.bytes <= max_pinned_host_bytes_) {
+        check(cudaMallocHost(&pinned, host.bytes), "cudaMallocHost (pinned_host)");
+      }
+      if (pinned) {
+        std::memcpy(pinned, host.ptr, host.bytes);
+        src = pinned;
+      }
+    }
+    check(cudaMemcpyAsync(dev.ptr, src, host.bytes, cudaMemcpyHostToDevice,
                           reinterpret_cast<cudaStream_t>(stream_)),
           "cudaMemcpyAsync H2D");
+    if (pinned) {
+      // Record completion of this H2D copy before reusing the pinned buffer.
+      cudaEvent_t ev = nullptr;
+      check(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming), "cudaEventCreate (pinned_host)");
+      check(cudaEventRecord(ev, reinterpret_cast<cudaStream_t>(stream_)), "cudaEventRecord (pinned_host)");
+      pinned_host_cache_.push_back(CachedPinnedHost{pinned, host.bytes, reinterpret_cast<void*>(ev)});
+      pinned_host_bytes_ += host.bytes;
+    }
     // If we reuse an externally-owned stream (e.g., PFSS backend compute stream),
     // the caller typically enqueues downstream work on the same stream, so an
     // immediate sync would only add overhead and destroy overlap.
