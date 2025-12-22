@@ -122,11 +122,11 @@ Correctness note: trunc/ARS helper bits (`carry/sign/wrap`) are maintained as **
   - `SUF_OPEN_PACK_EFFBITS=1` enables packed opens when shares fit in small bitwidth
   - `SUF_OPEN_PACK_SIGNED=1` uses signed (two’s‑complement) bitwidth tracking + sign‑extend on unpack
   - `SUF_OPEN_PACK_MAX_BITS` caps packing width (default 56)
-  - `SUF_OPEN_PACK_AUTO=1` skips packing when savings are small (default on in the benchmark)
+  - `SUF_OPEN_PACK_AUTO=1` skips packing when savings are small (CPU bench default; GPU bench sets `SUF_OPEN_PACK_AUTO=0`)
   - `SUF_OPEN_PACK_MIN_SAVINGS_PCT` sets the minimum savings to keep packing (default 25)
   - `SUF_OPEN_PACK_DYNAMIC=1` uses per-flush max bitwidth to shrink packing width (off by default)
   - `SUF_OPEN_PACK_DEVICE=1` enables GPU pack/unpack when CUDA is available
-  - `SUF_OPEN_PACK_DEVICE_MIN_WORDS` minimum words to use GPU packing (OpenCollector default `2^12` when a CUDA stream is present; `bench_suf_transformer` overrides to `2^18` to reduce GPU contention with PFSS kernels)
+  - `SUF_OPEN_PACK_DEVICE_MIN_WORDS` minimum words to use GPU packing (OpenCollector default `2^12` when a CUDA stream is present; `bench_suf_transformer` overrides adaptively: default `262144`, `gpt2` uses `65536`, and large `d_model>=1024` models use `131072`)
   - `SUF_OPEN_PACK_DEVICE_SCATTER=1` computes opened values on GPU during device-pack (default on when a CUDA stream is present)
   - `SUF_OPEN_PACK_USE_CALLER_STREAM=1` forces OpenCollector device pack/unpack onto the caller-provided CUDA stream (default uses an internal non-blocking stream)
   - `SUF_OVERLAP_PFSS_OPEN=0|1` enables/disables PhaseExecutor overlap of PFSS flush with open flush (default on)
@@ -228,22 +228,23 @@ Quick GPU-only run (BERT/GPT2, seq=128, B=1):
 python3 bench/run_sigma_vs_suf.py --config bench/configs/sigma_vs_suf_quick_gpu.json --timeout-sigma-s 3600
 ```
 
-### Benchmark Defaults (BERT-Tiny)
+### Benchmark Defaults (GPU bench)
 
-`build_ninja/bench_suf_transformer` sets performance-focused defaults for end-to-end runs:
+`build_ninja/bench_suf_transformer` sets performance-focused defaults for end-to-end runs (GPU):
 
-- `proto::set_ring_bits(spec.n_bits)` (BERT-Tiny uses `n_bits=37`)
+- `proto::set_ring_bits(spec.n_bits)` (model-specific bitwidth)
 - `SUF_OPEN_PACK_EFFBITS=1` by default on GPU (auto-pack can still skip small savings); CPU default OFF
-- `SUF_OPEN_PACK_AUTO=1` (skip packing when savings are small)
+- GPU runs: `SUF_OPEN_PACK_AUTO=0` (always pack to ring bits); CPU runs: `SUF_OPEN_PACK_AUTO=1`
 - `SUF_OPEN_PACK_DEVICE=1` / `SUF_OPEN_PACK_DEVICE_SCATTER=1` / `SUF_OPEN_PACK_DEVICE_KEEP_OPENED=1` default-on on GPU when a CUDA stream is available (set any of these to `0` to force host packing/host scatter)
+- GPU runs: `SUF_OPEN_PACK_DEVICE_MIN_WORDS` is set adaptively; inspect `preprocessing.open_pack_device_min_words` in the SUF JSON logs to confirm what was applied.
 - `SUF_BEAVER_PACK_EFFBITS=1` default-on (packs PFSS-channel Beaver opens to `ceil(n_bits/8)` bytes/value)
 - `SUF_PER_ELEMENT_MASKS=0` (avoid per-element trunc/ARS masks that prevent batching)
 - GPU runs: `SUF_FORCE_PFSS=1` (stable PFSS accounting); CPU runs keep the deterministic reference fast-path unless you export `SUF_FORCE_PFSS=1`
 - GPU runs: `SUF_BENCH_NET_RING_POW2=24` (larger net ring to reduce backpressure)
-- OpenMP (2-party single-process harness): if `OMP_NUM_THREADS` is unset and `--omp-threads` is not provided, GPU runs default to `min(8, procs/4)` threads per party to reduce contention with the in-process net rings.
+- OpenMP (2-party single-process harness): if `OMP_NUM_THREADS` is unset and `--omp-threads` is not provided, GPU runs default to `min(4, procs/4)` threads per party to reduce contention with the in-process net rings.
 - GPU runs: `SUF_COMPOSITE_BLOCK=262144` and `SUF_COMPOSITE_SCRATCH_MB=256` (reduce Composite-FSS per-block overhead; see `SUF_COMPOSITE_*` in this README)
 - GPU runs: `SUF_COMPOSITE_PINNED=1` with `SUF_COMPOSITE_PINNED_MIN_WORDS=1048576` (cached pinned staging for large PFSS GPU→host copies)
-- BERT-Tiny: `SUF_GELU_CONST=1` and `SUF_GELU_CONST_SEGMENTS=256`
+- GeLU models (benchmark default): `SUF_GELU_CONST=1` and `SUF_GELU_CONST_SEGMENTS=256`
 
 ### Sigma (EzPC GPU-MPC) + SEAL Setup
 

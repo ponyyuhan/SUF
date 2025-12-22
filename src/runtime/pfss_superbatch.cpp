@@ -349,10 +349,6 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
                      : (dev_capable && dev_hatx.ptr ? reinterpret_cast<const uint64_t*>(dev_hatx.ptr) : nullptr))
               : nullptr,
           device_outputs_};
-      // We stage PFSS outputs ourselves (via PfssGpuStager) so device pointers remain
-      // stable across flush/finalize boundaries. Backend-provided device pointers may
-      // alias transient scratch buffers.
-      in.device_outputs = false;
       const auto t_eval0 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
       auto out = gates::composite_eval_batch_backend(party, backend, ch, *job.key, *job.suf, in);
       if (prof) ns_eval += prof_ns(t_eval0, prof_now());
@@ -369,7 +365,18 @@ void PfssSuperBatch::flush_eval(int party, proto::PfssBackendBatch& backend, pro
       gr.dev_bools_ptr = out.bool_device;
       gr.dev_bools_words = out.bool_device_words;
 
-      if (device_outputs_ && dev_capable && gpu_stager_) {
+      const bool have_backend_dev_arith =
+          (gr.dev_arith_ptr != nullptr) &&
+          (gr.dev_arith_words >= gr.arith.size() || gr.arith.empty());
+      const bool have_backend_dev_bools =
+          (gr.dev_bools_ptr != nullptr) &&
+          (gr.dev_bools_words >= gr.bools.size() || gr.bools.empty());
+      const bool prefer_backend_dev =
+          device_outputs_ &&
+          (have_backend_dev_arith || have_backend_dev_bools) &&
+          env_flag_enabled_default_local("SUF_PFSS_FASTPATH_BACKEND_DEVICE_OUT", true);
+
+      if (!prefer_backend_dev && device_outputs_ && dev_capable && gpu_stager_) {
         const auto t_stage0 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
         if (!gr.arith.empty()) {
           HostBufferRef host_arith{gr.arith.data(), gr.arith.size() * sizeof(uint64_t)};
@@ -1411,6 +1418,9 @@ void PfssSuperBatch::materialize_host(int party, proto::IChannel& ch) {
   const auto t0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
   populate_device_views_();
   if (!store_results_) {
+    // Reuse a single hook output buffer across jobs to avoid per-job allocations
+    // and redundant zeroing in hot transformer runs.
+    std::vector<uint64_t> arith_hooked;
     for (size_t idx = 0; idx < jobs_.size(); ++idx) {
       const auto& job = jobs_[idx];
       if (idx >= slices_.size()) continue;
@@ -1428,10 +1438,10 @@ void PfssSuperBatch::materialize_host(int party, proto::IChannel& ch) {
           (ell > 0 && !gr.bools.empty()) ? (gr.bools.data() + sl.start * ell) : nullptr;
 
       const uint64_t* arith_in = arith_base;
-      std::vector<uint64_t> arith_hooked;
       if (job.hook && job.out.data) {
         job.hook->configure(job.key->compiled.layout);
-        arith_hooked.assign(arith_words, 0);
+        // Hooks write all arithmetic outputs; no need to memset.
+        arith_hooked.resize(arith_words);
 
         const bool hook_needs_mul =
             !(dynamic_cast<const gates::FaithfulTruncPostProc*>(job.hook) ||

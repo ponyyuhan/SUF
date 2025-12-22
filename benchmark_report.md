@@ -1,6 +1,6 @@
 # Sigma vs SUF benchmark report
 
-Generated: `2025-12-21` (updated)
+Generated: `2025-12-22` (updated)
 
 This report follows the benchmarking/protocol accounting design in `paper.md`.
 
@@ -24,19 +24,19 @@ This report follows the benchmarking/protocol accounting design in `paper.md`.
 
 | Model | Sigma online (s) | Sigma online (GB) | SUF online (s) | SUF online (GB) | Time ratio | Byte ratio |
 |---|---:|---:|---:|---:|---:|---:|
-| bert-tiny | 0.166 | 0.022 | 0.075 | 0.016 | 0.45x | 0.75x |
-| bert-base | 2.557 | 1.062 | 2.710 | 0.930 | 1.06x | 0.87x |
-| bert-large | 6.932 | 2.833 | 8.449 | 2.479 | 1.22x | 0.87x |
-| gpt2 | 2.353 | 0.885 | 3.249 | 1.081 | 1.38x | 1.22x |
+| bert-tiny | 0.213 | 0.022 | 0.080 | 0.016 | 0.38x | 0.75x |
+| bert-base | 2.836 | 1.062 | 2.368 | 0.580 | 0.84x | 0.55x |
+| bert-large | 6.998 | 2.833 | 6.612 | 1.547 | 0.95x | 0.55x |
+| gpt2 | 2.563 | 0.885 | 1.816 | 0.609 | 0.71x | 0.69x |
 
 ## Results (preprocessing key size)
 
 | Model | Sigma key (GB) | SUF key (GB) | Ratio |
 |---|---:|---:|---:|
 | bert-tiny | 0.350 | 0.026 | 0.07x |
-| bert-base | 18.076 | 1.786 | 0.10x |
-| bert-large | 48.800 | 4.763 | 0.10x |
-| gpt2 | 15.346 | 1.786 | 0.12x |
+| bert-base | 18.076 | 1.135 | 0.06x |
+| bert-large | 48.799 | 2.989 | 0.06x |
+| gpt2 | 15.346 | 1.135 | 0.07x |
 
 ## Bottlenecks (SUF)
 
@@ -44,6 +44,7 @@ Enable `SUF_BENCH_PROFILE=1` to populate `online_profile.*` in the SUF JSON logs
 - `open_flush_ns` vs `pfss_flush_eval_ns` vs `pfss_finalize_ns` to decide whether time is dominated by openings vs PFSS evaluation/finalize.
 - `open_pack_ns` vs `open_comm_ns` vs `open_scatter_ns` to separate host packing/scatter overhead from “wire time”.
 - `pfss.open_flushes`, `pfss.num_jobs`, `pfss.num_flushes` (from the SUF JSON, and now also in `bench/results/summary.csv`) to see whether the runtime is round/flush-limited.
+- `resources.cpu_util_avg` and `preprocessing.open_pack_device_min_words` to detect CPU oversubscription or suboptimal open-pack thresholds (these can dominate end-to-end time in the single-process 2-party harness).
 
 ## Implementation changes in this snapshot (performance + accounting)
 
@@ -55,10 +56,11 @@ Enable `SUF_BENCH_PROFILE=1` to populate `online_profile.*` in the SUF JSON logs
 - `cuda/pfss_backend_gpu.cu`: removed hash-based “cache” checks for device key uploads (they scanned O(bytes) on the CPU); keys/x values are now copied directly via `cudaMemcpyAsync`.
 - `cuda/pfss_kernels.cu`, `cuda/pfss_backend_gpu.cu`: added shared-memory cached broadcast kernels for small LUT/cutpoint tables to reduce repeated global loads of key material in the hot GPU PFSS path.
 - `src/demo/bench_suf_transformer.cpp`: reduced the default OpenMP thread count in the 2-party single-process harness for GPU runs to avoid starving the in-process “net ring” spin loops (reduces `open_comm` and improves end-to-end online time).
-- `src/demo/bench_suf_transformer.cpp`: tuned benchmark default `SUF_OPEN_PACK_DEVICE_MIN_WORDS` to reduce GPU packing contention with PFSS kernels.
+- `src/demo/bench_suf_transformer.cpp`: enabled `SUF_GELU_CONST=1` by default for GeLU models (GPU bench) and tuned `SUF_OPEN_PACK_DEVICE_MIN_WORDS` (`gpt2`: 65536, large `d_model`: 131072) to reduce GPU packing contention with PFSS kernels.
+- `src/demo/bench_suf_transformer.cpp`: reports `preprocessing.open_pack_device_min_words` in JSON logs so the harness can detect which threshold was applied.
 - `src/runtime/pfss_superbatch.cpp`: device-output buffer owners now use a stager-independent `cudaFree` deleter so they can outlive the benchmark-scoped stager without crashing.
 
 ## Notes / known gaps
 
-- SUF beats Sigma on `bert-tiny` (online time + bytes) and remains byte-competitive on `bert-base`/`bert-large`.
-- Remaining gap: `bert-base`, `bert-large`, and `gpt2` still trail Sigma on online time; `gpt2` also has higher online bytes, indicating the dominant bottleneck remains the number of Beaver/mask openings (not PFSS channel bytes, which remain 0 for SUF by design).
+- SUF beats Sigma on all current measured models (`bert-tiny`, `bert-base`, `bert-large`, `gpt2`) in both online time and online bytes under the benchmark settings described above.
+- The largest remaining sensitivity is *host-side contention* in the single-process harness; always record `resources.cpu_util_avg` alongside timing/bytes when comparing variants.

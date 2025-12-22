@@ -1320,11 +1320,35 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
         out.haty_share[base + j] = v;
       }
     }
+#ifdef SUF_HAVE_CUDA
     if (want_device_out && staged && in.hatx_device) {
-      // Surface backend-owned device output pointer for callers that want device-only flows.
-      out.haty_device = staged->last_device_output();
-      out.haty_device_words = N * out_words;
+      // Interval-LUT evaluation writes unmasked coefficients to the backend's
+      // device output buffer; our host-side loop applies the per-output r_out
+      // mask. In device-pipeline mode, mirror the masked host output onto the
+      // backend device buffer so downstream kernels see identical semantics.
+      const size_t words = out.haty_share.size();
+      if (words > 0 && staged->last_device_output() != nullptr) {
+        staged->ensure_output_buffers(words, 0);
+        cudaStream_t stream = reinterpret_cast<cudaStream_t>(staged->device_stream());
+        cudaError_t st = cudaMemcpyAsync(const_cast<uint64_t*>(staged->last_device_output()),
+                                         out.haty_share.data(),
+                                         words * sizeof(uint64_t),
+                                         cudaMemcpyHostToDevice,
+                                         stream);
+        if (st != cudaSuccess) {
+          throw std::runtime_error(std::string("composite_eval_batch_backend cudaMemcpy haty H2D failed: ") +
+                                   cudaGetErrorString(st));
+        }
+        st = cudaStreamSynchronize(stream);
+        if (st != cudaSuccess) {
+          throw std::runtime_error(std::string("composite_eval_batch_backend cudaStreamSynchronize haty failed: ") +
+                                   cudaGetErrorString(st));
+        }
+        out.haty_device = staged->last_device_output();
+        out.haty_device_words = words;
+      }
     }
+#endif
     return out;
   }
   if (k.pred_meta.sem == proto::ShareSemantics::AddU64) {

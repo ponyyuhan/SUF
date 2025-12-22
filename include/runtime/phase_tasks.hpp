@@ -497,15 +497,22 @@ class TruncTask final : public detail::PhaseTask {
           if (!R.opens->ready(h_open_)) return detail::Need::Open;
           const size_t elems = in_.size();
 #ifdef SUF_HAVE_CUDA
-          // Device-only hatx is only safe/beneficial in device-pipeline mode, where
-          // downstream consumers can keep data on GPU and avoid host staging.
+          // When the PFSS backend can consume device `hatx`, avoid a full D2H
+          // materialization of the opened masked values. We still copy into an
+          // owned buffer so the pointer remains stable across subsequent
+          // OpenCollector flushes (which reuse internal scratch).
+          const bool keep_opened_for_ref =
+              (R.pfss_backend &&
+               dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) != nullptr &&
+               !std::getenv("SUF_FORCE_PFSS"));
           const bool backend_supports_device_hatx =
-              R.device_pipeline && R.pfss_backend &&
+              (!keep_opened_for_ref) &&
+              R.pfss_backend &&
               dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr;
           const bool want_device_hatx =
               backend_supports_device_hatx &&
               env_flag_enabled_default("SUF_TRUNC_DEVICE_HATX", backend_supports_device_hatx);
-          if (want_device_hatx) {
+          if (!per_element_ && want_device_hatx) {
             const uint64_t* d_hatx_src = R.opens->view_device_u64(h_open_);
             if (d_hatx_src) {
               // Ensure we own a stable device buffer across subsequent OpenCollector flushes.
@@ -527,7 +534,7 @@ class TruncTask final : public detail::PhaseTask {
                                           elems * sizeof(uint64_t),
                                           cudaMemcpyDeviceToDevice);
               if (st != cudaSuccess) {
-                throw std::runtime_error(std::string("TruncTask cudaMemcpyAsync hatx D2D failed: ") +
+                throw std::runtime_error(std::string("TruncTask cudaMemcpy hatx D2D failed: ") +
                                          cudaGetErrorString(st));
               }
               // Skip host materialization; EnqueuePfss will use device-only hatx.
@@ -611,7 +618,14 @@ class TruncTask final : public detail::PhaseTask {
           job.hook = R.device_pipeline ? nullptr : hook_;
           const size_t elems = in_.size();
 #ifdef SUF_HAVE_CUDA
-          if (R.device_pipeline &&
+          if (device_hatx_only_ &&
+              R.pfss_backend && dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr &&
+              d_hatx_public_ && d_hatx_words_ >= elems) {
+            job.hatx_public.clear();  // device-only hatx
+            job.hatx_device = d_hatx_public_;
+            job.hatx_device_words = elems;
+            job.shape.total_elems = static_cast<uint32_t>(elems);
+          } else if (R.device_pipeline &&
               R.pfss_backend && dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr &&
               d_hatx_public_ && d_hatx_words_ >= elems) {
             job.hatx_public.clear();  // device-only hatx (GPU backend will use hatx_device)
@@ -2540,7 +2554,6 @@ class CubicPolyTask final : public detail::PhaseTask {
                dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) != nullptr &&
                !std::getenv("SUF_FORCE_PFSS"));
           const bool backend_supports_device_hatx =
-              R.device_pipeline &&
               (!keep_opened_for_ref) &&
               R.pfss_backend && dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr;
           const bool want_device_hatx =
@@ -2909,6 +2922,11 @@ class RecipTask final : public detail::PhaseTask {
       d_out_device_ = nullptr;
       d_out_elems_ = 0;
     }
+    if (d_hatx_public_) {
+      cudaFree(d_hatx_public_);
+      d_hatx_public_ = nullptr;
+      d_hatx_words_ = 0;
+    }
 #endif
   }
 
@@ -2981,11 +2999,50 @@ class RecipTask final : public detail::PhaseTask {
         if (st_ == St::WaitXhatOpen) {
           if (!R.opens) throw std::runtime_error("RecipTask: no OpenCollector");
           if (!R.opens->ready(h_open_)) return detail::Need::Open;
-          if (!force_ref_full_ &&
+          const bool keep_opened_for_ref =
+              (!force_ref_full_) &&
               R.pfss_backend &&
               dynamic_cast<proto::ReferenceBackend*>(R.pfss_backend) != nullptr &&
               bundle_.init_spec &&
-              !std::getenv("SUF_FORCE_PFSS")) {
+              !std::getenv("SUF_FORCE_PFSS");
+#ifdef SUF_HAVE_CUDA
+          const bool backend_supports_device_hatx =
+              (!keep_opened_for_ref) &&
+              R.pfss_backend &&
+              dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr;
+          const bool want_device_hatx =
+              backend_supports_device_hatx &&
+              env_flag_enabled_default("SUF_RECIP_DEVICE_HATX", backend_supports_device_hatx);
+          if (want_device_hatx) {
+            const uint64_t* d_hatx_src = R.opens->view_device_u64(h_open_);
+            if (d_hatx_src) {
+              const size_t elems = x_.size();
+              if (!d_hatx_public_ || d_hatx_words_ < elems) {
+                if (d_hatx_public_) cudaFree(d_hatx_public_);
+                d_hatx_public_ = nullptr;
+                d_hatx_words_ = 0;
+                cudaError_t st = cudaMalloc(reinterpret_cast<void**>(&d_hatx_public_), elems * sizeof(uint64_t));
+                if (st != cudaSuccess) {
+                  throw std::runtime_error(std::string("RecipTask cudaMalloc(d_hatx_public_) failed: ") +
+                                           cudaGetErrorString(st));
+                }
+                d_hatx_words_ = elems;
+              }
+              cudaError_t st = cudaMemcpy(d_hatx_public_, d_hatx_src,
+                                          elems * sizeof(uint64_t),
+                                          cudaMemcpyDeviceToDevice);
+              if (st != cudaSuccess) {
+                throw std::runtime_error(std::string("RecipTask cudaMemcpy hatx D2D failed: ") +
+                                         cudaGetErrorString(st));
+              }
+              device_hatx_only_ = true;
+              opened_.clear();
+              st_ = St::EnqueueCoeff;
+              break;
+            }
+          }
+#endif
+          if (keep_opened_for_ref) {
             auto v = R.opens->view_u64(h_open_);
             opened_.assign(v.begin(), v.end());
             y_.assign(opened_.size(), 0);
@@ -3006,6 +3063,7 @@ class RecipTask final : public detail::PhaseTask {
             auto v = R.opens->view_u64(h_open_);
             opened_.assign(v.begin(), v.end());
           }
+          device_hatx_only_ = false;
           st_ = St::EnqueueCoeff;
         }
         [[fallthrough]];
@@ -3015,8 +3073,16 @@ class RecipTask final : public detail::PhaseTask {
         job.suf = bundle_.suf;
         job.key = key_;
         job.hook = nullptr;
-        job.hatx_public = std::move(opened_);
-        opened_.clear();
+        if (device_hatx_only_) {
+          job.hatx_public.clear();
+#ifdef SUF_HAVE_CUDA
+          job.hatx_device = d_hatx_public_;
+          job.hatx_device_words = std::min(d_hatx_words_, x_.size());
+#endif
+        } else {
+          job.hatx_public = std::move(opened_);
+          opened_.clear();
+        }
         const size_t elems = x_.size();
         const size_t r = static_cast<size_t>(std::max(0, key_->compiled.r));
         if (r == 0) throw std::runtime_error("RecipTask: compiled coeff gate has r=0");
@@ -3286,6 +3352,7 @@ class RecipTask final : public detail::PhaseTask {
   std::span<const proto::BeaverTriple64Share> triple_span_;
   size_t triple_cursor_ = 0;
   bool dbg_rec_ = false;
+  bool device_hatx_only_ = false;
 
   // coeff storage
   std::vector<uint64_t> coeff_buf_;
@@ -3319,6 +3386,8 @@ class RecipTask final : public detail::PhaseTask {
 #ifdef SUF_HAVE_CUDA
   uint64_t* d_out_device_ = nullptr;
   size_t d_out_elems_ = 0;
+  uint64_t* d_hatx_public_ = nullptr;
+  size_t d_hatx_words_ = 0;
 #endif
 
   void plain_trunc(const std::vector<uint64_t>& in, std::vector<uint64_t>& out) {

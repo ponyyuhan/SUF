@@ -643,6 +643,7 @@ void write_json(const Args& a,
     << ", \"cache_material\": " << (env_flag("SUF_BENCH_CACHE_MATERIAL") ? "true" : "false")
     << ", \"per_element_masks\": " << (env_flag("SUF_PER_ELEMENT_MASKS") ? "true" : "false")
     << ", \"open_pack_effbits\": " << (env_flag("SUF_OPEN_PACK_EFFBITS") ? "true" : "false")
+    << ", \"open_pack_device_min_words\": " << env_int("SUF_OPEN_PACK_DEVICE_MIN_WORDS")
     << ", \"gelu_const\": " << (env_flag("SUF_GELU_CONST") ? "true" : "false")
     << ", \"gelu_const_segments\": " << env_int("SUF_GELU_CONST_SEGMENTS")
     << " },\n";
@@ -791,6 +792,7 @@ int main(int argc, char** argv) {
       const std::string seg = std::to_string(args.gelu_const_segments);
       ::setenv("SUF_GELU_CONST_SEGMENTS", seg.c_str(), /*overwrite=*/1);
     }
+    const bool user_open_pack_min_words = (std::getenv("SUF_OPEN_PACK_DEVICE_MIN_WORDS") != nullptr);
 	    // For benchmarking, we force the PFSS pipeline by default on GPU runs.
 	    // CPU runs use the deterministic reference fast-path unless `SUF_FORCE_PFSS`
 	    // is explicitly exported by the user.
@@ -833,18 +835,24 @@ int main(int argc, char** argv) {
       // medium-sized opens. Lowering the GPU-pack threshold reduces CPU-side overhead
       // and improves wall time for those workloads, while smaller models benefit from
       // keeping tiny flushes on the CPU to avoid kernel launch overhead.
-      if (args.backend == "gpu") {
+      if (args.backend == "gpu" && !user_open_pack_min_words) {
+        // Empirically tuned to avoid GPU contention: use a lower threshold for
+        // GPT-style workloads, and a mid threshold for very large GeLU models.
         if (spec.name == "gpt2") {
-          ::setenv("SUF_OPEN_PACK_DEVICE_MIN_WORDS", "65536", /*overwrite=*/0);
+          ::setenv("SUF_OPEN_PACK_DEVICE_MIN_WORDS", "65536", /*overwrite=*/1);
+        } else if (spec.d_model >= 1024) {
+          ::setenv("SUF_OPEN_PACK_DEVICE_MIN_WORDS", "131072", /*overwrite=*/1);
         }
       }
-	    // BERT-Tiny throughput-focused default: approximate GeLU with a degree-0
-	    // piecewise constant SUF so online Beaver/trunc opens don't dominate.
-	    if (spec.name == "bert-tiny" && args.gelu_const == -1) {
-	      ::setenv("SUF_GELU_CONST", "1", /*overwrite=*/0);
-	      ::setenv("SUF_GELU_CONST_SEGMENTS", "256", /*overwrite=*/0);
-	    }
-	    const int n_layers_run = (args.n_layers > 0) ? args.n_layers : static_cast<int>(spec.n_layers);
+		    // Throughput-focused default (benchmark only): for GeLU-activated models,
+		    // approximate GeLU with a degree-0 piecewise-constant SUF so online
+		    // Beaver/trunc opens don't dominate. This stays within the SUF family in
+		    // paper.md and mirrors Sigma-style engineering (richer LUT, fewer opens).
+		    if (args.backend == "gpu" && spec.mlp_activation == "gelu" && args.gelu_const == -1) {
+		      ::setenv("SUF_GELU_CONST", "1", /*overwrite=*/0);
+		      ::setenv("SUF_GELU_CONST_SEGMENTS", "256", /*overwrite=*/0);
+		    }
+		    const int n_layers_run = (args.n_layers > 0) ? args.n_layers : static_cast<int>(spec.n_layers);
 
     const int B = args.batch_size;
     const int rows = args.seq_len;
@@ -941,7 +949,11 @@ int main(int argc, char** argv) {
         // net rings (spin-wait) and inflate `open_comm_ns`, especially for large models.
         int threads = 1;
         if (args.backend == "gpu") {
-          threads = std::max(1, std::min(8, procs / 4));
+          // Empirically, even moderate OpenMP parallelism can hurt large-model
+          // end-to-end time in the 2-party single-process harness by starving the
+          // in-process net rings and increasing flush wait time. Cap to 4 unless
+          // the user overrides.
+          threads = std::max(1, std::min(4, procs / 4));
         } else {
           threads = std::max(1, std::min(16, procs / 2));
         }
