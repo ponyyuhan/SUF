@@ -23,7 +23,14 @@ enum class OnlineTimeKind : uint8_t {
   MatmulUpload = 13,
   MatmulKernel = 14,
   MatmulDownload = 15,
-  kCount = 16,
+  BeaverMulTotal = 16,
+  BeaverMatmulTotal = 17,
+  RowBroadcastMulTotal = 18,
+  TransformerLn1Total = 19,
+  TransformerAttentionTotal = 20,
+  TransformerLn2Total = 21,
+  TransformerMlpTotal = 22,
+  kCount = 23,
 };
 
 struct OnlineProfileSnapshot {

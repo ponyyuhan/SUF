@@ -1,6 +1,7 @@
 #include "nn/transformer_layer.hpp"
 
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <random>
@@ -19,6 +20,7 @@
 #include "runtime/phase_tasks.hpp"
 #include "runtime/bench_accounting.hpp"
 #include "runtime/bench_key_cost.hpp"
+#include "runtime/bench_online_profile.hpp"
 
 namespace nn {
 
@@ -442,6 +444,16 @@ void transformer_layer_forward(const TransformerConfig& cfg,
                                TensorView<uint64_t> Y_share,
                                LayerContext* ctx,
                                runtime::PhaseExecutor* pe) {
+  const bool prof = runtime::bench::online_profiling_enabled();
+  const auto prof_now = [] { return std::chrono::steady_clock::now(); };
+  const auto prof_add = [&](runtime::bench::OnlineTimeKind kind,
+                            const std::chrono::steady_clock::time_point& a,
+                            const std::chrono::steady_clock::time_point& b) {
+    if (!prof || b <= a) return;
+    runtime::bench::add_online_ns(
+        kind,
+        static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count()));
+  };
   runtime::PhaseExecutor local_pe;
   bool created_local_pe = false;
   if (pe == nullptr) {
@@ -740,7 +752,10 @@ void transformer_layer_forward(const TransformerConfig& cfg,
       std::span<uint64_t>(ln1.data(), ln1.size()),
       rows,
       cols));
+  const auto t_ln1_0 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
   pe->run(R);
+  const auto t_ln1_1 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
+  prof_add(runtime::bench::OnlineTimeKind::TransformerLn1Total, t_ln1_0, t_ln1_1);
   // Barrier after LN1 to keep qkv/softmax PFSS batched with subsequent phases but allow planner limits.
   if (allow_barriers) {
     drain_barrier(ln_barrier);
@@ -759,6 +774,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   pe->begin_phase(runtime::PhaseExecutor::Phase::kQKV_Score);
   if (layer_planner_ptr) layer_planner_ptr->enter_phase();
   std::vector<uint64_t> attn_out(B * T * D, 0);
+  const auto t_attn_0 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
   attention_forward(cfg.attn,
                     party,
                     ch,
@@ -769,6 +785,8 @@ void transformer_layer_forward(const TransformerConfig& cfg,
                     view3(attn_out.data(), B, T, D),
                     ctx,
                     pe);
+  const auto t_attn_1 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
+  prof_add(runtime::bench::OnlineTimeKind::TransformerAttentionTotal, t_attn_0, t_attn_1);
 
   // Residual add
   for (size_t i = 0; i < attn_out.size(); ++i) {
@@ -793,7 +811,10 @@ void transformer_layer_forward(const TransformerConfig& cfg,
       std::span<uint64_t>(ln2.data(), ln2.size()),
       rows,
       cols));
+  const auto t_ln2_0 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
   pe->run(R);
+  const auto t_ln2_1 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
+  prof_add(runtime::bench::OnlineTimeKind::TransformerLn2Total, t_ln2_0, t_ln2_1);
   if (allow_barriers) {
     drain_barrier(ln_barrier);
     record_phase_plan(phase_planner);
@@ -808,6 +829,7 @@ void transformer_layer_forward(const TransformerConfig& cfg,
   }
 
   // MLP (already task-based for trunc/rescale).
+  const auto t_mlp_0 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
   mlp_forward(cfg.mlp,
               view3(ln2.data(), B, T, D),
               W1_public,
@@ -817,6 +839,8 @@ void transformer_layer_forward(const TransformerConfig& cfg,
               ch,
               ctx,
               pe);
+  const auto t_mlp_1 = prof ? prof_now() : std::chrono::steady_clock::time_point{};
+  prof_add(runtime::bench::OnlineTimeKind::TransformerMlpTotal, t_mlp_0, t_mlp_1);
   // Barrier after MLP region before final residual/flush.
   if (allow_barriers) {
     drain_barrier(attn_barrier);

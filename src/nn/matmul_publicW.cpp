@@ -49,6 +49,12 @@ void matmul_publicW(const TensorView<uint64_t>& X_share,
     size_t K = X_share.shape[1];
     size_t N = params.w_transposed ? W_public.shape[0] : W_public.shape[1];
     matmul2d(X_share.data, W_public.data, Y_share.data, M, K, N, params);
+    if (prof) {
+      const auto t1 = std::chrono::steady_clock::now();
+      runtime::bench::add_online_ns(
+          runtime::bench::OnlineTimeKind::MatmulTotal,
+          static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()));
+    }
     return;
   }
   size_t B = X_share.shape[0];

@@ -700,6 +700,13 @@ void write_json(const Args& a,
     << ", \"matmul_upload_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::MatmulUpload)
     << ", \"matmul_kernel_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::MatmulKernel)
     << ", \"matmul_download_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::MatmulDownload)
+    << ", \"beaver_mul_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::BeaverMulTotal)
+    << ", \"beaver_matmul_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::BeaverMatmulTotal)
+    << ", \"row_broadcast_mul_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::RowBroadcastMulTotal)
+    << ", \"ln1_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::TransformerLn1Total)
+    << ", \"attention_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::TransformerAttentionTotal)
+    << ", \"ln2_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::TransformerLn2Total)
+    << ", \"mlp_ns\": " << prof_ns(runtime::bench::OnlineTimeKind::TransformerMlpTotal)
     << " },\n";
   f << "  \"notes\": \"transformer forward (PFSS-backed)\"\n";
   f << "}\n";

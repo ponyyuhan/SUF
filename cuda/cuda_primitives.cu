@@ -19,10 +19,9 @@ extern "C" __global__ void pack_eff_bits_wordwise_kernel(const uint64_t* in,
 namespace {
 
 __device__ inline uint64_t add_mod(uint64_t a, uint64_t b) { return a + b; }
-__device__ inline uint64_t mul_mod(uint64_t a, uint64_t b) {
-  unsigned __int128 p = static_cast<unsigned __int128>(a) * static_cast<unsigned __int128>(b);
-  return static_cast<uint64_t>(p);
-}
+// Low 64-bit product (mod 2^64). Unsigned overflow is well-defined and matches the
+// ring arithmetic used throughout the CUDA primitives.
+__device__ inline uint64_t mul_mod(uint64_t a, uint64_t b) { return a * b; }
 
 __global__ void open_add_to_signed_kernel(const uint64_t* __restrict__ local_share,
                                           const uint64_t* __restrict__ remote_share,
@@ -269,6 +268,38 @@ __global__ void horner_cubic_kernel(const uint64_t* __restrict__ x,
   out[idx] = y;
 }
 
+__global__ void add_rout_aos_kernel(uint64_t* __restrict__ out,
+                                    size_t words,
+                                    int out_words,
+                                    int rout_words,
+                                    uint64_t r0,
+                                    uint64_t r1,
+                                    uint64_t r2,
+                                    uint64_t r3,
+                                    uint64_t r4,
+                                    uint64_t r5,
+                                    uint64_t r6,
+                                    uint64_t r7) {
+  const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (idx >= words) return;
+  if (out_words <= 0) return;
+  const int j = static_cast<int>(idx % static_cast<size_t>(out_words));
+  if (j < 0 || j >= rout_words) return;
+  uint64_t add = 0;
+  switch (j) {
+    case 0: add = r0; break;
+    case 1: add = r1; break;
+    case 2: add = r2; break;
+    case 3: add = r3; break;
+    case 4: add = r4; break;
+    case 5: add = r5; break;
+    case 6: add = r6; break;
+    case 7: add = r7; break;
+    default: add = 0; break;
+  }
+  out[idx] = add_mod(out[idx], add);
+}
+
 __global__ void row_broadcast_mul_kernel(int party,
                                          const uint64_t* __restrict__ A,
                                          const uint64_t* __restrict__ B_rows,
@@ -474,6 +505,128 @@ __global__ void beaver_matmul2d_batched_kernel(int party,
   out[off_mn + idx_mn] = acc;
 }
 
+template <bool TRANSPOSED, int BM, int BN, int BK>
+__global__ void beaver_matmul2d_batched_tiled_kernel(int party,
+                                                     const uint64_t* __restrict__ D_open,
+                                                     const uint64_t* __restrict__ E_open,
+                                                     const uint64_t* __restrict__ A_tri,
+                                                     const uint64_t* __restrict__ B_tri,
+                                                     const uint64_t* __restrict__ C_tri,
+                                                     int batches,
+                                                     int M,
+                                                     int K,
+                                                     int N,
+                                                     int has_scale,
+                                                     int64_t mul_const,
+                                                     int mul_shift,
+                                                     uint64_t* __restrict__ out) {
+  const int tx = threadIdx.x;
+  const int ty = threadIdx.y;
+  const int m = static_cast<int>(blockIdx.y) * BM + ty;
+  const int n = static_cast<int>(blockIdx.x) * BN + tx;
+  const int b = static_cast<int>(blockIdx.z);
+  if (b >= batches) return;
+
+  const size_t MN = static_cast<size_t>(M) * static_cast<size_t>(N);
+  const size_t MK = static_cast<size_t>(M) * static_cast<size_t>(K);
+  const size_t KN = static_cast<size_t>(K) * static_cast<size_t>(N);
+  const size_t off_mn = static_cast<size_t>(b) * MN;
+  const size_t off_mk = static_cast<size_t>(b) * MK;
+  const size_t off_kn = static_cast<size_t>(b) * KN;
+
+  __shared__ uint64_t sD[BM][BK];
+  __shared__ uint64_t sA[BM][BK];
+  __shared__ uint64_t sE[BK][BN];
+  __shared__ uint64_t sB[BK][BN];
+
+  uint64_t acc = 0ull;
+  if (m < M && n < N) {
+    acc = C_tri[off_mn + static_cast<size_t>(m) * static_cast<size_t>(N) + static_cast<size_t>(n)];
+  }
+  const int party0 = (party == 0);
+
+  for (int k0 = 0; k0 < K; k0 += BK) {
+    // Load D_open and A_tri tiles (BM x BK).
+    const int k1 = k0 + tx;
+    const int k2 = k0 + tx + BN;
+    if (m < M) {
+      const size_t base = off_mk + static_cast<size_t>(m) * static_cast<size_t>(K);
+      sD[ty][tx] = (k1 < K) ? D_open[base + static_cast<size_t>(k1)] : 0ull;
+      sA[ty][tx] = (k1 < K) ? A_tri[off_mk + static_cast<size_t>(m) * static_cast<size_t>(K) +
+                                     static_cast<size_t>(k1)]
+                             : 0ull;
+      if (tx + BN < BK) {
+        sD[ty][tx + BN] = (k2 < K) ? D_open[base + static_cast<size_t>(k2)] : 0ull;
+        sA[ty][tx + BN] = (k2 < K) ? A_tri[off_mk + static_cast<size_t>(m) * static_cast<size_t>(K) +
+                                            static_cast<size_t>(k2)]
+                                    : 0ull;
+      }
+    } else {
+      sD[ty][tx] = 0ull;
+      sA[ty][tx] = 0ull;
+      if (tx + BN < BK) {
+        sD[ty][tx + BN] = 0ull;
+        sA[ty][tx + BN] = 0ull;
+      }
+    }
+
+    // Load E_open and B_tri tiles (BK x BN).
+    const int kk1 = k0 + ty;
+    const int kk2 = k0 + ty + BM;
+    if (n < N) {
+      if (kk1 < K) {
+        const size_t bidx = TRANSPOSED
+                                ? (static_cast<size_t>(n) * static_cast<size_t>(K) + static_cast<size_t>(kk1))
+                                : (static_cast<size_t>(kk1) * static_cast<size_t>(N) + static_cast<size_t>(n));
+        sE[ty][tx] = E_open[off_kn + bidx];
+        sB[ty][tx] = B_tri[off_kn + bidx];
+      } else {
+        sE[ty][tx] = 0ull;
+        sB[ty][tx] = 0ull;
+      }
+      if (ty + BM < BK) {
+        if (kk2 < K) {
+          const size_t bidx2 = TRANSPOSED
+                                   ? (static_cast<size_t>(n) * static_cast<size_t>(K) + static_cast<size_t>(kk2))
+                                   : (static_cast<size_t>(kk2) * static_cast<size_t>(N) + static_cast<size_t>(n));
+          sE[ty + BM][tx] = E_open[off_kn + bidx2];
+          sB[ty + BM][tx] = B_tri[off_kn + bidx2];
+        } else {
+          sE[ty + BM][tx] = 0ull;
+          sB[ty + BM][tx] = 0ull;
+        }
+      }
+    } else {
+      sE[ty][tx] = 0ull;
+      sB[ty][tx] = 0ull;
+      if (ty + BM < BK) {
+        sE[ty + BM][tx] = 0ull;
+        sB[ty + BM][tx] = 0ull;
+      }
+    }
+    __syncthreads();
+
+    if (m < M && n < N) {
+      const int kend = (K - k0 < BK) ? (K - k0) : BK;
+#pragma unroll
+      for (int kk = 0; kk < BK; ++kk) {
+        if (kk >= kend) break;
+        const uint64_t d = sD[ty][kk];
+        const uint64_t e = sE[kk][tx];
+        acc = add_mod(acc, mul_mod(d, sB[kk][tx]));
+        acc = add_mod(acc, mul_mod(sA[ty][kk], e));
+        if (party0) acc = add_mod(acc, mul_mod(d, e));
+      }
+    }
+    __syncthreads();
+  }
+
+  if (m < M && n < N) {
+    acc = beaver_scaled_acc(acc, has_scale, mul_const, mul_shift);
+    out[off_mn + static_cast<size_t>(m) * static_cast<size_t>(N) + static_cast<size_t>(n)] = acc;
+  }
+}
+
 __global__ void row_mean_kernel(const uint64_t* __restrict__ mat,
                                 int rows,
                                 int cols,
@@ -668,6 +821,34 @@ extern "C" void launch_horner_cubic_kernel(const uint64_t* d_x,
 #endif
 }
 
+extern "C" void launch_add_rout_aos_kernel(uint64_t* d_out,
+                                           size_t elems,
+                                           int out_words,
+                                           const uint64_t* r_out,
+                                           size_t r_out_words,
+                                           void* stream) {
+#ifndef SUF_HAVE_CUDA
+  (void)d_out; (void)elems; (void)out_words; (void)r_out; (void)r_out_words; (void)stream;
+#else
+  if (!d_out || elems == 0) return;
+  if (out_words <= 0) return;
+  if (!r_out || r_out_words == 0) return;
+  if (out_words > 8 || r_out_words > 8) return;
+  uint64_t r[8]{0, 0, 0, 0, 0, 0, 0, 0};
+  const size_t ncopy = (r_out_words < 8) ? r_out_words : size_t{8};
+  for (size_t i = 0; i < ncopy; ++i) r[i] = r_out[i];
+  const size_t words = elems * static_cast<size_t>(out_words);
+  constexpr int kBlock = 256;
+  int grid = static_cast<int>((words + kBlock - 1) / kBlock);
+  add_rout_aos_kernel<<<grid, kBlock, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+      d_out,
+      words,
+      out_words,
+      static_cast<int>(r_out_words),
+      r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+#endif
+}
+
 extern "C" void launch_row_broadcast_mul_kernel(int party,
                                                 const uint64_t* d_A,
                                                 const uint64_t* d_B_rows,
@@ -759,24 +940,72 @@ extern "C" void launch_beaver_matmul2d_kernel(int party,
   (void)stream;
 #else
   if (M <= 0 || K <= 0 || N <= 0) return;
-  const size_t total = static_cast<size_t>(M) * static_cast<size_t>(N);
-  constexpr int kBlock = 256;
-  int grid = static_cast<int>((total + static_cast<size_t>(kBlock) - 1) / static_cast<size_t>(kBlock));
-	  beaver_matmul2d_kernel<<<grid, kBlock, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
-	      party,
-	      d_D_open,
-	      d_E_open,
-	      d_A_tri_share,
-	      d_B_tri_share,
-	      d_C_tri_share,
-	      M,
-	      K,
-	      N,
-	      w_transposed,
-	      has_scale,
-	      mul_const,
-	      mul_shift,
-	      d_out);
+  static const bool use_tiled = []() {
+    const char* env = std::getenv("SUF_BEAVER_MATMUL_TILED");
+    if (!env) return false;
+    if (env[0] == '0' && env[1] == '\0') return false;
+    return true;
+  }();
+  if (!use_tiled) {
+    const size_t total = static_cast<size_t>(M) * static_cast<size_t>(N);
+    constexpr int kBlock = 256;
+    int grid = static_cast<int>((total + static_cast<size_t>(kBlock) - 1) / static_cast<size_t>(kBlock));
+    beaver_matmul2d_kernel<<<grid, kBlock, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+        party,
+        d_D_open,
+        d_E_open,
+        d_A_tri_share,
+        d_B_tri_share,
+        d_C_tri_share,
+        M,
+        K,
+        N,
+        w_transposed,
+        has_scale,
+        mul_const,
+        mul_shift,
+        d_out);
+  } else {
+    constexpr int BM = 16;
+    constexpr int BN = 16;
+    constexpr int BK = 32;
+    dim3 block(BN, BM);
+    dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM, 1);
+    cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+    if (w_transposed) {
+      beaver_matmul2d_batched_tiled_kernel<true, BM, BN, BK><<<grid, block, 0, s>>>(
+          party,
+          d_D_open,
+          d_E_open,
+          d_A_tri_share,
+          d_B_tri_share,
+          d_C_tri_share,
+          /*batches=*/1,
+          M,
+          K,
+          N,
+          has_scale,
+          mul_const,
+          mul_shift,
+          d_out);
+    } else {
+      beaver_matmul2d_batched_tiled_kernel<false, BM, BN, BK><<<grid, block, 0, s>>>(
+          party,
+          d_D_open,
+          d_E_open,
+          d_A_tri_share,
+          d_B_tri_share,
+          d_C_tri_share,
+          /*batches=*/1,
+          M,
+          K,
+          N,
+          has_scale,
+          mul_const,
+          mul_shift,
+          d_out);
+    }
+  }
 #endif
 }
 
@@ -815,25 +1044,73 @@ extern "C" void launch_beaver_matmul2d_batched_kernel(int party,
   (void)stream;
 #else
   if (batches <= 0 || M <= 0 || K <= 0 || N <= 0) return;
-  const size_t total = static_cast<size_t>(batches) * static_cast<size_t>(M) * static_cast<size_t>(N);
-  constexpr int kBlock = 256;
-  int grid = static_cast<int>((total + static_cast<size_t>(kBlock) - 1) / static_cast<size_t>(kBlock));
-  beaver_matmul2d_batched_kernel<<<grid, kBlock, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
-      party,
-      d_D_open,
-      d_E_open,
-      d_A_tri_share,
-      d_B_tri_share,
-      d_C_tri_share,
-      batches,
-      M,
-      K,
-      N,
-      w_transposed,
-      has_scale,
-      mul_const,
-      mul_shift,
-      d_out);
+  static const bool use_tiled = []() {
+    const char* env = std::getenv("SUF_BEAVER_MATMUL_TILED");
+    if (!env) return false;
+    if (env[0] == '0' && env[1] == '\0') return false;
+    return true;
+  }();
+  if (!use_tiled) {
+    const size_t total = static_cast<size_t>(batches) * static_cast<size_t>(M) * static_cast<size_t>(N);
+    constexpr int kBlock = 256;
+    int grid = static_cast<int>((total + static_cast<size_t>(kBlock) - 1) / static_cast<size_t>(kBlock));
+    beaver_matmul2d_batched_kernel<<<grid, kBlock, 0, reinterpret_cast<cudaStream_t>(stream)>>>(
+        party,
+        d_D_open,
+        d_E_open,
+        d_A_tri_share,
+        d_B_tri_share,
+        d_C_tri_share,
+        batches,
+        M,
+        K,
+        N,
+        w_transposed,
+        has_scale,
+        mul_const,
+        mul_shift,
+        d_out);
+  } else {
+    constexpr int BM = 16;
+    constexpr int BN = 16;
+    constexpr int BK = 32;
+    dim3 block(BN, BM);
+    dim3 grid((N + BN - 1) / BN, (M + BM - 1) / BM, batches);
+    cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
+    if (w_transposed) {
+      beaver_matmul2d_batched_tiled_kernel<true, BM, BN, BK><<<grid, block, 0, s>>>(
+          party,
+          d_D_open,
+          d_E_open,
+          d_A_tri_share,
+          d_B_tri_share,
+          d_C_tri_share,
+          batches,
+          M,
+          K,
+          N,
+          has_scale,
+          mul_const,
+          mul_shift,
+          d_out);
+    } else {
+      beaver_matmul2d_batched_tiled_kernel<false, BM, BN, BK><<<grid, block, 0, s>>>(
+          party,
+          d_D_open,
+          d_E_open,
+          d_A_tri_share,
+          d_B_tri_share,
+          d_C_tri_share,
+          batches,
+          M,
+          K,
+          N,
+          has_scale,
+          mul_const,
+          mul_shift,
+          d_out);
+    }
+  }
 #endif
 }
 

@@ -16,27 +16,30 @@ This report follows the benchmarking/protocol accounting design in `paper.md`.
 - Sequence length: `128`
 - Batch size: `1`
 - Harness config: `bench/configs/sigma_vs_suf_current_gpu.json`
+- Models: `bert-tiny`, `bert-base`, `bert-large`, `gpt2`, `gpt-neo-1.3b`
 - SUF iterations: `3` (`--n-iters 3`) so `timing.keygen_time_s` is separable from steady-state online timing
 - SUF open packing enabled: `--open-pack 1` (see `SUF_OPEN_PACK_*` in `README.md`)
-- SUF per-element masks disabled: `--per-element-masks 0` (to preserve batching)
+- SUF per-element masks disabled (default): `SUF_PER_ELEMENT_MASKS=0` (to preserve batching)
 
 ## Results (online)
 
 | Model | Sigma online (s) | Sigma online (GB) | SUF online (s) | SUF online (GB) | Time ratio | Byte ratio |
 |---|---:|---:|---:|---:|---:|---:|
-| bert-tiny | 0.213 | 0.022 | 0.080 | 0.016 | 0.38x | 0.75x |
-| bert-base | 2.836 | 1.062 | 2.368 | 0.580 | 0.84x | 0.55x |
-| bert-large | 6.998 | 2.833 | 6.612 | 1.547 | 0.95x | 0.55x |
-| gpt2 | 2.563 | 0.885 | 1.816 | 0.609 | 0.71x | 0.69x |
+| bert-tiny | 0.169924 | 0.022 | 0.059369 | 0.016 | 0.35x | 0.75x |
+| bert-base | 2.659462 | 1.062 | 1.479530 | 0.580 | 0.56x | 0.55x |
+| bert-large | 6.774047 | 2.833 | 3.348170 | 1.547 | 0.49x | 0.55x |
+| gpt2 | 2.451263 | 0.885 | 1.405910 | 0.609 | 0.57x | 0.69x |
+| gpt-neo-1.3b | 11.236027 | 4.326 | 4.273380 | 2.658 | 0.38x | 0.61x |
 
-## Results (preprocessing key size)
+## Results (preprocessing)
 
-| Model | Sigma key (GB) | SUF key (GB) | Ratio |
-|---|---:|---:|---:|
-| bert-tiny | 0.350 | 0.026 | 0.07x |
-| bert-base | 18.076 | 1.135 | 0.06x |
-| bert-large | 48.799 | 2.989 | 0.06x |
-| gpt2 | 15.346 | 1.135 | 0.07x |
+| Model | Sigma keygen (s) | Sigma key (GB) | SUF keygen (s) | SUF key (GB) | Time ratio | Byte ratio |
+|---|---:|---:|---:|---:|---:|---:|
+| bert-tiny | 1.573166 | 0.350 | 0.325510 | 0.026 | 0.21x | 0.07x |
+| bert-base | 20.372591 | 18.076 | 0.542003 | 1.135 | 0.03x | 0.06x |
+| bert-large | 41.705359 | 48.800 | 0.387240 | 2.989 | 0.01x | 0.06x |
+| gpt2 | 20.523452 | 15.346 | 0.492133 | 1.135 | 0.02x | 0.07x |
+| gpt-neo-1.3b | 40.242867 | 81.806 | 3.504040 | 3.693 | 0.09x | 0.05x |
 
 ## Bottlenecks (SUF)
 
@@ -46,21 +49,15 @@ Enable `SUF_BENCH_PROFILE=1` to populate `online_profile.*` in the SUF JSON logs
 - `pfss.open_flushes`, `pfss.num_jobs`, `pfss.num_flushes` (from the SUF JSON, and now also in `bench/results/summary.csv`) to see whether the runtime is round/flush-limited.
 - `resources.cpu_util_avg` and `preprocessing.open_pack_device_min_words` to detect CPU oversubscription or suboptimal open-pack thresholds (these can dominate end-to-end time in the single-process 2-party harness).
 
-## Implementation changes in this snapshot (performance + accounting)
+## Key optimizations enabled in this snapshot
 
-- `include/proto/beaver_mul64.hpp`: PFSS-channel Beaver communication now packs each opened `(e,f)` element to `ceil(n_bits/8)` bytes (byte-truncation) instead of always sending 8 bytes.
-- `src/runtime/open_collector.cpp`: GPU runs default to device-side pack/unpack + scatter + “keep opened on device” whenever a CUDA stream is available (still overridable via `SUF_OPEN_PACK_DEVICE*` env vars).
-- `cuda/cuda_primitives.cu`, `include/runtime/cuda_primitives.hpp`, `include/runtime/phase_tasks.hpp`: MulTask’s GPU Beaver mul now uses device opens (when available) and an AoS triple kernel to cut host staging overhead.
-- `include/gates/composite_fss.hpp`: avoids wasted predicate/cutpoint evaluation work for gates whose boolean output arity is zero, and adds a Horner-only fast path for those gates.
-- `include/gates/composite_fss.hpp`: parallelizes interval-LUT output masking (`+ r_out_share`) with OpenMP for large batches to reduce host-side overhead and party skew (which inflates `open_comm_ns` in the single-process harness).
-- `cuda/pfss_backend_gpu.cu`: removed hash-based “cache” checks for device key uploads (they scanned O(bytes) on the CPU); keys/x values are now copied directly via `cudaMemcpyAsync`.
-- `cuda/pfss_kernels.cu`, `cuda/pfss_backend_gpu.cu`: added shared-memory cached broadcast kernels for small LUT/cutpoint tables to reduce repeated global loads of key material in the hot GPU PFSS path.
-- `src/demo/bench_suf_transformer.cpp`: reduced the default OpenMP thread count in the 2-party single-process harness for GPU runs to avoid starving the in-process “net ring” spin loops (reduces `open_comm` and improves end-to-end online time).
-- `src/demo/bench_suf_transformer.cpp`: enabled `SUF_GELU_CONST=1` by default for GeLU models (GPU bench) and tuned `SUF_OPEN_PACK_DEVICE_MIN_WORDS` (`gpt2`: 65536, large `d_model`: 131072) to reduce GPU packing contention with PFSS kernels.
-- `src/demo/bench_suf_transformer.cpp`: reports `preprocessing.open_pack_device_min_words` in JSON logs so the harness can detect which threshold was applied.
-- `src/runtime/pfss_superbatch.cpp`: device-output buffer owners now use a stager-independent `cudaFree` deleter so they can outlive the benchmark-scoped stager without crashing.
+- `include/nn/layer_context.hpp`: caches expensive scans of public weights (`row_l1_max` and `range_from_public_weights`) to avoid repeated O(|W|) host work (critical for GPT‑Neo 1.3B). Toggle via `SUF_CACHE_WEIGHT_BOUNDS=0|1` (default: enabled).
+- `include/gates/composite_fss.hpp`, `cuda/cuda_primitives.cu`: device‑pipeline interval‑LUT outputs are masked (`+ r_out_share`) on GPU (avoids large synchronous H2D copies).
+- `src/runtime/open_collector.cpp`: GPU runs use device-side pack/unpack + scatter and can keep opened values on device (`SUF_OPEN_PACK_DEVICE*=1` defaults when CUDA is available).
+- `include/runtime/phase_tasks.hpp`, `src/nn/attention_block.cpp`: Beaver mul/matmul tasks reuse CUDA scratch buffers (and can cache H2D uploads of fixed key material) to reduce allocator + memcpy overhead in steady-state online runs.
+- `src/nn/mlp_block.cpp`: reuses large intermediate buffers across layers/iters (thread-local) and truncates in-place to avoid allocator + extra copies dominating large-model online time.
 
 ## Notes / known gaps
 
-- SUF beats Sigma on all current measured models (`bert-tiny`, `bert-base`, `bert-large`, `gpt2`) in both online time and online bytes under the benchmark settings described above.
+- SUF beats Sigma on all current measured models (`bert-tiny`, `bert-base`, `bert-large`, `gpt2`, `gpt-neo-1.3b`) in both online time and online bytes under the benchmark settings described above.
 - The largest remaining sensitivity is *host-side contention* in the single-process harness; always record `resources.cpu_util_avg` alongside timing/bytes when comparing variants.

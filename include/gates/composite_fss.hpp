@@ -73,6 +73,7 @@
 #include "proto/packed_backend.hpp"
 #ifdef SUF_HAVE_CUDA
 #include <cuda_runtime.h>
+#include "runtime/cuda_primitives.hpp"
 #endif
 
 namespace gates {
@@ -1330,19 +1331,49 @@ inline CompositeBatchOutput composite_eval_batch_backend(int party,
       if (words > 0 && staged->last_device_output() != nullptr) {
         staged->ensure_output_buffers(words, 0);
         cudaStream_t stream = reinterpret_cast<cudaStream_t>(staged->device_stream());
-        cudaError_t st = cudaMemcpyAsync(const_cast<uint64_t*>(staged->last_device_output()),
-                                         out.haty_share.data(),
-                                         words * sizeof(uint64_t),
-                                         cudaMemcpyHostToDevice,
-                                         stream);
-        if (st != cudaSuccess) {
-          throw std::runtime_error(std::string("composite_eval_batch_backend cudaMemcpy haty H2D failed: ") +
-                                   cudaGetErrorString(st));
+        const size_t rout_words = std::min(k.r_out_share.size(), out_words);
+        bool any_rout = false;
+        for (size_t j = 0; j < rout_words; ++j) {
+          if (k.r_out_share[j] != 0ull) {
+            any_rout = true;
+            break;
+          }
         }
-        st = cudaStreamSynchronize(stream);
-        if (st != cudaSuccess) {
-          throw std::runtime_error(std::string("composite_eval_batch_backend cudaStreamSynchronize haty failed: ") +
-                                   cudaGetErrorString(st));
+        // Fast path: if r_out is all-zero, backend's unmasked device output is already correct.
+        if (!any_rout) {
+          out.haty_device = staged->last_device_output();
+          out.haty_device_words = words;
+          return out;
+        }
+        // Prefer GPU-side masking to avoid an expensive host->device memcpy of the full output.
+        // For larger r/out_words, fall back to the legacy host->device mirror.
+        if (out_words <= 8 && rout_words <= 8) {
+          launch_add_rout_aos_kernel(const_cast<uint64_t*>(staged->last_device_output()),
+                                     N,
+                                     static_cast<int>(out_words),
+                                     k.r_out_share.data(),
+                                     rout_words,
+                                     reinterpret_cast<void*>(stream));
+          cudaError_t st = cudaStreamSynchronize(stream);
+          if (st != cudaSuccess) {
+            throw std::runtime_error(std::string("composite_eval_batch_backend cudaStreamSynchronize haty mask failed: ") +
+                                     cudaGetErrorString(st));
+          }
+        } else {
+          cudaError_t st = cudaMemcpyAsync(const_cast<uint64_t*>(staged->last_device_output()),
+                                           out.haty_share.data(),
+                                           words * sizeof(uint64_t),
+                                           cudaMemcpyHostToDevice,
+                                           stream);
+          if (st != cudaSuccess) {
+            throw std::runtime_error(std::string("composite_eval_batch_backend cudaMemcpy haty H2D failed: ") +
+                                     cudaGetErrorString(st));
+          }
+          st = cudaStreamSynchronize(stream);
+          if (st != cudaSuccess) {
+            throw std::runtime_error(std::string("composite_eval_batch_backend cudaStreamSynchronize haty failed: ") +
+                                     cudaGetErrorString(st));
+          }
         }
         out.haty_device = staged->last_device_output();
         out.haty_device_words = words;

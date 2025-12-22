@@ -1,11 +1,15 @@
 #pragma once
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <string>
+#include <unordered_map>
 
 #include "compiler/range_analysis.hpp"
 #include "compiler/layer_graph.hpp"
@@ -314,6 +318,63 @@ inline SecretTensor record_clamp(LayerContext* ctx,
 inline compiler::RangeInterval range_from_public_weights(
     const TensorView<int64_t>& W) {
   compiler::RangeInterval r = compiler::RangeInterval::whole(true);
+  if (!W.data || W.numel() == 0) {
+    r.lo = 0;
+    r.hi = 0;
+    return r;
+  }
+  const bool cache_enabled = []() {
+    const char* env = std::getenv("SUF_CACHE_WEIGHT_BOUNDS");
+    if (!env) return true;
+    std::string v(env);
+    std::transform(v.begin(), v.end(), v.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return !(v == "0" || v == "false" || v == "off" || v == "no");
+  }();
+  struct Key {
+    const int64_t* ptr = nullptr;
+    size_t n = 0;
+    bool operator==(const Key& o) const { return ptr == o.ptr && n == o.n; }
+  };
+  struct KeyHash {
+    size_t operator()(const Key& k) const noexcept {
+      size_t h = 1469598103934665603ull;
+      auto mix = [&](size_t v) {
+        h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+      };
+      mix(reinterpret_cast<size_t>(k.ptr));
+      mix(static_cast<size_t>(k.n));
+      return h;
+    }
+  };
+  if (cache_enabled) {
+    static std::mutex mu;
+    static std::unordered_map<Key, int64_t, KeyHash> cache;
+    Key key{W.data, W.numel()};
+    {
+      std::lock_guard<std::mutex> lk(mu);
+      auto it = cache.find(key);
+      if (it != cache.end()) {
+        int64_t max_abs = it->second;
+        r.lo = -max_abs;
+        r.hi = max_abs;
+        return r;
+      }
+    }
+    int64_t max_abs = 0;
+    for (size_t i = 0; i < W.numel(); ++i) {
+      int64_t v = W.data[i];
+      int64_t a = (v >= 0) ? v : -v;
+      if (a > max_abs) max_abs = a;
+    }
+    {
+      std::lock_guard<std::mutex> lk(mu);
+      cache.emplace(key, max_abs);
+    }
+    r.lo = -max_abs;
+    r.hi = max_abs;
+    return r;
+  }
   int64_t max_abs = 0;
   for (size_t i = 0; i < W.numel(); ++i) {
     int64_t v = W.data[i];
@@ -327,9 +388,65 @@ inline compiler::RangeInterval range_from_public_weights(
 
 inline int64_t row_l1_max(const TensorView<int64_t>& W, bool w_transposed = false) {
   // Column L1 norm bound (per output column); returns the maximum across outputs.
+  if (!W.data || W.numel() == 0 || W.dims < 2) return 0;
+  const bool cache_enabled = []() {
+    const char* env = std::getenv("SUF_CACHE_WEIGHT_BOUNDS");
+    if (!env) return true;
+    std::string v(env);
+    std::transform(v.begin(), v.end(), v.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return !(v == "0" || v == "false" || v == "off" || v == "no");
+  }();
+  struct Key {
+    const int64_t* ptr = nullptr;
+    size_t rows = 0;
+    size_t cols = 0;
+    bool transposed = false;
+    bool operator==(const Key& o) const {
+      return ptr == o.ptr && rows == o.rows && cols == o.cols && transposed == o.transposed;
+    }
+  };
+  struct KeyHash {
+    size_t operator()(const Key& k) const noexcept {
+      size_t h = 1469598103934665603ull;
+      auto mix = [&](size_t v) {
+        h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+      };
+      mix(reinterpret_cast<size_t>(k.ptr));
+      mix(static_cast<size_t>(k.rows));
+      mix(static_cast<size_t>(k.cols));
+      mix(static_cast<size_t>(k.transposed ? 1 : 0));
+      return h;
+    }
+  };
   size_t rows = W.shape[0];
   size_t cols = W.shape[1];
   if (w_transposed) std::swap(rows, cols);
+  if (cache_enabled) {
+    static std::mutex mu;
+    static std::unordered_map<Key, int64_t, KeyHash> cache;
+    Key key{W.data, W.shape[0], W.shape[1], w_transposed};
+    {
+      std::lock_guard<std::mutex> lk(mu);
+      auto it = cache.find(key);
+      if (it != cache.end()) return it->second;
+    }
+    int64_t best = 0;
+    for (size_t c = 0; c < cols; ++c) {
+      int64_t acc = 0;
+      for (size_t r = 0; r < rows; ++r) {
+        size_t idx = w_transposed ? (c * rows + r) : (r * cols + c);
+        int64_t v = W.data[idx];
+        acc += (v >= 0) ? v : -v;
+      }
+      if (acc > best) best = acc;
+    }
+    {
+      std::lock_guard<std::mutex> lk(mu);
+      cache.emplace(key, best);
+    }
+    return best;
+  }
   int64_t best = 0;
   for (size_t c = 0; c < cols; ++c) {
     int64_t acc = 0;

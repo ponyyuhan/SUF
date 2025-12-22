@@ -103,6 +103,7 @@ Correctness note: trunc/ARS helper bits (`carry/sign/wrap`) are maintained as **
 - GPU PFSS tuning: `SUF_PFSS_GPU_BLOCK`, `RUN_GPU_COMPOSITE=1`
 - GPU matmul tuning: `SUF_MATMUL_GPU_TILE=wide|narrow`
 - GPU caches: `SUF_NO_CACHE_KEYS=1`, `SUF_NO_CACHE_HATX=1`
+- Host-side caching: `SUF_CACHE_WEIGHT_BOUNDS=0|1` caches public-weight bound scans (`row_l1_max`, `range_from_public_weights`) (default `1`)
 - GPU postproc fast-paths (require CUDA + `PhaseExecutor` device pipeline in most cases):
   - `SUF_TRUNC_GPU=1` (GPU trunc/ARS postproc when PFSS device slices exist)
   - `SUF_HORNER_GPU=1` (GPU Horner polynomial evaluation for cubic bundles)
@@ -133,6 +134,24 @@ Correctness note: trunc/ARS helper bits (`carry/sign/wrap`) are maintained as **
 
 Latest end-to-end numbers (Sigma vs SUF, plus per-phase breakdowns) live in `benchmark_report.md` and the harness outputs under `bench/results/` (notably `bench/results/summary.csv`).
 
+Snapshot (GPU, seq=128, B=1): `bench/results/current_compare/summary.csv`
+
+| Model | Sigma online (s) | Sigma online (GB) | SUF online (s) | SUF online (GB) |
+|---|---:|---:|---:|---:|
+| bert-tiny | 0.169924 | 0.022 | 0.059369 | 0.016 |
+| bert-base | 2.659462 | 1.062 | 1.479530 | 0.580 |
+| bert-large | 6.774047 | 2.833 | 3.348170 | 1.547 |
+| gpt2 | 2.451263 | 0.885 | 1.405910 | 0.609 |
+| gpt-neo-1.3b | 11.236027 | 4.326 | 4.273380 | 2.658 |
+
+| Model | Sigma keygen (s) | Sigma key (GB) | SUF keygen (s) | SUF key (GB) |
+|---|---:|---:|---:|---:|
+| bert-tiny | 1.573166 | 0.350 | 0.325510 | 0.026 |
+| bert-base | 20.372591 | 18.076 | 0.542003 | 1.135 |
+| bert-large | 41.705359 | 48.800 | 0.387240 | 2.989 |
+| gpt2 | 20.523452 | 15.346 | 0.492133 | 1.135 |
+| gpt-neo-1.3b | 40.242867 | 81.806 | 3.504040 | 3.693 |
+
 ### CPU monitoring
 
 All end-to-end transformer benches log:
@@ -158,12 +177,15 @@ Recent concrete optimizations (keeps `paper.md` semantics unchanged):
 - **Selector-weighted blending fusion:** `include/gates/composite_fss.hpp` fuses selector-weighted boolean blending so each piece uses a single `mul_batch` over `ell * block_size` products, instead of one `mul_batch` per boolean output.
 - **Horner fusion across outputs:** `include/gates/composite_fss.hpp` fuses Horner’s rule multiplications across all arithmetic outputs, reducing Beaver rounds from `r * degree` to `degree` per block.
 - **Beaver scratch reuse:** `include/proto/beaver_mul64.hpp` uses thread-local scratch buffers inside `BeaverMul64::mul_batch` so short-lived `BeaverMul64` instances (common inside composite evaluation) don’t repeatedly allocate/resize large `(e,f)` buffers.
+- **Public-weight bound caching:** `include/nn/layer_context.hpp` caches `row_l1_max()` + `range_from_public_weights()` results by `(W ptr, shape, transpose)` to avoid repeated full-matrix scans (critical for large models like GPT‑Neo). Toggle with `SUF_CACHE_WEIGHT_BOUNDS=0|1`.
 - **PFSS GPU key upload fast-path:** `cuda/pfss_backend_gpu.cu` removes hash-based “cache” checks for device key uploads (they scanned O(bytes) on the CPU); inputs are now copied directly via `cudaMemcpyAsync`.
 - **PFSS GPU broadcast-key caching:** `cuda/pfss_kernels.cu` adds shared-memory cached broadcast kernels (used when cutpoint/threshold tables fit) to reduce repeated global loads of key material in the hot interval-LUT / packed-compare paths.
 - **GPU DCF compare fast-path:** `cuda/pfss_backend_gpu.cu` packs `alpha` into a u64 in the DCF key header so the GPU DCF kernels can do `x < alpha` directly instead of per-bit comparisons.
 - **Overlap PFSS flush with open flush:** `include/runtime/phase_executor.hpp` overlaps PFSS flushing in a background thread during `OpenCollector::flush()` when the OpenCollector uses its internal CUDA pack stream (default), reducing effective round barriers.
 - **Pinned host staging for large PFSS payloads:** `include/gates/composite_fss.hpp` can use cached, thread-local pinned host buffers for large GPU→host copies in packed-compare and interval-LUT paths (`SUF_COMPOSITE_PINNED=1`). This targets the `pfss_flush_eval_eval_ns` component when PFSS outputs must be materialized on host.
 - **OpenMP for LUT masking:** `include/gates/composite_fss.hpp` parallelizes the per-element `+ r_out_share` masking step for large interval-LUT batches to reduce host overhead and party skew (which otherwise inflates `open_comm_ns` in the single-process harness).
+- **GPU-side interval-LUT masking (device pipeline):** when `SUF_BENCH_DEVICE_PIPELINE=1` and PFSS device outputs are enabled, interval‑LUT outputs are masked (`+ r_out_share`) directly on GPU (avoids large sync H2D copies back into staged outputs).
+- **Reduce allocator/copy overhead in MLP:** `src/nn/mlp_block.cpp` reuses large intermediate buffers (thread-local) and truncates in-place to reduce per-layer `std::vector` churn in steady-state online timing.
 
 Practical strategies to push SUF toward Sigma-like performance (without changing `paper.md` semantics):
 - **Reduce PFSS jobs (`pfss.num_jobs`):** fewer Composite-FSS invocations means fewer hatx opens and fewer Composite-FSS “flush” boundaries. Targets include rescale/truncation hoisting, folding public scaling into existing phases, and avoiding per-head fragmentation in attention.

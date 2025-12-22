@@ -74,6 +74,15 @@ void launch_horner_cubic_kernel(const uint64_t* d_x,
                                 size_t n,
                                 void* stream /* cudaStream_t */);
 
+// In-place add a small per-column mask (AoS layout): out[i*out_words + j] += r_out[j].
+// Supports out_words up to 8 efficiently; for larger out_words callers should fall back.
+void launch_add_rout_aos_kernel(uint64_t* d_out,
+                                size_t elems,
+                                int out_words,
+                                const uint64_t* r_out,   // host pointer to r_out words
+                                size_t r_out_words,
+                                void* stream /* cudaStream_t */);
+
 // Row-broadcast Beaver mul: mat is rows*cols, vec is rows (broadcast per row).
 // A,C are Beaver triple shares shaped like mat (rows*cols); B is per-row (rows).
 // d_open is opened (mat - A) per element; e_open is opened (vec - B) per row.

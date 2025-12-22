@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -30,6 +31,7 @@
 #include "runtime/phase_tasks.hpp"
 #include "runtime/bench_accounting.hpp"
 #include "runtime/bench_key_cost.hpp"
+#include "runtime/bench_online_profile.hpp"
 
 #ifdef SUF_HAVE_CUDA
 #include <cuda_runtime.h>
@@ -507,6 +509,18 @@ class Matmul2DTask final : public runtime::detail::PhaseTask {
       }
       case St::WaitOpen: {
         if (!R.opens->ready(h_open_)) return runtime::detail::Need::Open;
+        const bool prof = runtime::bench::online_profiling_enabled();
+        const auto t0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        auto report = [&]() {
+          if (!prof) return;
+          const auto t1 = std::chrono::steady_clock::now();
+          if (t1 > t0) {
+            runtime::bench::add_online_ns(
+                runtime::bench::OnlineTimeKind::BeaverMatmulTotal,
+                static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()));
+          }
+        };
         const size_t A_words = static_cast<size_t>(M_) * static_cast<size_t>(K_);
         const size_t B_words = B_.size();
 #ifdef SUF_HAVE_CUDA
@@ -577,14 +591,15 @@ class Matmul2DTask final : public runtime::detail::PhaseTask {
                                           mul_s,
                                           sc.dOut,
                                           stream);
-            cudaMemcpyAsync(out_.data(), sc.dOut, bytes_out, cudaMemcpyDeviceToHost, stream);
-            cudaEventRecord(sc.ready, stream);
-            sc.ready_recorded = true;
-            cudaStreamSynchronize(stream);
-            st_ = St::Done;
-            return runtime::detail::Need::None;
-          }
-        }
+	            cudaMemcpyAsync(out_.data(), sc.dOut, bytes_out, cudaMemcpyDeviceToHost, stream);
+	            cudaEventRecord(sc.ready, stream);
+	            sc.ready_recorded = true;
+	            cudaStreamSynchronize(stream);
+	            report();
+	            st_ = St::Done;
+	            return runtime::detail::Need::None;
+	          }
+	        }
 #endif
         auto opened = R.opens->view(h_open_);
         if (opened.size() != A_words + B_words) {
@@ -609,13 +624,14 @@ class Matmul2DTask final : public runtime::detail::PhaseTask {
             if (mul_const_) {
               acc = (acc * static_cast<__int128>(*mul_const_)) >> mul_shift_;
             }
-            out_[static_cast<size_t>(m) * static_cast<size_t>(N_) + static_cast<size_t>(n)] =
-                static_cast<uint64_t>(acc);
-          }
-        }
-        st_ = St::Done;
-        return runtime::detail::Need::None;
-      }
+	            out_[static_cast<size_t>(m) * static_cast<size_t>(N_) + static_cast<size_t>(n)] =
+	                static_cast<uint64_t>(acc);
+	          }
+	        }
+	        report();
+	        st_ = St::Done;
+	        return runtime::detail::Need::None;
+	      }
       case St::Done:
         return runtime::detail::Need::None;
     }
@@ -717,12 +733,24 @@ class BatchedMatmul2DTask final : public runtime::detail::PhaseTask {
         // Enqueue is progress; let PhaseExecutor batch multiple opens before flushing.
         return runtime::detail::Need::None;
       }
-      case St::WaitOpen: {
-        if (!R.opens->ready(h_open_)) return runtime::detail::Need::Open;
+	      case St::WaitOpen: {
+	        if (!R.opens->ready(h_open_)) return runtime::detail::Need::Open;
+	        const bool prof = runtime::bench::online_profiling_enabled();
+	        const auto t0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+	        auto report = [&]() {
+	          if (!prof) return;
+	          const auto t1 = std::chrono::steady_clock::now();
+	          if (t1 > t0) {
+	            runtime::bench::add_online_ns(
+	                runtime::bench::OnlineTimeKind::BeaverMatmulTotal,
+	                static_cast<uint64_t>(
+	                    std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()));
+	          }
+	        };
 
 #ifdef SUF_HAVE_CUDA
-        bool want_gpu = false;
-        if (R.pfss_backend && dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr) {
+	        bool want_gpu = false;
+	        if (R.pfss_backend && dynamic_cast<proto::PfssGpuStagedEval*>(R.pfss_backend) != nullptr) {
           const char* env = std::getenv("SUF_MATMUL_BEAVER_GPU");
           want_gpu = (env == nullptr) || (std::string(env) != "0");
         }
@@ -814,14 +842,15 @@ class BatchedMatmul2DTask final : public runtime::detail::PhaseTask {
                                                   mul_s,
                                                   sc.dOut,
                                                   stream);
-            cudaMemcpyAsync(out_all_.data(), sc.dOut, bytes_out, cudaMemcpyDeviceToHost, stream);
-            cudaEventRecord(sc.ready, stream);
-            sc.ready_recorded = true;
-            cudaStreamSynchronize(stream);
-            st_ = St::Done;
-            return runtime::detail::Need::None;
-          }
-        }
+	            cudaMemcpyAsync(out_all_.data(), sc.dOut, bytes_out, cudaMemcpyDeviceToHost, stream);
+	            cudaEventRecord(sc.ready, stream);
+	            sc.ready_recorded = true;
+	            cudaStreamSynchronize(stream);
+	            report();
+	            st_ = St::Done;
+	            return runtime::detail::Need::None;
+	          }
+	        }
 #endif
 
         auto opened = R.opens->view(h_open_);
@@ -849,15 +878,16 @@ class BatchedMatmul2DTask final : public runtime::detail::PhaseTask {
               if (mul_const_) {
                 acc = (acc * static_cast<__int128>(*mul_const_)) >> mul_shift_;
               }
-              out_all_[static_cast<size_t>(b) * out_words +
-                       static_cast<size_t>(m) * static_cast<size_t>(N_) + static_cast<size_t>(n)] =
-                  static_cast<uint64_t>(acc);
-            }
-          }
-        }
-        st_ = St::Done;
-        return runtime::detail::Need::None;
-      }
+	              out_all_[static_cast<size_t>(b) * out_words +
+	                       static_cast<size_t>(m) * static_cast<size_t>(N_) + static_cast<size_t>(n)] =
+	                  static_cast<uint64_t>(acc);
+	            }
+	          }
+	        }
+	        report();
+	        st_ = St::Done;
+	        return runtime::detail::Need::None;
+	      }
       case St::Done:
         return runtime::detail::Need::None;
     }
@@ -1496,11 +1526,9 @@ void attention_forward(const AttentionConfig& cfg,
         const uint64_t* v_ptr = qkv.data() + base + 2 * D;
         for (size_t h = 0; h < H; ++h) {
           const size_t head_base = (b * H + h) * T * Dh + t * Dh;
-          for (size_t d = 0; d < Dh; ++d) {
-            Q_all[head_base + d] = q_ptr[h * Dh + d];
-            K_all[head_base + d] = k_ptr[h * Dh + d];
-            V_all[head_base + d] = v_ptr[h * Dh + d];
-          }
+          std::memcpy(Q_all.data() + head_base, q_ptr + h * Dh, Dh * sizeof(uint64_t));
+          std::memcpy(K_all.data() + head_base, k_ptr + h * Dh, Dh * sizeof(uint64_t));
+          std::memcpy(V_all.data() + head_base, v_ptr + h * Dh, Dh * sizeof(uint64_t));
         }
       }
     }

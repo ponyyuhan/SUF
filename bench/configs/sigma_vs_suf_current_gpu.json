@@ -1,5 +1,5 @@
 {
-  "models": ["bert-tiny", "bert-base", "bert-large", "gpt2"],
+  "models": ["bert-tiny", "bert-base", "bert-large", "gpt2", "gpt-neo-1.3b"],
   "seq_lens": [128],
   "batch_sizes": [1],
   "backends": ["gpu"],
@@ -10,6 +10,5 @@
   "results_dir": "bench/results/current_compare",
   "suf_binary": "build_ninja/bench_suf_transformer",
   "suf_extra_args": ["--open-pack", "1"],
-  "notes": "Current apples-to-apples set (GPU only, seq=128,B=1) used for quick iteration."
+  "notes": "Current apples-to-apples set (GPU only, seq=128,B=1) used for quick iteration (includes GPT-Neo 1.3B)."
 }
-

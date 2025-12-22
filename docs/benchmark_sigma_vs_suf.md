@@ -120,17 +120,14 @@ Outputs:
 - `summary.jsonl`
 - `summary.csv`
 
+## Current “apples-to-apples” config (GPU)
 
-- Updated SUF to run true end-to-end bert-tiny with GPU batching enabled by default: SUF_PER_ELEMENT_MASKS=0 (avoids per-element trunc/ARS keys that explode key size + runtime)
-  and disabled the expensive PFSS “device pipeline” unless SUF_BENCH_DEVICE_PIPELINE=1 is set (src/demo/bench_suf_transformer.cpp:365, src/nn/attention_block.cpp:60, src/nn/
-  transformer_layer.cpp:18, include/compiler/matmul_truncation.hpp:16).
+The repo maintains a small, stable comparison set (GPU-only, seq=128, B=1, includes GPT‑Neo 1.3B):
 
-- Re-ran the full harness: python3 bench/run_sigma_vs_suf.py --config bench/configs/sigma_vs_suf_bert_tiny.json --timeout-sigma-s 1800; results are in bench/results/bert_tiny/
-  summary.csv.
+```bash
+python3 bench/run_sigma_vs_suf.py --config bench/configs/sigma_vs_suf_current_gpu.json --timeout-sigma-s 1200
+```
 
-- Current end-to-end comparison (bench/results/bert_tiny/summary.csv:1):
-    - sigma,gpu: key 350,064,640B, keygen 3.842s, online 0.297s, wall 19.687s, online bytes 21,675,034B
-    - suf,gpu: key 161,723,118B, keygen 1.455s, online 2.582s, wall 9.202s, online bytes 241,115,552B
-    - suf,cpu: key 204,925,276B, keygen 0.68s, online 0.278s, wall 1.501s, online bytes 23,791,008B
-  
-- SUF now beats Sigma on bert-tiny for key size + keygen + end-to-end wall time on GPU; GPU online latency/bytes are still higher.
+Outputs land in `bench/results/current_compare/` (notably `summary.csv` / `summary.jsonl`).
+
+See `benchmark_report.md` for the latest tables and interpretation notes.

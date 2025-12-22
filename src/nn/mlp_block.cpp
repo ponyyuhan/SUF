@@ -149,6 +149,11 @@ void mlp_forward(const MLPConfig& cfg,
                  net::Chan& ch,
                  LayerContext* ctx,
                  runtime::PhaseExecutor* pe) {
+  // Reuse large intermediate buffers across layers/iters (thread-local per party)
+  // to avoid allocator + zero-fill overhead dominating steady-state online time
+  // on large models (e.g., GPT-Neo 1.3B).
+  static thread_local std::vector<uint64_t> tl_hidden;
+  static thread_local std::vector<uint64_t> tl_hidden_scaled;
   size_t B = X_share.shape[0];
   size_t T = X_share.shape[1];
   size_t D = cfg.D;
@@ -273,7 +278,11 @@ void mlp_forward(const MLPConfig& cfg,
     if (ctx && ctx->pfss_layer_planner) ctx->pfss_layer_planner->enter_phase();
   };
 
-  std::vector<uint64_t> hidden(B * T * H, 0);
+  const size_t hidden_elems = B * T * H;
+  tl_hidden.resize(hidden_elems);
+  tl_hidden_scaled.resize(hidden_elems);
+  auto& hidden = tl_hidden;
+  auto& hidden_scaled = tl_hidden_scaled;
   compiler::RangeInterval mat1_x_range;
   compiler::RangeInterval mat1_w_range;
   compiler::RangeInterval mat2_x_range;
@@ -379,7 +388,6 @@ void mlp_forward(const MLPConfig& cfg,
   }
 
   bool use_phase = (ctx && pe && ctx->trunc_ctx);
-  std::vector<uint64_t> hidden_scaled = hidden;
   runtime::PhaseResources R{};
   runtime::ProtoChanFromNet pch(*pfss_nc);
   runtime::PfssPhasePlanner pfss_phase_planner;
@@ -754,20 +762,16 @@ void mlp_forward(const MLPConfig& cfg,
       std::cerr << "[mlp] plan2 kind=" << static_cast<int>(plan2->kind)
                 << " batch=" << plan2->batch << "\n";
     }
-    std::vector<uint64_t> y_scaled(Y_share.numel(), 0);
     pe->begin_phase(runtime::PhaseExecutor::Phase::kLN2_MLP);
     enter_phase();
     pe->add_task(std::make_unique<runtime::TruncTask>(
         &plan2->bundle, std::span<const uint64_t>(Y_share.data, Y_share.numel()),
-        std::span<uint64_t>(y_scaled.data(), y_scaled.size())));
+        std::span<uint64_t>(Y_share.data, Y_share.numel())));
     pe->run(R);
     barrier(runtime::PfssLayerPlanner::BarrierPolicy{.drain_open = true,
                                                      .drain_pfss_coeff = true,
                                                      .drain_pfss_trunc = true});
     record_phase_plan(pfss_phase_planner);
-    for (size_t i = 0; i < Y_share.numel() && i < y_scaled.size(); ++i) {
-      Y_share.data[i] = y_scaled[i];
-    }
   } else {
     throw std::runtime_error("mlp_forward: phase executor + truncation required (legacy path disabled)");
   }

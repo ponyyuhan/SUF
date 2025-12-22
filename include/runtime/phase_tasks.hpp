@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <vector>
 #include <cstdio>
 #include <iostream>
@@ -9,6 +10,8 @@
 #include <random>
 #include <cstring>
 #include <cstdlib>
+#include <mutex>
+#include <unordered_map>
 #ifdef SUF_HAVE_CUDA
 #include <cuda_runtime.h>
 #endif
@@ -66,6 +69,7 @@
 #include "runtime/phase_executor.hpp"
 #include "runtime/pfss_superbatch.hpp"
 #include "runtime/cuda_primitives.hpp"
+#include "runtime/bench_online_profile.hpp"
 #include "proto/reference_backend.hpp"
 
 namespace runtime {
@@ -93,6 +97,101 @@ inline size_t env_size_t_default(const char* name, size_t defv) {
     return defv;
   }
 }
+
+#ifdef SUF_HAVE_CUDA
+struct BeaverMulScratch {
+  struct HostBufKey {
+    const void* host = nullptr;
+    size_t bytes = 0;
+    bool operator==(const HostBufKey& o) const { return host == o.host && bytes == o.bytes; }
+  };
+  struct HostBufKeyHash {
+    size_t operator()(const HostBufKey& k) const noexcept {
+      size_t h = 1469598103934665603ull;
+      auto mix = [&](size_t v) {
+        h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+      };
+      mix(reinterpret_cast<size_t>(k.host));
+      mix(static_cast<size_t>(k.bytes));
+      return h;
+    }
+  };
+  struct DevBuf {
+    void* d = nullptr;
+    size_t bytes = 0;
+  };
+
+  uint64_t* d_open = nullptr;  // 2*n opened masks when host materialization needed
+  uint64_t* d_out = nullptr;
+  size_t open_cap = 0;
+  size_t out_cap = 0;
+
+  std::unordered_map<HostBufKey, DevBuf, HostBufKeyHash> triple_cache;
+  size_t triple_cache_bytes = 0;
+  size_t triple_cache_max_bytes = size_t(1024ull) * 1024ull * 1024ull;
+
+  cudaEvent_t ready = nullptr;
+  bool ready_recorded = false;
+  std::mutex mu;
+
+  bool ensure_alloc(size_t bytes, void** ptr, size_t& cap) {
+    if (bytes <= cap) return true;
+    if (*ptr) cudaFree(*ptr);
+    cudaError_t st = cudaMalloc(ptr, bytes);
+    if (st != cudaSuccess) {
+      *ptr = nullptr;
+      cap = 0;
+      return false;
+    }
+    cap = bytes;
+    return true;
+  }
+
+  void clear_triple_cache() {
+    for (auto& kv : triple_cache) {
+      if (kv.second.d) cudaFree(kv.second.d);
+    }
+    triple_cache.clear();
+    triple_cache_bytes = 0;
+  }
+
+  void* cached_upload_triples(const void* host, size_t bytes, cudaStream_t stream) {
+    if (!host || bytes == 0) return nullptr;
+    HostBufKey key{host, bytes};
+    auto it = triple_cache.find(key);
+    if (it != triple_cache.end()) return it->second.d;
+    if (triple_cache_max_bytes > 0 && bytes > triple_cache_max_bytes) return nullptr;
+    if (triple_cache_max_bytes > 0 && triple_cache_bytes + bytes > triple_cache_max_bytes) {
+      clear_triple_cache();
+    }
+    void* d = nullptr;
+    if (cudaMalloc(&d, bytes) != cudaSuccess) return nullptr;
+    if (cudaMemcpyAsync(d, host, bytes, cudaMemcpyHostToDevice, stream) != cudaSuccess) {
+      cudaFree(d);
+      return nullptr;
+    }
+    triple_cache.emplace(key, DevBuf{d, bytes});
+    triple_cache_bytes += bytes;
+    return d;
+  }
+};
+
+inline BeaverMulScratch& beaver_mul_scratch() {
+  static BeaverMulScratch s;
+  static bool inited = false;
+  if (!inited) {
+    inited = true;
+    const char* env = std::getenv("SUF_MUL_GPU_CACHE_MAX_MB");
+    if (env && *env) {
+      unsigned long long mb = std::strtoull(env, nullptr, 10);
+      if (mb > 0) {
+        s.triple_cache_max_bytes = static_cast<size_t>(mb) * 1024ull * 1024ull;
+      }
+    }
+  }
+  return s;
+}
+#endif  // SUF_HAVE_CUDA
 
 // Simple Beaver mul task (secret x secret). Uses OpenCollector if provided,
 // otherwise falls back to direct channel opens.
@@ -176,6 +275,8 @@ class MulTask final : public detail::PhaseTask {
         [[fallthrough]];
       }
       case St::Finalize: {
+        const bool prof = runtime::bench::online_profiling_enabled();
+        const auto t0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         bool use_gpu = false;
 #ifdef SUF_HAVE_CUDA
         const bool gpu_backend =
@@ -194,48 +295,20 @@ class MulTask final : public detail::PhaseTask {
               stream = reinterpret_cast<cudaStream_t>(staged->device_stream());
             }
           }
+          if (!stream && R.cuda_stream) {
+            stream = reinterpret_cast<cudaStream_t>(R.cuda_stream);
+          }
           size_t n = x_.size();
           size_t bytes = n * sizeof(uint64_t);
-          uint64_t* d_out = nullptr;
-          uint64_t* d_open_tmp = nullptr;
-          void* d_tri = nullptr;
-          auto do_malloc = [&](uint64_t** p, size_t sz) {
-            cudaError_t st = cudaSuccess;
-#if defined(CUDART_VERSION) && (CUDART_VERSION >= 11020)
-            st = cudaMallocAsync(reinterpret_cast<void**>(p), sz, stream ? stream : 0);
-            if (st == cudaErrorNotSupported) {
-              // Some runtimes (or vGPU configurations) may not support async alloc.
-              (void)cudaGetLastError();  // clear sticky "not supported" for later cudaGetLastError() checks
-              st = cudaMalloc(reinterpret_cast<void**>(p), sz);
-            }
-#else
-            (void)stream;
-            st = cudaMalloc(reinterpret_cast<void**>(p), sz);
-#endif
-            if (st != cudaSuccess) {
-              throw std::runtime_error(std::string("MulTask cudaMalloc failed: ") +
-                                       cudaGetErrorString(st));
-            }
-          };
-          auto do_free = [&](uint64_t* p) {
-            if (!p) return;
-            cudaError_t st = cudaSuccess;
-#if defined(CUDART_VERSION) && (CUDART_VERSION >= 11020)
-            st = cudaFreeAsync(p, stream ? stream : 0);
-            if (st == cudaErrorNotSupported) {
-              (void)cudaGetLastError();  // clear sticky "not supported"
-              st = cudaFree(p);
-            }
-#else
-            (void)stream;
-            st = cudaFree(p);
-#endif
-            if (st != cudaSuccess) {
-              throw std::runtime_error(std::string("MulTask cudaFree failed: ") +
-                                       cudaGetErrorString(st));
-            }
-          };
-          do_malloc(&d_out, bytes);
+          auto& sc = beaver_mul_scratch();
+          std::lock_guard<std::mutex> lk(sc.mu);
+          if (!sc.ready) cudaEventCreateWithFlags(&sc.ready, cudaEventDisableTiming);
+          if (sc.ready && sc.ready_recorded) {
+            cudaStreamWaitEvent(stream, sc.ready, 0);
+          }
+          if (!sc.ensure_alloc(bytes, reinterpret_cast<void**>(&sc.d_out), sc.out_cap)) {
+            throw std::runtime_error("MulTask: beaver GPU alloc failed");
+          }
           const uint64_t* d_open = d_opened_;
           if (!d_open || d_opened_words_ < 2 * n) {
             if (opened_.empty()) {
@@ -244,40 +317,28 @@ class MulTask final : public detail::PhaseTask {
               if (v.size() != 2 * n) throw std::runtime_error("MulTask: opened size mismatch");
               opened_.assign(v.begin(), v.end());
             }
-            do_malloc(&d_open_tmp, 2 * bytes);
-            cudaMemcpyAsync(d_open_tmp, opened_.data(), 2 * bytes, cudaMemcpyHostToDevice, stream);
-            d_open = d_open_tmp;
-          }
-          {
-            cudaError_t st = cudaMalloc(&d_tri, n * sizeof(proto::BeaverTriple64Share));
-            if (st != cudaSuccess) {
-              throw std::runtime_error(std::string("MulTask cudaMalloc(d_tri) failed: ") +
-                                       cudaGetErrorString(st));
+            if (!sc.ensure_alloc(2 * bytes, reinterpret_cast<void**>(&sc.d_open), sc.open_cap)) {
+              throw std::runtime_error("MulTask: beaver GPU open alloc failed");
             }
+            cudaMemcpyAsync(sc.d_open, opened_.data(), 2 * bytes, cudaMemcpyHostToDevice, stream);
+            d_open = sc.d_open;
           }
-          {
-            cudaError_t st = cudaMemcpyAsync(d_tri,
-                                             triples_.data(),
-                                             n * sizeof(proto::BeaverTriple64Share),
-                                             cudaMemcpyHostToDevice,
-                                             stream);
-            if (st != cudaSuccess) {
-              throw std::runtime_error(std::string("MulTask cudaMemcpyAsync(triples) failed: ") +
-                                       cudaGetErrorString(st));
-            }
-          }
+          const size_t tri_bytes = n * sizeof(proto::BeaverTriple64Share);
+          void* d_tri = sc.cached_upload_triples(triples_.data(), tri_bytes, stream);
+          if (!d_tri) throw std::runtime_error("MulTask: beaver GPU triple upload failed");
           launch_beaver_mul_aos_kernel(R.party,
                                        d_tri,
                                        d_open,
                                        d_open + n,
-                                       d_out,
+                                       sc.d_out,
                                        n,
                                        stream);
-          cudaMemcpyAsync(out_.data(), d_out, bytes, cudaMemcpyDeviceToHost, stream);
+          cudaMemcpyAsync(out_.data(), sc.d_out, bytes, cudaMemcpyDeviceToHost, stream);
+          if (sc.ready) {
+            cudaEventRecord(sc.ready, stream);
+            sc.ready_recorded = true;
+          }
           cudaStreamSynchronize(stream);
-          if (d_open_tmp) do_free(d_open_tmp);
-          if (d_tri) cudaFree(d_tri);
-          do_free(d_out);
 #else
           (void)use_gpu;
 #endif
@@ -300,6 +361,15 @@ class MulTask final : public detail::PhaseTask {
               z = proto::add_mod(z, proto::mul_mod(d, e));
             }
             out_[i] = z;
+          }
+        }
+        if (prof) {
+          const auto t1 = std::chrono::steady_clock::now();
+          if (t1 > t0) {
+            runtime::bench::add_online_ns(
+                runtime::bench::OnlineTimeKind::BeaverMulTotal,
+                static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()));
           }
         }
         st_ = St::Done;
@@ -1640,6 +1710,102 @@ class RowBroadcastTripleProvider {
   virtual RowBroadcastTriple reserve_mul(int rows, int cols) = 0;
 };
 
+#ifdef SUF_HAVE_CUDA
+struct RowBroadcastMulScratch {
+  struct HostBufKey {
+    const void* host = nullptr;
+    size_t bytes = 0;
+    bool operator==(const HostBufKey& o) const { return host == o.host && bytes == o.bytes; }
+  };
+  struct HostBufKeyHash {
+    size_t operator()(const HostBufKey& k) const noexcept {
+      size_t h = 1469598103934665603ull;
+      auto mix = [&](size_t v) {
+        h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
+      };
+      mix(reinterpret_cast<size_t>(k.host));
+      mix(static_cast<size_t>(k.bytes));
+      return h;
+    }
+  };
+  struct DevBuf {
+    void* d = nullptr;
+    size_t bytes = 0;
+  };
+
+  uint64_t* dD = nullptr;
+  uint64_t* dE = nullptr;
+  uint64_t* dOut = nullptr;
+  int* dValid = nullptr;
+  size_t dD_cap = 0;
+  size_t dE_cap = 0;
+  size_t dOut_cap = 0;
+  size_t dValid_cap = 0;
+
+  std::unordered_map<HostBufKey, DevBuf, HostBufKeyHash> cache;
+  size_t cache_bytes = 0;
+  size_t cache_max_bytes = size_t(1024ull) * 1024ull * 1024ull;
+
+  cudaEvent_t ready = nullptr;
+  bool ready_recorded = false;
+  std::mutex mu;
+
+  bool ensure_alloc(size_t bytes, void** ptr, size_t& cap) {
+    if (bytes <= cap) return true;
+    if (*ptr) cudaFree(*ptr);
+    if (cudaMalloc(ptr, bytes) != cudaSuccess) {
+      *ptr = nullptr;
+      cap = 0;
+      return false;
+    }
+    cap = bytes;
+    return true;
+  }
+
+  void clear_cache() {
+    for (auto& kv : cache) {
+      if (kv.second.d) cudaFree(kv.second.d);
+    }
+    cache.clear();
+    cache_bytes = 0;
+  }
+
+  void* cached_upload(const void* host, size_t bytes, cudaStream_t stream) {
+    if (!host || bytes == 0) return nullptr;
+    HostBufKey key{host, bytes};
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second.d;
+    if (cache_max_bytes > 0 && bytes > cache_max_bytes) return nullptr;
+    if (cache_max_bytes > 0 && cache_bytes + bytes > cache_max_bytes) {
+      clear_cache();
+    }
+    void* d = nullptr;
+    if (cudaMalloc(&d, bytes) != cudaSuccess) return nullptr;
+    if (cudaMemcpyAsync(d, host, bytes, cudaMemcpyHostToDevice, stream) != cudaSuccess) {
+      cudaFree(d);
+      return nullptr;
+    }
+    cache.emplace(key, DevBuf{d, bytes});
+    cache_bytes += bytes;
+    return d;
+  }
+};
+
+inline RowBroadcastMulScratch& row_broadcast_mul_scratch() {
+  static RowBroadcastMulScratch s;
+  static bool inited = false;
+  if (!inited) {
+    inited = true;
+    const char* env = std::getenv("SUF_ROW_BROADCAST_MUL_CACHE_MAX_MB");
+    if (env && *env) {
+      unsigned long long mb = std::strtoull(env, nullptr, 10);
+      if (mb > 0) s.cache_max_bytes = static_cast<size_t>(mb) * 1024ull * 1024ull;
+    }
+  }
+  return s;
+}
+#endif  // SUF_HAVE_CUDA
+
 // Mul exp[row,col] * inv[row] using row-broadcast triples to cut open size.
 class MulRowBroadcastTask final : public detail::PhaseTask {
  public:
@@ -1723,6 +1889,8 @@ class MulRowBroadcastTask final : public detail::PhaseTask {
       }
       case St::WaitOpen: {
         if (!R.opens->ready(h_open_)) return detail::Need::Open;
+        const bool prof = runtime::bench::online_profiling_enabled();
+        const auto t0 = prof ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         const size_t off_e = (ragged_ ? active_elems_ : mat_.size());
         if (h_open_.len != off_e + static_cast<size_t>(rows_)) {
           throw std::runtime_error("MulRowBroadcastTask: opened mismatch");
@@ -1757,6 +1925,15 @@ class MulRowBroadcastTask final : public detail::PhaseTask {
               out_[static_cast<size_t>(r * cols_ + c)] = 0;
             }
           }
+          if (prof) {
+            const auto t1 = std::chrono::steady_clock::now();
+            if (t1 > t0) {
+              runtime::bench::add_online_ns(
+                  runtime::bench::OnlineTimeKind::RowBroadcastMulTotal,
+                  static_cast<uint64_t>(
+                      std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()));
+            }
+          }
           st_ = St::Done;
           return detail::Need::None;
         }
@@ -1778,55 +1955,100 @@ class MulRowBroadcastTask final : public detail::PhaseTask {
               stream = reinterpret_cast<cudaStream_t>(staged->device_stream());
             }
           }
+          if (!stream && R.cuda_stream) {
+            stream = reinterpret_cast<cudaStream_t>(R.cuda_stream);
+          }
           size_t elems = mat_.size();
           size_t bytes_mat = elems * sizeof(uint64_t);
           const size_t bytes_rows = static_cast<size_t>(rows_) * sizeof(uint64_t);
+          const size_t bytes_valid = static_cast<size_t>(rows_) * sizeof(int);
+
           const uint64_t* d_opened = R.opens->view_device_u64(h_open_);
           const uint64_t* d_d_open = nullptr;
           const uint64_t* d_e_open_rows = nullptr;
+          uint64_t* d_d_scratch = nullptr;
+          uint64_t* d_e_scratch = nullptr;
           if (d_opened) {
             d_d_open = d_opened;
             d_e_open_rows = d_opened + off_e;
           }
-          uint64_t *d_d = nullptr, *d_a = nullptr, *d_b_rows = nullptr, *d_c = nullptr, *d_e_rows = nullptr, *d_out = nullptr;
-          int* d_valid = nullptr;
-          bool own_d_d = false;
-          bool own_d_e = false;
+
+          auto& sc = row_broadcast_mul_scratch();
+          std::lock_guard<std::mutex> lk(sc.mu);
+          if (!sc.ready) cudaEventCreateWithFlags(&sc.ready, cudaEventDisableTiming);
+          if (sc.ready && sc.ready_recorded) {
+            cudaStreamWaitEvent(stream, sc.ready, 0);
+          }
+
           if (!d_d_open) {
-            cudaMalloc(&d_d, bytes_mat);
-            own_d_d = true;
-            d_d_open = d_d;
+            if (!sc.ensure_alloc(bytes_mat, reinterpret_cast<void**>(&sc.dD), sc.dD_cap)) {
+              throw std::runtime_error("MulRowBroadcastTask: GPU alloc failed (dD)");
+            }
+            d_d_scratch = sc.dD;
+            d_d_open = d_d_scratch;
           }
-          cudaMalloc(&d_a, bytes_mat);
-          cudaMalloc(&d_b_rows, bytes_rows);
-          cudaMalloc(&d_c, bytes_mat);
           if (!d_e_open_rows) {
-            cudaMalloc(&d_e_rows, bytes_rows);
-            own_d_e = true;
-            d_e_open_rows = d_e_rows;
+            if (!sc.ensure_alloc(bytes_rows, reinterpret_cast<void**>(&sc.dE), sc.dE_cap)) {
+              throw std::runtime_error("MulRowBroadcastTask: GPU alloc failed (dE)");
+            }
+            d_e_scratch = sc.dE;
+            d_e_open_rows = d_e_scratch;
           }
-          cudaMalloc(&d_out, bytes_mat);
+
+          const uint64_t* d_a = static_cast<const uint64_t*>(
+              sc.cached_upload(triple_.A.data(), bytes_mat, stream));
+          const uint64_t* d_c = static_cast<const uint64_t*>(
+              sc.cached_upload(triple_.C.data(), bytes_mat, stream));
+          const uint64_t* d_b_rows = static_cast<const uint64_t*>(
+              sc.cached_upload(triple_.B.data(), bytes_rows, stream));
+          if (!d_a || !d_c || !d_b_rows) {
+            throw std::runtime_error("MulRowBroadcastTask: GPU triple upload failed");
+          }
+
+          int* d_valid = nullptr;
           if (valid_lens_.size() != 0) {
-            cudaMalloc(&d_valid, static_cast<size_t>(rows_) * sizeof(int));
-            cudaMemcpyAsync(d_valid, valid_lens_.data(),
-                            static_cast<size_t>(rows_) * sizeof(int),
-                            cudaMemcpyHostToDevice, stream);
+            if (!sc.ensure_alloc(bytes_valid, reinterpret_cast<void**>(&sc.dValid), sc.dValid_cap)) {
+              throw std::runtime_error("MulRowBroadcastTask: GPU alloc failed (dValid)");
+            }
+            d_valid = sc.dValid;
+            cudaMemcpyAsync(d_valid,
+                            valid_lens_.data(),
+                            bytes_valid,
+                            cudaMemcpyHostToDevice,
+                            stream);
           }
+
           if (!d_opened) {
             auto opened = R.opens->view_u64(h_open_);
             if (opened.size() != mat_.size() + static_cast<size_t>(rows_)) {
               throw std::runtime_error("MulRowBroadcastTask: opened mismatch");
             }
-            cudaMemcpyAsync(d_d, opened.data(), bytes_mat, cudaMemcpyHostToDevice, stream);
-            std::vector<uint64_t> e_rows(static_cast<size_t>(rows_), 0);
-            for (int r = 0; r < rows_; ++r) {
-              e_rows[static_cast<size_t>(r)] = opened[off_e + static_cast<size_t>(r)];
-            }
-            cudaMemcpyAsync(d_e_rows, e_rows.data(), bytes_rows, cudaMemcpyHostToDevice, stream);
+            cudaMemcpyAsync(d_d_scratch,
+                            opened.data(),
+                            bytes_mat,
+                            cudaMemcpyHostToDevice,
+                            stream);
+            cudaMemcpyAsync(d_e_scratch,
+                            opened.data() + off_e,
+                            bytes_rows,
+                            cudaMemcpyHostToDevice,
+                            stream);
           }
-          cudaMemcpyAsync(d_a, triple_.A.data(), bytes_mat, cudaMemcpyHostToDevice, stream);
-          cudaMemcpyAsync(d_c, triple_.C.data(), bytes_mat, cudaMemcpyHostToDevice, stream);
-          cudaMemcpyAsync(d_b_rows, triple_.B.data(), bytes_rows, cudaMemcpyHostToDevice, stream);
+
+          const bool keep_device_out = (R.device_pipeline && device_only_);
+          uint64_t* d_out = nullptr;
+          if (keep_device_out) {
+            cudaError_t st = cudaMalloc(reinterpret_cast<void**>(&d_out), bytes_mat);
+            if (st != cudaSuccess) {
+              throw std::runtime_error("MulRowBroadcastTask: cudaMalloc(d_out) failed");
+            }
+          } else {
+            if (!sc.ensure_alloc(bytes_mat, reinterpret_cast<void**>(&sc.dOut), sc.dOut_cap)) {
+              throw std::runtime_error("MulRowBroadcastTask: GPU alloc failed (dOut)");
+            }
+            d_out = sc.dOut;
+          }
+
           launch_row_broadcast_mul_kernel(R.party,
                                           d_a,
                                           d_b_rows,
@@ -1839,7 +2061,6 @@ class MulRowBroadcastTask final : public detail::PhaseTask {
                                           d_out,
                                           elems,
                                           stream);
-          const bool keep_device_out = (R.device_pipeline && device_only_);
           if (!keep_device_out) {
             cudaMemcpyAsync(out_.data(), d_out, bytes_mat, cudaMemcpyDeviceToHost, stream);
             cudaStreamSynchronize(stream);
@@ -1848,14 +2069,20 @@ class MulRowBroadcastTask final : public detail::PhaseTask {
             d_out_elems_ = elems;
             d_out = nullptr;
           }
-          if (own_d_d && d_d) cudaFree(d_d);
-          if (d_a) cudaFree(d_a);
-          if (d_b_rows) cudaFree(d_b_rows);
-          if (d_c) cudaFree(d_c);
-          if (own_d_e && d_e_rows) cudaFree(d_e_rows);
-          if (d_valid) cudaFree(d_valid);
-          if (d_out) cudaFree(d_out);
+          if (sc.ready) {
+            cudaEventRecord(sc.ready, stream);
+            sc.ready_recorded = true;
+          }
           st_ = St::Done;
+          if (prof) {
+            const auto t1 = std::chrono::steady_clock::now();
+            if (t1 > t0) {
+              runtime::bench::add_online_ns(
+                  runtime::bench::OnlineTimeKind::RowBroadcastMulTotal,
+                  static_cast<uint64_t>(
+                      std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()));
+            }
+          }
           return detail::Need::None;
 #endif
         }
@@ -1881,6 +2108,15 @@ class MulRowBroadcastTask final : public detail::PhaseTask {
               z = proto::add_mod(z, proto::mul_mod(d, e));
             }
             out_[idx] = z;
+          }
+        }
+        if (prof) {
+          const auto t1 = std::chrono::steady_clock::now();
+          if (t1 > t0) {
+            runtime::bench::add_online_ns(
+                runtime::bench::OnlineTimeKind::RowBroadcastMulTotal,
+                static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count()));
           }
         }
         st_ = St::Done;
@@ -2483,9 +2719,9 @@ class CubicPolyTask final : public detail::PhaseTask {
     if (!key_) {
       key_ = (R.party == 0) ? bundle_.key0 : bundle_.key1;
       if (!key_) throw std::runtime_error("CubicPolyTask: missing party key");
-      const bool direct_payload_only =
+      direct_payload_only_ =
           (key_->compiled.r == 1 && key_->compiled.degree == 0 && key_->compiled.ell == 0);
-      if (!direct_payload_only) {
+      if (!direct_payload_only_) {
         triple_span_ = std::span<const proto::BeaverTriple64Share>(key_->triples);
       }
       if (std::getenv("SUF_CUBIC_KEY_TRACE")) {
@@ -2503,7 +2739,7 @@ class CubicPolyTask final : public detail::PhaseTask {
                        key_->triples.size());
         }
       }
-      if (!direct_payload_only) {
+      if (!direct_payload_only_) {
         if (!bundle_.trunc_f) {
           throw std::runtime_error("CubicPolyTask: missing truncation bundle");
         }
@@ -2845,6 +3081,7 @@ class CubicPolyTask final : public detail::PhaseTask {
 
   const CubicPolyBundle bundle_;
   const gates::CompositePartyKey* key_ = nullptr;
+  bool direct_payload_only_ = false;
   std::span<const uint64_t> x_;
   std::span<uint64_t> out_;
 
